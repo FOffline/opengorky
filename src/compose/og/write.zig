@@ -5,7 +5,8 @@
 //! reader's rule: a block's kind and name pick its file (`characters/<name>.ogs`,
 //! `battles/<name>/battle.ogs`…), a row's table its rules file, code its namespace; the
 //! reader loads every text into one `ogs/link.zig Program` whatever the file. A
-//! location's block goes to `level.ogs`, its objects to `objects.ogs` beside it, its own
+//! location's block goes to `level.ogs`, its objects to `objects.ogs` beside it (its walk
+//! paths to `paths.ogs`), its own
 //! code (`fn`s, `injects`) to `logic.ogs` (the same block in several texts:
 //! script/ogs/levels.zig makes them one); a battle is one `battle.ogs`: its block whole
 //! (fields, objects, code) and its namespace's components.
@@ -65,6 +66,8 @@ pub fn layout(a: Allocator, p: Project) Error![]File {
     for (p.modules) |m| for (m.entities) |e| if (isLevel(e.kind) and e.children.len == 0) try heads.put(a, try std.fmt.allocPrint(a, "{s} {s}", .{ e.kind, e.name }), {});
     // A level's own code: its `logic.ogs` (its own component there too, not printed apart).
     var level_code: std.StringHashMapUnmanaged([]const u8) = .empty;
+    // A level's nested blocks' own code: the file their block went to.
+    var nested_own: std.AutoHashMapUnmanaged(*const ir.Component, []const u8) = .empty;
     for (p.modules) |m| for (m.entities) |e| if (isLevel(e.kind) and e.own != null)
         try level_code.put(a, try ownerKey(a, m.path, e.name), if (isBattle(e.kind)) try blockPath(a, e) else try std.fmt.allocPrint(a, "{s}/logic.ogs", .{std.fs.path.dirname(try blockPath(a, e)).?}));
     for (p.modules) |m| {
@@ -72,6 +75,7 @@ pub fn layout(a: Allocator, p: Project) Error![]File {
             const path = try blockPath(a, e);
             // A battle whole in its battle.ogs.
             if (!isLevel(e.kind) or isBattle(e.kind)) {
+                for (e.children) |c| try nestedOwn(a, &nested_own, c, path);
                 try (try b.mod(path, m)).ents.append(a, e);
                 continue;
             }
@@ -87,14 +91,27 @@ pub fn layout(a: Allocator, p: Project) Error![]File {
             head.children = &.{};
             const own = e.fields.len + e.vars.len + e.attach.len > 0 or e.base.len > 0;
             if (own or !heads.contains(try std.fmt.allocPrint(a, "{s} {s}", .{ e.kind, e.name }))) try (try b.mod(path, m)).ents.append(a, head);
-            const objects = try std.fmt.allocPrint(a, "{s}/objects.ogs", .{std.fs.path.dirname(path).?});
-            try (try b.mod(objects, m)).ents.append(a, .{ .kind = e.kind, .name = e.name, .fields = &.{}, .attach = &.{}, .children = e.children, .line = e.line });
+            // Its walk paths (`path deska { … }`) in `paths.ogs`, the other objects in `objects.ogs`.
+            var objs: std.ArrayList(ir.Entity) = .empty;
+            var paths: std.ArrayList(ir.Entity) = .empty;
+            for (e.children) |c| try (if (std.mem.eql(u8, c.kind, "path")) &paths else &objs).append(a, c);
+            for ([_]struct { []const u8, []const ir.Entity }{ .{ "objects.ogs", objs.items }, .{ "paths.ogs", paths.items } }) |part| if (part[1].len > 0) {
+                const file = try std.fmt.allocPrint(a, "{s}/{s}", .{ std.fs.path.dirname(path).?, part[0] });
+                for (part[1]) |c| try nestedOwn(a, &nested_own, c, file);
+                try (try b.mod(file, m)).ents.append(a, .{ .kind = e.kind, .name = e.name, .fields = &.{}, .attach = &.{}, .children = part[1], .line = e.line });
+            };
         }
         for (m.rows) |r| try (try b.mod(rowPath(r), m)).rows.append(a, r);
         for (m.traits) |t| try (try b.mod(owners.get(try ownerKey(a, m.path, t.name)) orelse try codePath(a, m.path, null), m)).traits.append(a, t);
         for (m.enums) |e| try (try b.mod(try codePath(a, m.path, null), m)).enums.append(a, e);
         for (m.structs) |x| try (try b.mod(try codePath(a, m.path, null), m)).structs.append(a, x);
         for (m.components) |c| {
+            // A nested block's own code (`04_city/drabinka`, parser block_path): its block's
+            // file (printed in the block).
+            if (c.own) if (nested_own.get(c)) |file| {
+                try (try b.mod(file, m)).comps.append(a, c);
+                continue;
+            };
             // A block's own code goes to its block's file (the printer writes it in the block).
             const game = for (c.hosts) |h| {
                 if (std.mem.eql(u8, h, "game")) break true;
@@ -249,6 +266,12 @@ fn codePath(a: Allocator, ns: []const u8, component: ?[]const u8) Error![]const 
 
 fn ownerKey(a: Allocator, ns: []const u8, name: []const u8) Allocator.Error![]const u8 {
     return std.ascii.allocLowerString(a, try std.fmt.allocPrint(a, "{s}\x00{s}", .{ ns, name }));
+}
+
+/// Block `e`'s own code and its nested blocks', in `file` (where `e` is written).
+fn nestedOwn(a: Allocator, map: *std.AutoHashMapUnmanaged(*const ir.Component, []const u8), e: ir.Entity, file: []const u8) Allocator.Error!void {
+    if (e.own) |o| try map.put(a, o, file);
+    for (e.children) |c| try nestedOwn(a, map, c, file);
 }
 
 /// A component name whose own file would be one of the level's (`Logic` of an older project, an object named

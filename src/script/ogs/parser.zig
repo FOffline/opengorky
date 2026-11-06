@@ -83,6 +83,9 @@ const Parser = struct {
     hosted: bool = false,
     /// Parsing data: a word or a path is an `ir.Expr.Kind.word`.
     in_data: bool = false,
+    /// The blocks a block is nested in (`04_city`): its own code's component is named
+    /// `04_city/drabinka` (two levels' `path drabinka` are two components).
+    block_path: []const u8 = "",
     /// Parsing a trait's methods; the last one had no body (`fn f(a);`).
     in_trait: bool = false,
     declared_only: bool = false,
@@ -517,6 +520,10 @@ const Parser = struct {
         const outer = self.in_data;
         self.in_data = true;
         defer self.in_data = outer;
+        const own_name = if (self.block_path.len > 0) try std.fmt.allocPrint(self.a, "{s}/{s}", .{ self.block_path, ename }) else ename;
+        const outer_path = self.block_path;
+        self.block_path = own_name;
+        defer self.block_path = outer_path;
         while (self.tok.tag != .r_brace) {
             if (try self.eat(.semicolon)) continue;
             const l = self.tok.line;
@@ -609,7 +616,7 @@ const Parser = struct {
         if (own) |c| {
             // For its kind's host (a hero's code is a fighter's).
             const host = try self.a.dupe([]const u8, &.{if (std.mem.eql(u8, kind, "hero")) "fighter" else kind});
-            c.* = .{ .name = ename, .module = self.module_path, .hosts = host, .traits = traits.items, .fields = &.{}, .methods = own_fns.items, .line = line, .span = .{ .start = start, .end = end }, .own = true };
+            c.* = .{ .name = own_name, .module = self.module_path, .hosts = host, .traits = traits.items, .fields = &.{}, .methods = own_fns.items, .line = line, .span = .{ .start = start, .end = end }, .own = true };
             try self.own.append(self.a, c);
         }
         return .{ .kind = kind, .name = ename, .base = base, .fields = fields.items, .vars = vars.items, .attach = attach.items, .children = children.items, .rows = cmds.items, .own = own, .line = line, .span = .{ .start = start, .end = end } };

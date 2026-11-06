@@ -166,13 +166,15 @@ pub fn execActor(self: *Runner, w: *World, c: scriptlet.Command, n: []const u8) 
         // same classic_id (0x47d880 searches before the owner changes, so the item itself is
         // never found wherever it is in the list) and the item is deleted (+0x60);
         // anything else goes into the backpack (place 1) with the owner (0x4adad0).
+        // A hero without a pack of that ammo (an OpenGorky project's: no empty start packs,
+        // compose/convert.zig dropEmptyPacks) gets the item itself, as anything else.
         const o = w.rt.findObject(c.arg(1).str()) orelse return true;
-        if (inventory.item.typeOf(o) == .ammo) {
-            if (inventory.ammo.heroAmmo(w, c.arg(0).str(), fields.classicId(o), o)) |pack| fields.setCounter(pack, fields.counter(pack) + fields.counter(o));
+        if (inventory.item.typeOf(o) == .ammo) if (inventory.ammo.heroAmmo(w, c.arg(0).str(), fields.classicId(o), o)) |pack| {
+            fields.setCounter(pack, fields.counter(pack) + fields.counter(o));
             World.nativeOf(o).deleted = true;
             o.enabled = false;
             return true;
-        }
+        };
         fields.setOwner(o, try w.rt.arena().dupe(u8, c.arg(0).str()));
         inventory.item.setPlace(o, .backpack);
         return true;

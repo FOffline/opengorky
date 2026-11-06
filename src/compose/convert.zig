@@ -2350,6 +2350,8 @@ const Conv = struct {
                 try self.addObject(&k.rt, &m, cls, e.name, e.name[0 .. e.name.len - ext.len], "fighter", false, &morphs.writer, 0);
                 continue;
             }
+            // A path's script (`deska.pth`): with its path, below (`paths`).
+            if (std.ascii.eqlIgnoreCase(ext, ".pth")) continue;
             if (state_object.kindOf(ext) == .other) continue;
             const cls = k.rt.loadClass(e.name) catch |err| {
                 try self.line("{s}: {s}: {t}", .{ level, e.name, err });
@@ -2365,10 +2367,54 @@ const Conv = struct {
             if (std.ascii.eqlIgnoreCase(ext, ".hro")) try self.heroes.put(self.a, try instKey(self.a, level, oname), {});
             try self.addObject(&k.rt, &m, cls, e.name, oname, bk, false, &inner.writer, 1);
         }
+        try self.walkPaths(k, level, &inner.writer);
         // The level's block: its own fields (head, without its closing brace), then the objects.
         const h = head.written();
         try m.data.writer.print("{s}{s}}}\n{s}", .{ h[0 .. h.len - 2], inner.written(), morphs.written() });
         try self.addModule(&m);
+    }
+
+    /// The level's walk paths (`<level>.ap`) as its `path` blocks (into `w`, written to the
+    /// level's `paths.ogs`): `link`, `points` as PathPoint records and, where the path has a
+    /// script (`<name>.pth`), its code in the block (NodeResponse → OnNode; world/start.zig
+    /// pathBlock).
+    fn walkPaths(self: *Conv, k: *Kept, level: []const u8, w: *Writer) !void {
+        const a = self.a;
+        const ap = for (k.arc.entries) |*e| {
+            if (std.ascii.eqlIgnoreCase(std.fs.path.extension(e.name), ".ap")) break e;
+        } else return;
+        const text = try k.arc.readAlloc(self.io, a, ap);
+        const ps = @import("../loaders.zig").map.parsePaths(a, text) catch |err| return self.line("{s}: {s}: {t}", .{ level, ap.name, err });
+        for (ps) |p| {
+            try indent(w, 1);
+            try w.print("path {s} {{\n", .{try blockName(a, p.name)});
+            try indent(w, 2);
+            try w.print("link = [{d}, {d}, {d}, {d}];\n", .{ p.link[0], p.link[1], p.link[2], p.link[3] });
+            try indent(w, 2);
+            try w.writeAll("points = [");
+            for (p.points, 0..) |pt, i| {
+                try w.print("{s}PathPoint(x = {d}, y = {d}, angle = {d}", .{ if (i > 0) ", " else "", pt[0], pt[1], pt[2] });
+                // A float literal (`0.0`, not `0`).
+                if (@floor(pt[2]) == pt[2]) try w.writeAll(".0");
+                try w.print(", z = {d})", .{pt[3]});
+            }
+            try w.writeAll("];\n");
+            // Its script: its methods in the block.
+            var nb: [128]u8 = undefined;
+            const file = try std.fmt.bufPrint(&nb, "{s}.pth", .{p.name});
+            const has = for (k.arc.entries) |e| {
+                if (std.ascii.eqlIgnoreCase(e.name, file)) break true;
+            } else false;
+            if (has) if (k.rt.loadClass(file)) |cls| {
+                var oc = try ogsify.classOf(a, &k.rt, cls, file, p.name, "path", false);
+                var stats: ogsify.Stats = .{};
+                const comp = try pruneDead(a, try ogsify.component(a, &oc, k.rt.builtinNames(), &stats), &self.report);
+                if (comp.fields.len > 0) try self.line("{s}: {s}: its variables left out", .{ level, file });
+                for (comp.methods) |f| try print_ogs.function(w, f, 2);
+            } else |err| try self.line("{s}: {s}: {t}", .{ level, file, err });
+            try indent(w, 1);
+            try w.writeAll("}\n");
+        }
     }
 
     /// Object `name` of class `cls` (file `file`) as block `kind` into `w` (at `depth`),

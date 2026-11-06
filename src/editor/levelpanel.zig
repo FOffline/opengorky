@@ -188,11 +188,11 @@ fn ogBlocks(app: *App, a: Allocator, d: *level.Doc) void {
 /// object's or a trigger's own), each opening in the code editor (the level's tab kept).
 fn filesBlock(app: *App, a: Allocator, d: *level.Doc) void {
     const list = @import("areas.zig").levelTexts(app, d, a);
-    // The level's own parts first (its block, objects, Logic), then the rest by name.
+    // The level's own parts first (its block, objects, Logic, walk paths), then the rest by name.
     const rank = struct {
         fn of(ap: *App, f: usize) u8 {
             const n = std.fs.path.basename(ap.store.files.items[f].entry);
-            for ([_][]const u8{ "level.ogs", "battle.ogs", "objects.ogs", "logic.ogs" }, 0..) |x, i| if (std.mem.eql(u8, n, x)) return @intCast(i);
+            for ([_][]const u8{ "level.ogs", "battle.ogs", "objects.ogs", "logic.ogs", "paths.ogs" }, 0..) |x, i| if (std.mem.eql(u8, n, x)) return @intCast(i);
             return 9;
         }
     };

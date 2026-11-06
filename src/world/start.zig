@@ -97,6 +97,8 @@ fn addChildrenAs(self: *World, m: *const ir.Module, e: *const ir.Entity, owner: 
     var list: std.ArrayList(Nested) = .empty;
     try nestedOf(self, a, m, e, &list, 0);
     for (list.items) |x| {
+        // A path's script (`path deska { attach … }`): made at its first node (pathBlock).
+        if (std.mem.eql(u8, x.e.kind, "path")) continue;
         // An archetype's block is the owner's own object: `grandma_child1_gun` of `gun`.
         const name = if (x.inherited or inherited) try std.fmt.allocPrint(a, "{s}_{s}", .{ owner, x.e.name }) else "";
         // A level's own weapon or item lies in it, nobody's (its `Owner` its own field).
@@ -309,6 +311,25 @@ fn testKit(self: *World) void {
             break;
         };
     }
+}
+
+/// OpenGorky: the script object of path `name` (`path deska { attach … }` in the level's
+/// block, a Classic `<name>.pth`), its components attached; null: the level has none.
+pub fn pathBlock(self: *World, name: []const u8) !?*Object {
+    const lv = self.rt.ogs.blocks.get(self.res.source.level_block) orelse return null;
+    const m = moduleOf(self, lv) orelse return null;
+    const e = for (lv.children) |*c| {
+        if (std.mem.eql(u8, c.kind, "path") and std.ascii.eqlIgnoreCase(c.name, name)) break c;
+    } else return null;
+    const a = self.rt.arena();
+    const cls = try a.create(Class);
+    cls.* = .{ .name = "og:path", .parent = null, .ident = try std.fmt.allocPrint(a, "{s}/{s}", .{ self.level_name, e.name }) };
+    const o = try self.addObject(try std.fmt.allocPrint(a, "{s}.pth", .{e.name}), cls, .{ .kind = .other });
+    self.rt.applyEntity(o, m, e.*) catch |err| switch (err) {
+        error.ScriptFault => std.log.warn("{s}: {f}", .{ o.name, self.rt.fault }),
+        else => return err,
+    };
+    return o;
 }
 
 /// Object kinds by block kind, as the Classic file extensions make them.

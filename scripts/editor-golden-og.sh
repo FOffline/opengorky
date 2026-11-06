@@ -152,10 +152,13 @@ grep -q 'if (ready_trigger1 and hero::AnyInArea("trigger1")) {' "$S/logic.ogs" &
 [ -s "$TMP/cv/src/scenes/port-deska2.ogs" ] && [ ! -e "$TMP/cv/src/scenes/port-deska.ogs" ] && grep -rq '~e"port-deska2"' "$Lc/01_port" &&
   ! grep -rq '"port-deska"' "$TMP/cv/src" && echo "OK   scene rename cv" || fail "scene rename cv"
 grep -q 'Point(name = "p1", x = 1500.0, y = 300.0, angle = 0.0)' "$TMP/cv/src/scenes/port-arriv_at_port.ogs" && echo "OK   scene point cv" || fail "scene point cv"
-for f in levels/01_port_store/background.jpg levels/01_port_store/background.zbf levels/01_port/paths.ap; do
+for f in levels/01_port_store/background.jpg levels/01_port_store/background.zbf; do
   [ -s "$TMP/cv/src/assets/$f" ] || fail "level assets cv: no src/assets/$f"
 done
-[ -s "$TMP/cv/src/assets/levels/01_port/paths.ap" ] && echo "OK   level assets cv"
+# The paths are OG Script (the new one with its point in paths.ogs, the converted ones kept), no .ap.
+grep -q '^    path path1 {' "$TMP/cv/src/locations/01_port/paths.ogs" && grep -q 'PathPoint(x = 900, y = 900' "$TMP/cv/src/locations/01_port/paths.ogs" &&
+  grep -q '^    path deska {' "$TMP/cv/src/locations/01_port/paths.ogs" && [ ! -e "$TMP/cv/src/assets/levels/01_port/paths.ap" ] &&
+  echo "OK   level assets cv" || fail "level assets cv: paths.ogs"
 for p in tp cv; do
   grep -qx '.og/' "$TMP/$p/.gitignore" && echo "OK   gitignore $p" || fail "gitignore $p: no .og/"
 done

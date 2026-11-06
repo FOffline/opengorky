@@ -4,6 +4,8 @@
 //! added by clicks, a path's cells set, paths made and deleted; each path's `.pth` script
 //! (NodeResponse: the walk animation at a node) opened or made. The file is written in
 //! the game's layout (level_files.encodePaths, every game file round-trips).
+//! An OpenGorky project keeps them in the location's `paths.ogs`: each a `path` block
+//! (`link`, `points` of PathPoint records, its code `fn OnNode(no, dir, walker)` in it).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -24,6 +26,7 @@ const Doc = level.Doc;
 const app_mod = @import("app.zig");
 const App = app_mod.App;
 const theme = app_mod.theme;
+const store_og = @import("store.zig").og_src;
 
 /// The Paths tool (`app.paths`): the picked path, what a click does, a node dragged.
 pub const State = struct {
@@ -38,9 +41,29 @@ fn apEntry(a: Allocator, d: *Doc) []const u8 {
     return std.fmt.allocPrint(a, "{s}.ap", .{d.name}) catch "";
 }
 
+/// OpenGorky: the location's `paths.ogs` (its Store index; null: none yet).
+fn ogEntry(a: Allocator, d: *Doc) []const u8 {
+    return std.fmt.allocPrint(a, "locations/{s}/paths.ogs", .{d.name}) catch "";
+}
+
+fn og_(app: *App) bool {
+    return app.store.root != null;
+}
+
+/// `paths.ogs` read (null: none, or it does not read).
+fn ogUnit(app: *App, a: Allocator, d: *Doc) ?og.script.ogs.parser.Unit {
+    const f = app.store.file(store_og, ogEntry(a, d)) catch return null;
+    var diag: og.script.ogs.parser.Diagnostic = .{};
+    return og.script.ogs.parser.parse(a, app.store.text(f), ogEntry(a, d), &diag) catch null;
+}
+
 /// The paths as the Store has them (frame memory; names copied).
 pub fn load(app: *App, d: *Doc) []core_map.Path {
     const a = app.frame.allocator();
+    if (og_(app)) {
+        const u = ogUnit(app, a, d) orelse return &.{};
+        return og.loaders.ogs.pathsIn(a, &.{u}, d.name) catch &.{};
+    }
     const f = app.store.file(d.level_archive, apEntry(a, d)) catch return &.{};
     const ps = map_io.parsePaths(a, app.store.text(f)) catch return &.{};
     return ps;
@@ -48,6 +71,7 @@ pub fn load(app: *App, d: *Doc) []core_map.Path {
 
 fn save(app: *App, d: *Doc, ps: []const core_map.Path, what: []const u8) void {
     const a = app.frame.allocator();
+    if (og_(app)) return ogSave(app, d, ps, what, null);
     const entry = apEntry(a, d);
     const t = map_io.encodePaths(app.gpa, ps) catch return;
     if (app.store.file(d.level_archive, entry)) |f| {
@@ -263,9 +287,61 @@ pub fn remove(app: *App, d: *Doc, name: []const u8) void {
     app.paths.sel.set("");
 }
 
-/// Path `name`'s `.pth` in the code editor (made first with NodeResponse if missing).
+/// OpenGorky: `paths.ogs` written anew from `ps`, each block keeping its code (`stub`: that
+/// path gets an empty OnNode when it has none). One undo step.
+fn ogSave(app: *App, d: *Doc, ps: []const core_map.Path, what: []const u8, stub: ?[]const u8) void {
+    const a = app.frame.allocator();
+    const print = og.script.ogs.print;
+    const old = ogUnit(app, a, d);
+    var w: std.Io.Writer.Allocating = .init(a);
+    const out = &w.writer;
+    out.print("level \"{s}\" {{\n", .{d.name}) catch return;
+    for (ps) |p| {
+        out.print("    path {s} {{\n        link = [{d}, {d}, {d}, {d}];\n        points = [", .{ p.name, p.link[0], p.link[1], p.link[2], p.link[3] }) catch return;
+        for (p.points, 0..) |pt, i| {
+            out.print("{s}PathPoint(x = {d}, y = {d}, angle = {d}", .{ if (i > 0) ", " else "", @round(pt[0]), @round(pt[1]), pt[2] }) catch return;
+            if (@floor(pt[2]) == pt[2]) out.writeAll(".0") catch return;
+            out.print(", z = {d})", .{@round(pt[3])}) catch return;
+        }
+        out.writeAll("];\n") catch return;
+        // Its code as it was.
+        var code = false;
+        if (old) |u| for (u.modules) |m| for (m.entities) |lv| for (lv.children) |ch| if (std.mem.eql(u8, ch.kind, "path") and std.ascii.eqlIgnoreCase(ch.name, p.name)) if (ch.own) |o| {
+            for (o.methods) |f| print.function(out, f, 2) catch return;
+            code = true;
+        };
+        if (!code) if (stub) |n| if (std.ascii.eqlIgnoreCase(n, p.name)) out.writeAll("        // An actor passed point `no` of this path (`dir` 1 forward, 0 back).\n        fn OnNode(no, dir, walker) {\n        }\n") catch return;
+        out.writeAll("    }\n") catch return;
+    }
+    out.writeAll("}\n") catch return;
+    const entry = ogEntry(a, d);
+    // As the OG printer lays it out (a long list of points one a line).
+    var diag: og.script.ogs.parser.Diagnostic = .{};
+    const u = og.script.ogs.parser.parse(a, w.written(), entry, &diag) catch return app.setStatus(tx.st_og_bad_value, .{diag.message});
+    var pw: std.Io.Writer.Allocating = .init(a);
+    print.unit(&pw.writer, u) catch return;
+    const t = app.gpa.dupe(u8, pw.written()) catch return;
+    if (app.store.file(store_og, entry)) |f| {
+        app.store.replaceLabeled(f, t, std.fmt.allocPrint(a, "{s}: {s}", .{ entry, what }) catch entry) catch |err| {
+            app.gpa.free(t);
+            app.failed(err);
+        };
+    } else |_| {
+        _ = app.store.addNew(&.{.{ .archive = store_og, .entry = entry, .text = t }}) catch |err| app.failed(err);
+    }
+}
+
+/// Path `name`'s `.pth` in the code editor (made first with NodeResponse if missing);
+/// OpenGorky: its block in `paths.ogs` (an empty OnNode added if it has no code).
 fn openScript(app: *App, d: *Doc, name: []const u8) void {
     const a = app.frame.allocator();
+    if (og_(app)) {
+        ogSave(app, d, load(app, d), "path script", name);
+        const f = app.store.file(store_og, ogEntry(a, d)) catch return;
+        const t = app.store.text(f);
+        const at = std.mem.indexOf(u8, t, std.fmt.allocPrint(a, "path {s} {{", .{name}) catch return) orelse 0;
+        return doctabs.showCode(app, f, @intCast(at));
+    }
     const entry = std.fmt.allocPrint(a, "{s}.pth", .{name}) catch return;
     if (app.store.file(d.level_archive, entry)) |f| return doctabs.showCode(app, f, null) else |_| {}
     const t = app.gpa.dupe(u8, "// The walk along this path: node `no` reached, `dir` 1 forward, 0 back.\r\nfunction NodeResponse(int no, int dir)\r\n{\r\n};\r\n") catch return;

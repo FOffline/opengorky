@@ -282,6 +282,12 @@ pub fn tickPresentation(self: *World) !void {
 fn pathScript(self: *World, index: u16) !?*Object {
     if (index >= self.map.paths.len) return null;
     if (self.path_scripts[index]) |o| return o;
+    // OpenGorky: the level block's `path <name>` (world/start.zig pathBlock).
+    if (self.res.source.level_block.len > 0) {
+        const o = try @import("../world.zig").start.pathBlock(self, self.map.paths[index].name) orelse return null;
+        self.path_scripts[index] = o;
+        return o;
+    }
     var buf: [name_max]u8 = undefined;
     const file = std.fmt.bufPrint(&buf, "{s}.pth", .{self.map.paths[index].name}) catch return null;
     if (!self.res.source.levelHas(file)) return null;

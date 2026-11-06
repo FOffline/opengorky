@@ -102,6 +102,15 @@ struct Place {
     int floor = 0 "Floor";
 }
 
+// A point of a level's walk path (`path deska { points = [PathPoint(…), …]; }`): its
+// background x, y, the angle an actor walking it turns to there (radians), its height.
+struct PathPoint {
+    int x "X";
+    int y "Y";
+    float angle = 0.0 "Angle, rad";
+    int z = 0 "Height";
+}
+
 // The level's camera (initCamera()'s fields): those given are set.
 struct Camera {
     bool perspective = false "Perspective";

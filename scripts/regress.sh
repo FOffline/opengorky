@@ -870,6 +870,25 @@ testkit() {
   ok testkit
 }
 
+# OpenGorky: a walk path (`01_port.ap` and `deska.pth` → the level's `path deska` block in
+# paths.ogs: its link, points and OnNode; the game's `.ap` not read) walks Ovitz over the plank as Classic does (walk_footbridge, then the
+# interpolation wait): the plank scene goes on in the next level on the same tick, its
+# shotgun ammo in Ovitz's backpack.
+pathscript() {
+  ogproject ps || { fail pathscript "convert failed: $(tail -1 "$TMP/ps.convert")"; return; }
+  grep -q '^    path deska {' "$TMP/ps/src/locations/01_port/paths.ogs" && grep -q 'PathPoint(x = 1460, y = 180' "$TMP/ps/src/locations/01_port/paths.ogs" &&
+    grep -q 'path::SetWalkAnimation("walk_footbridge")' "$TMP/ps/src/locations/01_port/paths.ogs" || { fail pathscript "no path deska block with its points and code"; return; }
+  set -- new autorefill autolevel autoequip wait:300 scene loot goto:trupy scene use:decha:brzeg_na_deske scene inv
+  "$TOOL" play "$G" "$@" >"$TMP/pathscript.classic" 2>&1
+  OPENGORKY_GAME="$G" "$TOOL" play "$TMP/ps" "$@" >"$TMP/pathscript.og" 2>&1
+  c=$(LC_ALL=C grep -a "port-deska' (continued)" "$TMP/pathscript.classic")
+  o=$(LC_ALL=C grep -a "port-deska' (continued)" "$TMP/pathscript.og")
+  [ -n "$c" ] && [ "$c" = "$o" ] || { fail pathscript "Classic \"$c\", OpenGorky \"$o\""; return; }
+  # The scene's shotgun ammo (item::Give) is Ovitz's though he has no empty start pack of it.
+  LC_ALL=C grep -aq '^  01p_shotgun_ammo: ovitz, place 1' "$TMP/pathscript.og" || { fail pathscript "Ovitz lost the scene's shotgun ammo"; return; }
+  ok pathscript
+}
+
 # OpenGorky: a battle without its own post-processing takes that of the location
 # whose code starts it (the OG reader's starts, loaders/ogs.zig scanStarts): 01_port (its
 # scene::Start of "port-out bt", which LOADLEVELs 01__port_park) and 03_museum_observator (its
@@ -1225,7 +1244,7 @@ EOF
   ok ogsave
 }
 
-ALL="boat medusa medusaload medusafirst matrixload sawtime bt ladder ladderclick labload sideline counterkill counterhand tranq scenewalk natohp natothreat recharge levelup shadowfloor badsave turncam aimclick barrelchain barrelexp barrelnovictim barrelfx decorpick radio strikewait decoy ballcharge toolsmoke sceneonce menublock medusafx morphfx booth roundtrip lift deps opening reopen staleinfo rules abilities testroom newchar testkit postchain ogedit scripted points phoenix events ogsview frames traitsdoc ogroundtrip ogplay reinforce convert convert-ui ogsave"
+ALL="boat medusa medusaload medusafirst matrixload sawtime bt ladder ladderclick labload sideline counterkill counterhand tranq scenewalk natohp natothreat recharge levelup shadowfloor badsave turncam aimclick barrelchain barrelexp barrelnovictim barrelfx decorpick radio strikewait decoy ballcharge toolsmoke sceneonce menublock medusafx morphfx booth roundtrip lift deps opening reopen staleinfo rules abilities testroom newchar testkit postchain ogedit scripted points phoenix events ogsview frames traitsdoc ogroundtrip ogplay pathscript reinforce convert convert-ui ogsave"
 # (A scenario's function: its name with `_` for `-`.)
 [ $# -gt 0 ] && { for t in "$@"; do $(echo "$t" | tr - _); done; exit $FAILED; }
 # All scenarios: side by side ($JOBS, default the CPU count), each a run of this

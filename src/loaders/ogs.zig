@@ -761,7 +761,39 @@ fn backgroundSize(ctx: ?*anyopaque) ?[2]u32 {
 
 fn mapOf(ctx: ?*anyopaque, a: Allocator) anyerror!core.map.Map {
     const l = levelOf(ctx);
-    return map.load(&l.assets, a, l.name);
+    var m = try map.load(&l.assets, a, l.name);
+    // Its walk paths are its `path` blocks (paths.ogs), never the game's `.ap`.
+    if (project != null) m.paths = try pathsOf(a, l.name);
+    return m;
+}
+
+/// Level `level`'s walk paths: its `path` blocks (`path deska { link = [182, 22, 189, 11];
+/// points = [PathPoint(x = 1460, y = 180, angle = 0.0, z = 135), …]; }`), in `a`.
+fn pathsOf(a: Allocator, level: []const u8) ![]core.map.Path {
+    const p = project orelse return &.{};
+    return pathsIn(a, p.units, level);
+}
+
+/// `pathsOf` of texts `units` (the editor's: a level's `paths.ogs`).
+pub fn pathsIn(a: Allocator, units: []const parser.Unit, level: []const u8) ![]core.map.Path {
+    var out: std.ArrayList(core.map.Path) = .empty;
+    for (units) |u| for (u.modules) |m| for (m.entities) |*lv| if (isLevelKind(lv.kind) and std.mem.eql(u8, lv.name, level)) for (lv.children) |*c| {
+        if (!std.mem.eql(u8, c.kind, "path")) continue;
+        var link: [4]f32 = @splat(0);
+        if (fieldValue(c, "link")) |v| if (v.kind == .list) for (v.kind.list[0..@min(4, v.kind.list.len)], 0..) |x, k| {
+            link[k] = number(x) orelse 0;
+        };
+        var pts: std.ArrayList([4]f32) = .empty;
+        if (fieldValue(c, "points")) |v| if (v.kind == .list) for (v.kind.list) |x| if (x.kind == .call) {
+            var pt: [4]f32 = @splat(0);
+            for ([_][]const u8{ "x", "y", "angle", "z" }, 0..) |n, k| if (named(x.kind.call, n)) |e| {
+                pt[k] = number(e) orelse 0;
+            };
+            try pts.append(a, pt);
+        };
+        try out.append(a, .{ .name = c.name, .link = link, .points = pts.items });
+    };
+    return out.items;
 }
 
 fn backdropOf(ctx: ?*anyopaque, a: Allocator) anyerror!core.map.Backdrop {

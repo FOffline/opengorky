@@ -2252,7 +2252,23 @@ Attachment and link points:
 
 ### 16.5 `path` — Path scripts
 
-Path script (`.pth`) functions: they act on the path node's actor — not on `host`, and without an actor argument.
+Path script (`.pth`) functions: they act on the path node's actor — not on `host`, and without an actor argument. In a project a location's walk paths (stairs, ladders, a plank: the route between two cells of the walk grid that the walk takes through the path's points) are `path` blocks inside its level block, in the location's `paths.ogs`: `link` — the start and end cells, `points` — `PathPoint(x, y, angle, z)` records (background x, y, the angle the walker turns to, the height), and its code in the block: `fn OnNode(no, dir, walker)` runs when an actor passes point `no` (`dir` 1 forward, 0 back). The engine reads the paths from these blocks only (not the game's `.ap`) and makes a path's object at its first point passed; the converter writes them of the level's `<level>.ap` and `<path>.pth`, the editor's Paths tool edits them.
+
+```ogs
+level "01_port" {
+    path deska {
+        link = [182, 22, 189, 11];
+        points = [
+            PathPoint(x = 1460, y = 180, angle = 0.0, z = 135),
+            PathPoint(x = 1516, y = 92, angle = 0.0, z = 135),
+        ];
+        fn OnNode(no, dir, walker) {
+            if (dir == 1 and no == 0) path::SetWalkAnimation("walk_footbridge");
+            if (dir == 1 and no == 1) path::SetWalkAnimation("walk");
+        }
+    }
+}
+```
 
 | OG Script | Classic | Signature | What it does |
 |---|---|---|---|
