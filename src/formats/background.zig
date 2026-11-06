@@ -2,13 +2,16 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Image = @import("image.zig").Image;
+const Image = @import("../image.zig").Image;
 
 const magic = "bkg1";
 const header_size = 0x14;
 const tile_rec_size = 20;
 
 const Error = error{ BadMagic, Truncated, BadTile };
+
+/// The widest and highest picture `decode` takes (the editor refuses larger ones).
+pub const max_side = 8192;
 
 pub fn decode(gpa: Allocator, bytes: []const u8) (Error || Allocator.Error)!Image {
     if (bytes.len < header_size) return error.Truncated;
@@ -18,7 +21,7 @@ pub fn decode(gpa: Allocator, bytes: []const u8) (Error || Allocator.Error)!Imag
     const height = std.mem.readInt(u32, bytes[16..20], .little);
     if (header_size + @as(u64, count) * tile_rec_size > bytes.len) return error.Truncated;
     // Header size checked before gpa.alloc (game backgrounds are under 2k pixels per side).
-    if (width > 8192 or height > 8192) return error.BadTile;
+    if (width > max_side or height > max_side) return error.BadTile;
 
     var img = try Image.init(gpa, width, height);
     errdefer img.deinit(gpa);

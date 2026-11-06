@@ -1,0 +1,19 @@
+use foundation;
+enum Trigger {
+    turn_start "Начало хода",
+    turn_end "Конец хода",
+    enemy_dies "Смерть врага",
+}
+struct Spawn {
+    character who "Кто";
+    list<int> tile "Клетка";
+}
+struct Wave {
+    Trigger when = Trigger::turn_start "Когда";
+    int turn "Ход";
+    Side side = Side::enemy "Чья сторона";
+    list<Spawn> spawn "Кто появляется";
+}
+fn helper() {
+    return 1;
+}

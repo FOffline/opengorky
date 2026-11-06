@@ -10,14 +10,15 @@ const ui = @import("ui");
 const og = @import("opengorky");
 const c = @import("sdl");
 const clay = @import("clay.zig");
+const gui = @import("widgets.zig");
+const lay = @import("layout.zig");
+const ink = @import("render.zig").ink;
 const font_mod = @import("font.zig");
 const tx = @import("text.zig");
-const textedit = @import("textedit.zig");
 const Doc = @import("level.zig").Doc;
-const main = @import("app.zig");
-const App = main.App;
-const theme = main.theme;
-const txt = main.txt;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
+const theme = app_mod.theme;
 const Trace = og.logic_trace.Trace;
 
 /// The game's ticks a second.
@@ -48,14 +49,12 @@ pub fn of(app: *App) ?*View {
 /// The open level run again (saved first: the run reads the game's files).
 pub fn run(app: *App) void {
     const d = app.doc orelse return;
-    if (app.store.dirty()) {
-        app.save();
-        if (app.store.dirty()) return;
-    }
-    var models = og.actor.model_cache.Cache.open(app.io, app.gpa, app.dat) catch |err| return app.setStatus(tx.st_set_failed, .{err});
+    if (!app.saveFirst()) return;
+    var models = og.compose.models.open(app.io, app.gpa, app.dat, null) catch |err| return app.failed(err);
     defer models.deinit();
+    const opener: og.loaders.world.Opener = .{ .io = app.io, .dat = app.dat };
     // A battle runs to its end (up to half an hour of play); a location 5 minutes.
-    const tr = og.logic_trace.run(app.io, app.gpa, app.dat, &models, d.name, if (d.isBattle()) "" else app.logic.cmds.items, @as(u32, if (d.isBattle()) 30 else 5) * 60 * rate) catch |err| return app.setStatus(tx.st_set_failed, .{err});
+    const tr = og.logic_trace.run(app.io, app.gpa, opener.factory(), &models, d.name, if (d.isBattle()) "" else app.logic.cmds.items, @as(u32, if (d.isBattle()) 30 else 5) * 60 * rate) catch |err| return app.failed(err);
     close(app);
     app.logic.run = .{ .level = app.gpa.dupe(u8, d.name) catch return, .tr = tr };
     app.setStatus(tx.lt_done, .{ tr.ticks, tr.events.len });
@@ -84,21 +83,21 @@ pub fn strip(app: *App, a: Allocator, v: *View) void {
         }
         if (v.tick >= last) v.playing = false;
     }
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .childGap = 8 }, .backgroundColor = theme.header, .border = .{ .color = theme.line, .width = .{ .top = 1 } } });
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .childGap = 6, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-    if (main.toolButton(app, "lt_back", .skip_back, "", false, false)) v.tick -|= 1;
-    if (main.toolButton(app, "lt_play", if (v.playing) .pause else .play, "", v.playing, false)) {
+    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = gui.pad(lay.space.md, lay.space.sm), .childGap = lay.space.sm }, .backgroundColor = theme.header, .border = .{ .color = theme.line, .width = .{ .top = lay.border.line } } });
+    gui.row(lay.space.sm);
+    if (gui.toolButton(app, "lt_back", .skip_back, "", false, false)) v.tick -|= 1;
+    if (gui.toolButton(app, "lt_play", if (v.playing) .pause else .play, "", v.playing, false)) {
         v.playing = !v.playing;
         if (v.tick >= last) v.tick = 0;
         v.last_ms = c.SDL_GetTicks();
     }
-    if (main.toolButton(app, "lt_next", .skip_forward, "", false, false)) v.tick = @min(last, v.tick + 1);
-    txt(std.fmt.allocPrint(a, "{d} / {d}   {s}", .{ v.tick, last, seconds(a, v.tick) }) catch "", 13, theme.text, font_mod.regular);
+    if (gui.toolButton(app, "lt_next", .skip_forward, "", false, false)) v.tick = @min(last, v.tick + 1);
+    gui.txt(std.fmt.allocPrint(a, "{d} / {d}   {s}", .{ v.tick, last, seconds(a, v.tick) }) catch "", .body, theme.text, font_mod.regular);
     // The timeline: a click or a drag sets the tick.
     const bid = clay.id("lt_bar");
     const bb = clay.box(bid);
     const bw: f32 = if (bb) |b| b.width else 0;
-    clay.open(.{ .id = bid, .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.fixed(22) } }, .backgroundColor = theme.field, .cornerRadius = clay.radius(4) });
+    clay.open(.{ .id = bid, .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.fixed(lay.height.small) } }, .backgroundColor = theme.field, .cornerRadius = clay.radius(lay.radius.sm) });
     if (bb) |b| if (app.down and clay.pointerOver(bid) and b.width > 0) {
         v.tick = @intFromFloat(std.math.clamp((app.mouse[0] - b.x) / b.width, 0, 1) * @as(f32, @floatFromInt(last)));
         v.playing = false;
@@ -113,28 +112,29 @@ pub fn strip(app: *App, a: Allocator, v: *View) void {
             else => continue,
         };
         const x = @as(f32, @floatFromInt(e.tick)) * scale;
-        if (x - prev_x < 3) continue;
+        // Marks closer than a mark's width are one.
+        if (x - prev_x <= lay.border.mark) continue;
         prev_x = x;
-        clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(2), .height = clay.fixed(10) } }, .backgroundColor = col, .floating = .{ .offset = .{ .x = x, .y = 12 }, .attachTo = ui.CLAY_ATTACH_TO_PARENT } });
+        clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(lay.border.mark), .height = clay.fixed(lay.space.sm) } }, .backgroundColor = col, .floating = .{ .offset = .{ .x = x, .y = lay.height.small - lay.space.sm }, .attachTo = ui.CLAY_ATTACH_TO_PARENT } });
     }
-    clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(2), .height = clay.fixed(22) } }, .backgroundColor = theme.text, .floating = .{ .offset = .{ .x = @as(f32, @floatFromInt(v.tick)) * scale, .y = 0 }, .attachTo = ui.CLAY_ATTACH_TO_PARENT } });
+    clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(lay.border.mark), .height = clay.fixed(lay.height.small) } }, .backgroundColor = theme.text, .floating = .{ .offset = .{ .x = @as(f32, @floatFromInt(v.tick)) * scale, .y = 0 }, .attachTo = ui.CLAY_ATTACH_TO_PARENT } });
     clay.close();
-    if (main.toolButton(app, "lt_close", .x, "", false, false)) close(app);
+    if (gui.toolButton(app, "lt_close", .x, "", false, false)) close(app);
     clay.close();
     // The player's commands for the next run (a battle plays itself).
     const battle = if (app.doc) |d| d.isBattle() else false;
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .childGap = 6, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
+    gui.row(lay.space.sm);
     if (battle) {
-        txt(tx.get(tx.lt_battle_auto), 12, theme.dim, font_mod.regular);
-        clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.grow() } } });
+        gui.txt(tx.get(tx.lt_battle_auto), .caption, theme.dim, font_mod.regular);
+        gui.spacer();
     } else {
-        txt(tx.get(tx.lt_cmds), 12, theme.dim, font_mod.regular);
-        if (textedit.field(app, "lt_cmds", app.logic.cmds.items, 520, "wait:300 goto:trupy click:640,480 hero:Cole op:lift:1")) |nv| {
+        gui.txt(tx.get(tx.lt_cmds), .caption, theme.dim, font_mod.regular);
+        if (gui.textField(app, "lt_cmds", app.logic.cmds.items, 0, "wait:300 goto:trupy click:640,480 hero:Cole op:lift:1")) |nv| {
             app.logic.cmds.clearRetainingCapacity();
             app.logic.cmds.appendSlice(app.gpa, std.mem.trim(u8, nv, " ")) catch {};
         }
     }
-    if (main.toolButton(app, "lt_run", .play, tx.get(tx.lt_run), false, true)) run(app);
+    if (gui.toolButton(app, "lt_run", .play, tx.get(tx.lt_run), false, true)) run(app);
     clay.close();
     clay.close();
 }
@@ -142,20 +142,20 @@ pub fn strip(app: *App, a: Allocator, v: *View) void {
 /// Beside the map: the variables at the tick (changed ones bright), then what happened
 /// up to it, newest first (a click on a row goes to its tick).
 pub fn panel(app: *App, a: Allocator, v: *View) void {
-    main.panelHeader(tx.alloc(a, tx.lt_title, .{v.tr.events.len}));
-    clay.openScroll(.{ .id = clay.id("lt_panel"), .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = .{ .left = 10, .right = 10, .top = 6, .bottom = 10 }, .childGap = 2 } });
-    txt(tx.get(tx.lv_title), 13, theme.text, font_mod.bold);
+    gui.panelHeader(tx.alloc(a, tx.lt_title, .{v.tr.events.len}));
+    clay.openScroll(.{ .id = clay.id("lt_panel"), .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = gui.pad(lay.space.md, lay.space.sm) } });
+    gui.txt(tx.get(tx.lv_title), .body, theme.text, font_mod.bold);
     const vals = v.tr.valuesAt(a, v.tick) catch &.{};
     for (v.tr.vars, vals) |vr, val| {
         const changed = !std.mem.eql(u8, val, vr.start);
-        clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .childGap = 8 } });
-        txt(vr.name, 12, if (changed) theme.text else theme.dim, font_mod.regular);
-        clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.grow() } } });
-        txt(val, 12, if (changed) theme.warn else theme.dim, if (changed) font_mod.bold else font_mod.regular);
+        gui.row(lay.space.sm);
+        gui.txt(vr.name, .caption, if (changed) theme.text else theme.dim, font_mod.regular);
+        gui.spacer();
+        gui.txt(val, .caption, if (changed) theme.warn else theme.dim, if (changed) font_mod.bold else font_mod.regular);
         clay.close();
     }
-    clay.leaf(.{ .layout = .{ .sizing = .{ .height = clay.fixed(8) } } });
-    txt(tx.get(tx.lt_events), 13, theme.text, font_mod.bold);
+    clay.leaf(.{ .layout = .{ .sizing = .{ .height = clay.fixed(lay.space.sm) } } });
+    gui.txt(tx.get(tx.lt_events), .body, theme.text, font_mod.bold);
     var shown: usize = 0;
     var i = v.tr.events.len;
     while (i > 0 and shown < 300) {
@@ -164,11 +164,11 @@ pub fn panel(app: *App, a: Allocator, v: *View) void {
         if (e.tick > v.tick) continue;
         shown += 1;
         const rid = clay.idi("lt_ev", @intCast(i));
-        if (main.clickable(app, .{ .id = rid, .layout = .{ .sizing = .{ .width = clay.grow() }, .padding = .{ .left = 4, .right = 4, .top = 2, .bottom = 2 }, .childGap = 8 }, .backgroundColor = theme.panel }, e.tick == v.tick)) {
+        if (gui.listRow(app, rid, .{ .selected = e.tick == v.tick, .indent = lay.space.xs, .fit = true, .rounded = false })) {
             v.tick = e.tick;
             v.playing = false;
         }
-        txt(std.fmt.allocPrint(a, "{d}", .{e.tick}) catch "", 11, theme.dim, font_mod.regular);
+        gui.txt(std.fmt.allocPrint(a, "{d}", .{e.tick}) catch "", .caption, theme.dim, font_mod.regular);
         const col = switch (e.kind) {
             .scene, .level, .turn => theme.accent_hover,
             .variable => theme.warn,
@@ -181,7 +181,7 @@ pub fn panel(app: *App, a: Allocator, v: *View) void {
             .level => std.fmt.allocPrint(a, "-> {s}", .{e.text}) catch e.text,
             else => e.text,
         };
-        clay.text(std.fmt.allocPrint(a, "{s}  {s}", .{ tx.get(kindMsg(e.kind)), body }) catch body, .{ .textColor = col, .fontSize = 12, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
+        gui.txtWrap(std.fmt.allocPrint(a, "{s}  {s}", .{ tx.get(kindMsg(e.kind)), body }) catch body, .caption, col, font_mod.regular);
         clay.close();
     }
     clay.close();
@@ -210,7 +210,7 @@ pub fn draw(app: *App, d: *Doc, v: *const View, rect: c.SDL_FRect) void {
     for (v.tr.actors, 0..) |name, k| {
         const p = v.tr.pos[v.tick * n + k];
         if (std.math.isNan(p[0])) continue;
-        _ = c.SDL_SetRenderDrawColor(app.r, 255, 90, 200, 230);
+        ink(app.r, lay.canvas.trace);
         var t = v.tick -| 2 * rate;
         var prev: ?[2]f32 = null;
         while (t <= v.tick) : (t += 1) {
@@ -225,6 +225,6 @@ pub fn draw(app: *App, d: *Doc, v: *const View, rect: c.SDL_FRect) void {
         }
         const s = d.toScreen(rect, p);
         _ = c.SDL_RenderFillRect(app.r, &.{ .x = s[0] - 5, .y = s[1] - 5, .w = 10, .h = 10 });
-        app.font.draw(app.r, name, font_mod.bold, 13, s[0] + 8, s[1] - 8, .{ 255, 140, 220, 255 });
+        app.font.draw(app.r, name, font_mod.bold, lay.Type.body.pt(), s[0] + 8, s[1] - 8, lay.canvas.trace_text);
     }
 }

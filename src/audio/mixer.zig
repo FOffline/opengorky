@@ -1,5 +1,5 @@
 //! Software mixer: voices with volume, pan and looping, stereo f32 output.
-//! No SDL — the output device only pulls ready samples.
+//! No output device here — the client's device only pulls ready samples.
 //!
 //! The original sends volume and pan to Miles `AIL_quick_set_volume`
 //! (0..127, pan 0..126, center 63); here they are linear 0..1 and -1..1.
@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Sound = @import("decode.zig").Sound;
+const Sound = @import("sound.zig").Sound;
 
 pub const VoiceId = u32;
 

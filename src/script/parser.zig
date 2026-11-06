@@ -11,25 +11,33 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const lexer = @import("lexer.zig");
 const ast = @import("ast.zig");
-const object = @import("object.zig");
+const object = @import("names.zig");
 const Token = lexer.Token;
 const Tag = lexer.Tag;
 
 pub const Error = lexer.Error || Allocator.Error || error{ParseError};
 
+/// Where a script error is and why: a parse error (the parser fills `line` and `message`,
+/// its caller `file`), a Classic export's, `Runtime.diag` and `Runtime.fault`.
 pub const Diagnostic = struct {
+    file: []const u8 = "",
     line: u32 = 0,
     message: []const u8 = "",
+
+    /// `file:line: message`, as the logs write it.
+    pub fn format(self: Diagnostic, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.print("{s}:{d}: {s}", .{ self.file, self.line, self.message });
+    }
 };
 
 /// Parses a whole file. Nodes are allocated in `arena`; on error `diag` holds the
 /// line and description.
 pub fn parse(arena: Allocator, src: []const u8, diag: *Diagnostic) Error!ast.Unit {
-    var p: Parser = .{ .arena = arena, .lx = .init(src), .diag = diag };
+    var p: Parser = .{ .arena = arena, .lx = .init(src), .diag = diag, .tok = .{ .tag = .eof, .text = "", .line = 0 } };
     try p.advance();
     var items: std.ArrayList(ast.Item) = .empty;
     while (p.tok.tag != .eof) try items.append(arena, try p.item());
-    return .{ .items = items.items };
+    return .{ .items = items.items, .src = src };
 }
 
 const Parser = struct {
@@ -37,12 +45,21 @@ const Parser = struct {
     lx: lexer.Lexer,
     diag: *Diagnostic,
     tok: Token = undefined,
+    /// Byte offset just past the last token consumed (the end of the node being built).
+    last_end: u32 = 0,
 
     fn advance(self: *Parser) Error!void {
+        if (self.tok.tag != .eof) self.last_end = self.at() + @as(u32, @intCast(self.tok.text.len));
         self.tok = self.lx.next() catch |err| {
             self.diag.* = .{ .line = self.lx.err_line, .message = @errorName(err) };
             return err;
         };
+    }
+
+    /// Byte offset of the current token.
+    fn at(self: *const Parser) u32 {
+        if (self.tok.tag == .eof) return @intCast(self.lx.src.len);
+        return @intCast(@intFromPtr(self.tok.text.ptr) - @intFromPtr(self.lx.src.ptr));
     }
 
     fn fail(self: *Parser, message: []const u8) Error {
@@ -69,7 +86,8 @@ const Parser = struct {
 
     fn typeKeyword(self: *Parser) ?ast.Type {
         if (self.tok.tag != .identifier) return null;
-        return std.meta.stringToEnum(ast.Type, self.tok.text);
+        const t = std.meta.stringToEnum(ast.Type, self.tok.text) orelse return null;
+        return if (t == .bool or t == .any) null else t;
     }
 
     // ---------------------------------------------------------------- top level
@@ -95,6 +113,7 @@ const Parser = struct {
 
     fn function(self: *Parser) Error!ast.Function {
         const line = self.tok.line;
+        const start = self.at();
         try self.advance(); // function
         const name = (try self.expect(.identifier, "expected function name")).text;
         _ = try self.expect(.l_paren, "expected '(' after function name");
@@ -109,16 +128,17 @@ const Parser = struct {
         _ = try self.expect(.r_paren, "expected ')' after parameters");
         const body = try self.block();
         _ = try self.eat(.semicolon);
-        return .{ .name = name, .params = params.items, .body = body, .line = line };
+        return .{ .name = name, .params = params.items, .body = body, .line = line, .start = start, .end = self.last_end };
     }
 
     fn varDecl(self: *Parser) Error!ast.VarDecl {
         const line = self.tok.line;
+        const start = self.at();
         const t = self.typeKeyword().?;
         try self.advance();
         const name = (try self.expect(.identifier, "expected variable name")).text;
         _ = try self.expect(.semicolon, "expected ';' after variable declaration");
-        return .{ .type = t, .name = name, .line = line, .id = try object.intern(name) };
+        return .{ .type = t, .name = name, .line = line, .id = try object.intern(name), .start = start, .end = self.last_end };
     }
 
     // ---------------------------------------------------------------- statements
@@ -156,11 +176,12 @@ const Parser = struct {
         if (self.typeKeyword() != null) return .{ .var_decl = try self.varDecl() };
         if (self.isWord("if")) return self.ifStmt();
         if (self.isWord("return")) {
+            const start = self.at();
             try self.advance();
-            if (try self.eat(.semicolon)) return .{ .@"return" = null };
+            if (try self.eat(.semicolon)) return .{ .@"return" = .{ .value = null, .start = start, .end = self.last_end } };
             const value = try self.expr();
             _ = try self.expect(.semicolon, "expected ';' after return");
-            return .{ .@"return" = value };
+            return .{ .@"return" = .{ .value = value, .start = start, .end = self.last_end } };
         }
         const e = try self.expr();
         _ = try self.expect(.semicolon, "expected ';' after expression");
@@ -169,6 +190,7 @@ const Parser = struct {
 
     /// `if (cond) stmt [;] [else stmt]`. Typical form: `if(a) {…}; else {…};`.
     fn ifStmt(self: *Parser) Error!ast.Stmt {
+        const start = self.at();
         try self.advance(); // if
         _ = try self.expect(.l_paren, "expected '(' after if");
         const cond = try self.expr();
@@ -180,7 +202,7 @@ const Parser = struct {
             try self.advance();
             else_branch = try self.alloc(ast.Stmt, try self.stmt());
         }
-        return .{ .@"if" = .{ .cond = cond, .then = then, .@"else" = else_branch } };
+        return .{ .@"if" = .{ .cond = cond, .then = then, .@"else" = else_branch, .start = start, .end = self.last_end } };
     }
 
     // ---------------------------------------------------------------- expressions
@@ -190,14 +212,17 @@ const Parser = struct {
         if (self.tok.tag == .identifier) {
             const save_lx = self.lx;
             const save_tok = self.tok;
+            const save_end = self.last_end;
+            const start = self.at();
             try self.advance();
             if (self.tok.tag == .equal) {
                 try self.advance();
                 const value = try self.expr();
-                return self.node(save_tok.line, .{ .assign = .{ .name = save_tok.text, .id = try object.intern(save_tok.text), .value = value } });
+                return self.node(start, save_tok.line, .{ .assign = .{ .name = save_tok.text, .id = try object.intern(save_tok.text), .value = value } });
             }
             self.lx = save_lx;
             self.tok = save_tok;
+            self.last_end = save_end;
         }
         return self.binary(0);
     }
@@ -214,6 +239,7 @@ const Parser = struct {
 
     fn binary(self: *Parser, level: usize) Error!*const ast.Expr {
         if (level == levels.len) return self.unary();
+        const start = self.at();
         var lhs = try self.binary(level + 1);
         loop: while (true) {
             for (levels[level].tags, levels[level].ops) |tag, op| {
@@ -221,7 +247,7 @@ const Parser = struct {
                     const line = self.tok.line;
                     try self.advance();
                     const rhs = try self.binary(level + 1);
-                    lhs = try self.node(line, .{ .binary = .{ .op = op, .lhs = lhs, .rhs = rhs } });
+                    lhs = try self.node(start, line, .{ .binary = .{ .op = op, .lhs = lhs, .rhs = rhs } });
                     continue :loop;
                 }
             }
@@ -231,28 +257,30 @@ const Parser = struct {
 
     fn unary(self: *Parser) Error!*const ast.Expr {
         const line = self.tok.line;
-        if (try self.eat(.minus)) return self.node(line, .{ .unary = .{ .op = .neg, .operand = try self.unary() } });
-        if (try self.eat(.bang)) return self.node(line, .{ .unary = .{ .op = .not, .operand = try self.unary() } });
+        const start = self.at();
+        if (try self.eat(.minus)) return self.node(start, line, .{ .unary = .{ .op = .neg, .operand = try self.unary() } });
+        if (try self.eat(.bang)) return self.node(start, line, .{ .unary = .{ .op = .not, .operand = try self.unary() } });
         if (try self.eat(.plus)) return self.unary();
         return self.primary();
     }
 
     fn primary(self: *Parser) Error!*const ast.Expr {
         const t = self.tok;
+        const start = self.at();
         switch (t.tag) {
             .int_literal => {
                 try self.advance();
                 const v = std.fmt.parseInt(i32, t.text, 10) catch return self.fail("integer literal out of range");
-                return self.node(t.line, .{ .int = v });
+                return self.node(start, t.line, .{ .int = v });
             },
             .float_literal => {
                 try self.advance();
-                const v = std.fmt.parseFloat(f32, t.text) catch return self.fail("bad float literal");
-                return self.node(t.line, .{ .float = v });
+                const v = std.fmt.parseFloat(f32, std.mem.trimEnd(u8, t.text, ".")) catch return self.fail("bad float literal");
+                return self.node(start, t.line, .{ .float = v });
             },
             .string_literal => {
                 try self.advance();
-                return self.node(t.line, .{ .string = t.stringValue() });
+                return self.node(start, t.line, .{ .string = t.stringValue() });
             },
             .l_paren => {
                 try self.advance();
@@ -262,21 +290,22 @@ const Parser = struct {
             },
             .identifier => {
                 try self.advance();
-                if (!try self.eat(.l_paren)) return self.node(t.line, .{ .ident = .{ .name = t.text, .id = try object.intern(t.text) } });
+                if (!try self.eat(.l_paren)) return self.node(start, t.line, .{ .ident = .{ .name = t.text, .id = try object.intern(t.text) } });
                 var args: std.ArrayList(*const ast.Expr) = .empty;
                 if (self.tok.tag != .r_paren) while (true) {
                     try args.append(self.arena, try self.expr());
                     if (!try self.eat(.comma)) break;
                 };
                 _ = try self.expect(.r_paren, "expected ')' after arguments");
-                return self.node(t.line, .{ .call = .{ .name = t.text, .args = args.items, .id = try object.intern(t.text) } });
+                return self.node(start, t.line, .{ .call = .{ .name = t.text, .args = args.items, .id = try object.intern(t.text) } });
             },
             else => return self.fail("expected expression"),
         }
     }
 
-    fn node(self: *Parser, line: u32, kind: ast.Expr.Kind) Error!*const ast.Expr {
-        return self.alloc(ast.Expr, .{ .line = line, .kind = kind });
+    /// A node from `start` through the last token consumed.
+    fn node(self: *Parser, start: u32, line: u32, kind: ast.Expr.Kind) Error!*const ast.Expr {
+        return self.alloc(ast.Expr, .{ .line = line, .kind = kind, .start = start, .end = self.last_end });
     }
 
     fn alloc(self: *Parser, comptime T: type, value: T) Allocator.Error!*const T {

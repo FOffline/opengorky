@@ -4,7 +4,7 @@ const std = @import("std");
 const Writer = std.Io.Writer;
 const Allocator = std.mem.Allocator;
 const flate = std.compress.flate;
-const Image = @import("image.zig").Image;
+const Image = @import("../image.zig").Image;
 
 pub fn write(gpa: Allocator, w: *Writer, img: Image) (Writer.Error || Allocator.Error)!void {
     try w.writeAll("\x89PNG\r\n\x1a\n");

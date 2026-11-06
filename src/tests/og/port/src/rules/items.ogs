@@ -1,0 +1,6 @@
+Medicine(item = 1043, kind = "rage");
+Medicine(item = 83, kind = "calm");
+Medicine(item = 1044, kind = "ungas");
+Medicine(item = 1047, kind = "wake");
+Medicine(item = 1049, random = "1045 1047 1044 1043");
+HealBonus(healer = 24, pct = 15);

@@ -1,6 +1,7 @@
 //! Strike: attack start, hit roll (0x4ced30), damage (+0xcc), side bonus, armour, exp, popups.
 
 const std = @import("std");
+const ut = @import("../core.zig").ui_text;
 const weapon_class = @import("../battle.zig").weapon_class;
 const value = @import("../script.zig").value;
 const fields = @import("../fields.zig");
@@ -11,7 +12,6 @@ const states = @import("states.zig");
 const battle = @import("../battle.zig").battle;
 const anim = @import("anim.zig");
 const Battle = battle.Battle;
-const WeaponClass = @import("../battle.zig").weapon_class.WeaponClass;
 const world = @import("../state.zig").world;
 const World = world.World;
 const Object = @import("../script.zig").object.Object;
@@ -19,22 +19,29 @@ const floatToInt = @import("../script.zig").value.floatToInt;
 const rules = @import("../battle.zig").rules;
 const grid = @import("../battle.zig").grid;
 const immunity = @import("../battle.zig").immunity;
-const generic = @import("../battle.zig").generic;
+const rules_mod = @import("../rules.zig");
+const core = @import("../core.zig");
 const fx = @import("../fx.zig");
-const patterns = @import("../battle.zig").patterns;
+const hooks = @import("../state.zig").hooks;
+const events = @import("events.zig");
+const natives = @import("natives.zig");
 const inventory = @import("../inventory.zig");
 const HeroAttack = @import("../battle.zig").attacks.HeroAttack;
 const Tile = @import("../battle.zig").grid.Tile;
 const Fighter = @import("../battle.zig").fighter.Fighter;
-const Class = @import("../battle.zig").fighter.Class;
+const behaviour = core.behaviour;
 const Strike = @import("../battle.zig").rules.Strike;
 const max_fighters = battle.max_fighters;
 
 pub fn startAttack(self: *Battle, w: *World, who: u16, wpn: *Object, aim: grid.Target) !void {
     const f = &self.fighters.items[who];
     // Strike (0x47c6ba → 0x48f790): only the "attacked" flag (+0x24610); the remaining
-    // walk budget (+0x2460c) stays, so the hero may step away after shooting.
-    if (self.phase != .counter) f.acted = true;
+    // walk budget (+0x2460c) stays, so the hero may step away after shooting. A hero the
+    // player leads with an ExtraAction (native DoubleTurn): the first strike leaves it a second, the walk anew.
+    if (self.phase == .player and !self.auto_heroes and f.side == .hero and try natives.extraAction(w, f.obj) and !f.second) {
+        f.second = true;
+        f.used = 0;
+    } else if (self.phase != .counter) f.acted = true;
     // Strike roll (+0xec, 0x47c58a) at the attack start, before the animation: hit,
     // damage with skill, luck, rage; "Luck" over the attacker right here (0x4cf0cf).
     // The strike camera reads the luck flag +0x1a98 (0x47c5b2).
@@ -43,7 +50,7 @@ pub fn startAttack(self: *Battle, w: *World, who: u16, wpn: *Object, aim: grid.T
     // Strike camera (0x47c120, commands 0x29/0x2a): only a hero in rage or with a
     // critical hit on a neighbouring tile, and both fit on screen: pan to the centre
     // of their box with 2× zoom.
-    if (w.combat_map) |cm| if (f.side == .hero and (strike.rage or strike.crit) and
+    if (w.map.combat) |cm| if (f.side == .hero and (strike.rage or strike.crit) and
         @abs(aim.tile[0] - f.tile[0]) < 2 and @abs(aim.tile[1] - f.tile[1]) < 2)
     {
         // Centre is the middle of the union of the attacker's and target's model screen
@@ -67,17 +74,16 @@ pub fn startAttack(self: *Battle, w: *World, who: u16, wpn: *Object, aim: grid.T
     // command 0x12, first in the attack queue) for everyone, the Puppet included: it
     // turns back to −1.57 at its turn end (0x4e17b0, +0xd0). Strike animation after the turn.
     anim.face(w, f.*, aim.tile);
-    messiahDodge(self, who, wpn, aim);
+    dodgeShot(self, w, who, wpn, aim);
     const turning = world.actorOf(f.*.obj).turn_to != null;
     if (!turning) anim.beginAttackAnim(w, f.*, wpn);
     // The hit comes n ticks after the animation starts: heroes by the exe table
-    // (adjust.kdt, 0x48bda2), monsters by theirs (0x48d618). nameID picks the table
+    // (adjust.kdt, 0x48bda2), monsters by theirs (0x48d618). classic_id picks the table
     // (0x4896b0), not the side: Medusa (119) uses her branch even in the party.
     // Port-only generic fighter (classType 100): strike from weapon fields.
-    const gen = generic.is(f.obj);
-    const hero_table = !gen and attacks.heroTable(fields.nameId(f.obj));
-    const mon: ?attacks.MonsterAttack = if (gen) generic.attack(wpn) else if (!hero_table) attacks.monsterAttack(fields.nameId(f.obj), fields.nameId(wpn)) else null;
-    const ha: ?HeroAttack = if (hero_table) attacks.heroAttack(fields.nameId(f.obj), fields.nameId(wpn)) else null;
+    const st = attacks.strikeOf(f.obj, wpn);
+    const mon: ?attacks.MonsterAttack = if (st == .monster) st.monster else null;
+    const ha: ?HeroAttack = if (st == .hero) st.hero else null;
     const delay: i32 = if (ha) |h| @as(i32, @intCast(h.wait)) + h.extra else @intCast(mon.?.wait);
     self.pending = .{ .attack = .{
         .who = who,
@@ -122,25 +128,25 @@ pub fn reactAgain(self: *Battle, w: *World, who: u16) void {
     fx.blood.onDamage(w, t.obj, self.fighters.items[who].obj);
 }
 
-/// Messiah (classType 18, battle 04__elevator_messiah, tile 11,18, facing 3.14)
-/// is open to strikes only from tile (10,18) right in front of him.
-pub fn messiahOpen(tile: Tile) bool {
-    return tile[0] == 10 and tile[1] == 18;
+/// Closed to strikes from `tile`: its CanBeStruck says no (combat/events.zig): native
+/// OpenFrom (`open_from`: open only from that tile of its own, the Messiah: the one right
+/// in front of him) or a scripted ability.
+pub fn closedTo(w: *World, f: Fighter, tile: Tile) bool {
+    return events.struckFrom(w, f, tile) == false;
 }
 
-/// Attack start (0x47c120 → 0x47c4c0…0x47c50e): if the Messiah is among the
-/// fighters on the hit tiles (+0xe8) and the attacker isn't at (10,18), the Messiah
-/// plays the dodge "unik" at once, before the shot (0x526d74 → 0x4230c0).
-fn messiahDodge(self: *Battle, who: u16, wpn: *Object, aim: grid.Target) void {
+/// Attack start (0x47c120 → 0x47c4c0…0x47c50e): a fighter closed to the attacker's tile
+/// (`open_from`: the Messiah) among the fighters on the hit tiles (+0xe8) plays its
+/// `dodge` ("unik") at once, before the shot (0x526d74 → 0x4230c0).
+fn dodgeShot(self: *Battle, w: *World, who: u16, wpn: *Object, aim: grid.Target) void {
     const pat = weapon_class.pattern(wpn) orelse return;
-    if (messiahOpen(self.fighters.items[who].tile)) return;
     var tiles_buf: [128]Tile = undefined;
     for (grid.effectTiles(self.grid(), pat, aim, &tiles_buf)) |t| {
         const o = self.grid().at(t);
         if (o == grid.Grid.none or o == who) continue;
         const v = self.fighters.items[o];
-        if (Class.of(v.obj) != .messiah) continue;
-        world.actorOf(v.obj).play("unik", false, true);
+        if (!closedTo(w, v, self.fighters.items[who].tile)) continue;
+        _ = natives.ask(w, v.obj, "Fighter.OnDodge", .{self.fighters.items[who].obj.ref()}) catch null;
     }
 }
 
@@ -156,34 +162,47 @@ fn messiahDodge(self: *Battle, who: u16, wpn: *Object, aim: grid.Target) void {
 fn rollStrike(self: *Battle, w: *World, who: u16, wpn: *Object, aim: grid.Target) !Strike {
     const rand = w.crt();
     const attacker = &self.fighters.items[who];
-    const cls = wpn.getInt("classType");
+    const cls = wpn.getInt("class");
     const base = @divTrunc(aim.pct * wpn.getInt("max_damage"), 100);
     var st: Strike = .{ .dmg = base };
-    const pat = patterns.find(cls) orelse return st;
+    const pat = weapon_class.pattern(wpn) orelse return st;
     var tiles_buf: [128]Tile = undefined;
     var first: ?u16 = null;
-    var messiah = false;
+    var blocked = false;
     for (grid.effectTiles(self.grid(), pat, aim, &tiles_buf)) |t| {
         const o = self.grid().at(t);
         if (o == grid.Grid.none or o == who) continue;
         if (first == null) first = o;
-        if (Class.of(self.fighters.items[o].obj) == .messiah) messiah = true;
+        if (closedTo(w, self.fighters.items[o], attacker.tile)) blocked = true;
     }
     const f0 = first orelse return st;
-    const shooter = WeaponClass.from(cls) != .time_bomb and !self.bomb_blast;
+    const shooter = core.modules.weaponKind(cls) != .time_bomb and !self.bomb_blast;
+    // A hero's bonuses (HealBonus hit, damage; OpenGorky, 0 in the exe's rules).
+    const bonus: struct { hit: i32 = 0, damage: i32 = 0 } = if (attacker.side == .hero) blk: {
+        const h = core.entity.heroOf(rules_mod.who(attacker.obj));
+        break :blk .{ .hit = h.hit_bonus, .damage = h.damage_bonus };
+    } else .{};
+    const target = self.fighters.items[f0].obj;
+    var chance = rules.hitChance(fields.getF(attacker.obj, "accuracy"), fields.charSize(target), attacker.enraged()) + bonus.hit;
+    // OpenGorky: the weapon's HitChance, the attacker's, then the target's ChanceToBeHit
+    // (one chain; the roll's rand() is drawn at any chance).
+    if (wpn.implementsC("HitChance")) chance = try events.chain(self, w, wpn, "Weapon.HitChance", .{ attacker.obj.ref(), target.ref(), value.Value{ .int = chance } });
+    if (attacker.obj.implementsC("HitChance")) chance = try events.chain(self, w, attacker.obj, "Fighter.HitChance", .{ target.ref(), wpn.ref(), value.Value{ .int = chance } });
+    if (target.implementsC("ChanceToBeHit")) chance = try events.chain(self, w, target, "Fighter.ChanceToBeHit", .{ attacker.obj.ref(), wpn.ref(), value.Value{ .int = chance } });
     st = rules.strike(rand, .{
         .shooter = shooter,
-        .rolls_to_hit = rules.rollsToHit(cls),
-        .chance = rules.hitChance(fields.getF(attacker.obj, "accuracy"), fields.charSize(self.fighters.items[f0].obj), attacker.enraged()),
-        .blocked = messiah and !messiahOpen(attacker.tile),
-        .skill = if (WeaponClass.from(cls) == .decoy) null else weapons.skillOf(attacker.*, wpn),
+        .rolls_to_hit = rules_mod.weaponClass(cls).rolls_to_hit, // firearms only (weapon +0xc4)
+        .chance = chance,
+        .blocked = blocked,
+        .skill = if (core.modules.weaponKind(cls) == .decoy) null else weapons.skillOf(attacker.*, wpn),
         .max_damage = wpn.getInt("max_damage"),
         .pct = aim.pct,
         .luck = if (attacker.side == .hero) floatToInt(fields.getF(attacker.obj, "luck")) else null,
         .rage = attacker.enraged(),
     });
+    if (bonus.damage != 0 and shooter and !st.missed) st.dmg += @divTrunc(st.dmg * bonus.damage, 100);
     // "Luck" popup (string 519) over the attacker, cfcCriticalhit, 0.75 (0x4cf02c…0x4cf0cf).
-    if (st.crit) try battle.popup(self, attacker.*, w.stringOr(519, "Luck"), .crit);
+    if (st.crit) try battle.popup(self, attacker.*, w.stringOr(ut.id(.luck), "Luck"), .crit);
     return st;
 }
 
@@ -204,23 +223,26 @@ pub fn resolveAttack(self: *Battle, w: *World, who: u16, wpn: *Object, aim: grid
         victims[nv] = o;
         nv += 1;
     }
-    const cls = wpn.getInt("classType");
+    const cls = wpn.getInt("class");
     // Hit landed: the camera pulls back 40 ticks later (command 0x2a).
     if (w.out.attack_cam) |*ac| if (ac.release == null) {
         ac.release = 40;
     };
-    weapons.consumeAmmo(w, attacker, wpn);
-    if (w.combat_map) |cm| fx.hits.onHit(w, attacker.obj, wpn, cm.tileCenter(aim.tile, 1), second);
+    try weapons.consumeAmmo(self, w, attacker, wpn);
+    // OpenGorky: the weapon's OnFired(user, tile [x, y]): a round was spent.
+    if (wpn.implementsC("OnFired")) try events.tell(w, wpn, "Weapon.OnFired", .{ attacker.obj.ref(), try tileValue(w, aim.tile) });
+    if (w.map.combat) |cm| fx.hits.onHit(w, attacker.obj, wpn, cm.tileCenter(aim.tile, 1), second);
     // Napalm launcher (+0xf4 → 0x4cf7a0) sets every hit tile on fire for 3 turns.
     // Gas on tiles (+6 of a grid tile) is set only by callback 49 (0x4885a8 →
     // 0x4aa360): the aimed tile and its 8 neighbours, cloud "gas2" (0x4a95d0); that's
     // Schizo's second attack (1078). The gas grenade (+0xdc 0x4bc640) and the
     // Invisible only poison those hit (0x4900f0(3)) and don't touch tiles.
-    if (WeaponClass.from(cls) == .napalm) {
+    if (core.modules.weaponKind(cls) == .napalm) {
         for (tiles) |t| states.setHazard(self, self.fire, t, 3);
         battle.note(self, "  fire on {d} tiles", .{tiles.len});
     }
-    if (fields.nameId(attacker.obj) == 136 and fields.nameId(wpn) == 1078) {
+    const how = attacks.strikeOf(attacker.obj, wpn);
+    if (how == .monster and how.monster.gas) {
         var dy: i32 = -1;
         while (dy <= 1) : (dy += 1) {
             var dx: i32 = -1;
@@ -228,12 +250,12 @@ pub fn resolveAttack(self: *Battle, w: *World, who: u16, wpn: *Object, aim: grid
         }
     }
     // A time bomb is placed, it doesn't strike (its blast is bomb_blast).
-    if (WeaponClass.from(cls) == .time_bomb and !self.bomb_blast) {
+    if (core.modules.weaponKind(cls) == .time_bomb and !self.bomb_blast) {
         try devices.placeTimeBomb(self, w, aim.tile);
         return;
     }
     // Decoy onto a free tile (0x4b9750): placed and spent.
-    if (WeaponClass.from(cls) == .decoy and self.grid().at(aim.tile) == grid.Grid.none and self.grid().open(aim.tile)) {
+    if (core.modules.weaponKind(cls) == .decoy and self.grid().at(aim.tile) == grid.Grid.none and self.grid().open(aim.tile)) {
         try devices.placeDecoy(self, w, aim.tile);
         World.nativeOf(wpn).deleted = true;
         wpn.enabled = false;
@@ -248,8 +270,14 @@ pub fn resolveAttack(self: *Battle, w: *World, who: u16, wpn: *Object, aim: grid
         return endRoll(w, strike);
     }
     const first = self.fighters.items[victims[0]];
-    if (attacker.side == .hero and first.side != .hero and self.lilith_ticks == -10) if (w.level) |l| {
-        if (l.getInt("levelMode") == 8) self.lilith_ticks = 100;
+    // OpenGorky: the battle's OnAttack(attacker, weapon, victims), before the roll.
+    if (w.level) |l| if (l.implementsC("OnAttack")) {
+        const list = try w.rt.strings().alloc(value.Value, nv);
+        for (list, victims[0..nv]) |*x, v| x.* = self.fighters.items[v].obj.ref();
+        try events.tell(w, l, "Battle.OnAttack", .{ attacker.obj.ref(), wpn.ref(), value.Value{ .list = list } });
+    };
+    if (attacker.side == .hero and first.side != .hero and self.transform_ticks == -10) if (w.level) |l| {
+        if (core.modules.transform(l.getInt("mode"))) |tr| self.transform_ticks = tr.delay;
     };
     // Strike roll: from the attack start (both hits of one attack, Jet Elmer and
     // Headnail, use it; +0xf0 reads +0x1a94/+0x1a9c), otherwise now (barrel
@@ -269,9 +297,11 @@ pub fn resolveAttack(self: *Battle, w: *World, who: u16, wpn: *Object, aim: grid
     const gained = try transferExp(self, w, by, wpn, missed);
     // Weapon skill (0x4cf5f2 → 0x48fea0): every successful use by a hero (except
     // class 17) adds 1 to the counter; at the threshold, a level and a popup.
-    if (attacker.side == .hero and !missed and gained and WeaponClass.from(cls) != .barrel and attacker.alive()) {
-        if (try weapons.growSkill(w, attacker.obj, fields.nameId(wpn))) {
-            try battle.popup(self, attacker.*, w.stringOr(521, "Weapon skill increased"), .skill);
+    if (attacker.side == .hero and !missed and gained and core.modules.weaponKind(cls) != .barrel and attacker.alive()) {
+        if (try weapons.growSkill(w, attacker.obj, fields.classicId(wpn))) {
+            try battle.popup(self, attacker.*, w.stringOr(ut.id(.skill_up), "Weapon skill increased"), .skill);
+            // OpenGorky: its OnSkillUp(weapon, level).
+            if (attacker.obj.implementsC("OnSkillUp")) try events.tell(w, attacker.obj, "Hero.OnSkillUp", .{ wpn.ref(), value.Value{ .int = weapons.skillLevel(attacker.obj, fields.classicId(wpn)) } });
         }
     }
     endRoll(w, sp);
@@ -283,7 +313,7 @@ fn transferExp(self: *Battle, w: *World, by: u16, wpn: *Object, missed: bool) !b
     const ex = &self.fighters.items[by];
     const gained = ex.pending_exp > 0;
     if (ex.side == .hero and gained) {
-        ex.pending_exp += wpn.getInt("extraExperience");
+        ex.pending_exp += wpn.getInt("bonus_experience");
         if (!missed and ex.alive()) try awardExp(self, w, ex);
     }
     return gained;
@@ -304,57 +334,74 @@ fn hitVictim(self: *Battle, w: *World, who: u16, wpn: *Object, v: u16, st: Strik
     const rand = w.crt();
     const attacker = &self.fighters.items[who];
     const t = &self.fighters.items[v];
-    const cls = wpn.getInt("classType");
-    const wc = WeaponClass.from(cls);
+    const cls = wpn.getInt("class");
+    const wc = core.modules.weaponKind(cls);
     const missed = st.missed;
     const dmg = st.dmg;
     if (missed) {
-        try battle.popup(self, t.*, w.stringOr(520, "Miss"), .miss);
-        // Miss (0x4cf392): miss01 or miss02 12 ticks later.
-        try w.out.delayed_sounds.append(w.gpa, .{ .name = if (rand.below(2) != 0) "miss01" else "miss02", .pos = w.screenPos(t.obj), .ticks = 12 });
+        try battle.popup(self, t.*, w.stringOr(ut.id(.miss), "Miss"), .miss);
+        // Miss (0x4cf392): one of UiSounds `miss` 12 ticks later (the exe's miss01 or miss02:
+        // the second when the roll is 0).
+        const ms = core.modules.ui().sounds.miss;
+        var count: u32 = 0;
+        var it = std.mem.tokenizeScalar(u8, ms, ' ');
+        while (it.next()) |_| count += 1;
+        if (count > 0) {
+            const r = rand.below(count);
+            var k: u32 = 0;
+            it.reset();
+            while (it.next()) |name| : (k += 1) if (k == count - 1 - r) {
+                try w.out.delayed_sounds.append(w.gpa, .{ .name = name, .pos = w.screenPos(t.obj), .ticks = 12 });
+                break;
+            };
+        }
         return;
     }
     // Obstacle (+0xcc): boxes are invulnerable; a barrel explodes from fire (1),
     // bullets (6), energy (11), blasts (13), another barrel (17) and bombs (9).
     if (t.side == .neutral) {
         t.last_attacker = who;
-        const ty = immunity.DamageType.from(wpn.getInt("type"));
+        const ty = immunity.DamageType.from(wpn.getInt("damage_kind"));
         if (t.explosive and (ty == .fire or ty == .bullet or ty == .energy or ty == .explosion or wc == .barrel or wc == .time_bomb)) try devices.destroyBarrel(self, w, v);
         return;
     }
     // Stinger's ball (class 1005, +0xdc 0x4d87a0): the target's +0xcc isn't called,
     // no damage, no reaction, only sleep (0x4900f0, 6).
-    if (wc == .stinger_long) {
+    if (wc == .sleep_ball) {
         t.last_attacker = who;
         if (t.alive()) states.applyEffect(self, w, t, .sleep);
         return;
     }
     // Ion rifle and blaster (+0xdc 0x4b84f0, 0x4b8a40): with resistance to code 4
     // (0x4caa80) the target's +0xcc isn't called, whatever the damage kind.
-    if ((wc == .ion_rifle or wc == .blaster) and states.resistsDiscover(self, w, t.*, .energy)) return;
-    const armor = [3]i32{ wpn.getInt("lightArmor"), wpn.getInt("mediumArmor"), wpn.getInt("heavyArmor") };
+    if (wc == .energy and states.resistsDiscover(self, w, t.*, .energy)) return;
+    const armor = [3]i32{ wpn.getInt("light_armor_pct"), wpn.getInt("medium_armor_pct"), wpn.getInt("heavy_armor_pct") };
     // Hero armour is the larger of its own and the worn one (0x49125f); a monster's
     // is the class from the resistance table or its own variable (0x4912a1).
     var own_armor = t.obj.getInt("armor");
     if (t.side == .hero) if (inventory.equipment.armorItem(w, t.obj)) |it| {
         own_armor = @max(own_armor, it.getInt("armor"));
     };
-    if (t.side != .hero) if (w.immunity.armorClass(fields.nameId(t.obj))) |c| {
+    if (t.side != .hero) if (w.immunity.armorClass(rules_mod.who(t.obj))) |c| {
         own_armor = @max(own_armor, c);
         // The armour class is revealed on the first hit (0x4caaf7: string.tab 570 + class).
-        if (w.immunity.discover(fields.nameId(t.obj), .armor)) {
+        if (w.immunity.discover(@import("../rules.zig").who(t.obj), .armor)) {
             const cls_i: usize = @intCast(std.math.clamp(c, 0, 2));
-            battle.popup(self, t.*, w.stringOr(571 + @as(i32, @intCast(cls_i)), immunity.armor_text[cls_i]), .info) catch {};
+            battle.popup(self, t.*, w.stringOr(ut.of(.armor_light, cls_i), immunity.armor_text[cls_i]), .info) catch {};
         }
     };
+    // OpenGorky: the target's Armor(attacker, weapon, armor): its armour class.
+    if (t.obj.implementsC("Armor")) own_armor = try events.chain(self, w, t.obj, "Fighter.Armor", .{ attacker.obj.ref(), wpn.ref(), value.Value{ .int = own_armor } });
     // Puppet (+0xcc 0x4e1bb0): from the front and sides (angle to the attacker under
     // 0.7125π from its gaze) damage /10, at least 4, before 0x490f10, i.e. before the
     // side bonus, armour and defence; from behind, full.
+    // Its GuardDamage (native Guard: core/natives.zig) the damage before the side bonus.
     var base: i32 = @max(0, dmg);
-    if (Class.of(t.obj) == .puppet) {
-        const want = fields.facing(fields.pos(attacker.obj)[0] - fields.pos(t.obj)[0], fields.pos(attacker.obj)[1] - fields.pos(t.obj)[1]);
-        if (@abs(fields.angleDiff(want, fields.angle(t.obj))) < 0.7125 * std.math.pi) base = @max(@divTrunc(dmg, 10), 4);
-    }
+    // OpenGorky: the weapon's BaseDamage(user, target, amount): the roll's damage to it.
+    if (wpn.implementsC("BaseDamage")) base = try events.chain(self, w, wpn, "Weapon.BaseDamage", .{ attacker.obj.ref(), t.obj.ref(), value.Value{ .int = base } });
+    if (t.obj.implementsC("GuardDamage")) if (try natives.ask(w, t.obj, "Fighter.GuardDamage", .{ attacker.obj.ref(), wpn.ref(), value.Value{ .int = base } })) |g| {
+        base = g.toInt();
+    };
     // Side / back strike (0x490f10): +2 / +4 damage before armour.
     const side_bonus = sideBonus(attacker.*, t.*, base);
     base += side_bonus;
@@ -362,17 +409,27 @@ fn hitVictim(self: *Battle, w: *World, who: u16, wpn: *Object, v: u16, st: Strik
     // Resistance to the damage kind (0x491056…): 0x490f10 returns 0, no damage, no
     // popup, no reaction (0x490eb9 → 0x490ee4).
     var immune = false;
-    if (immunity.damageCode(.from(wpn.getInt("type")))) |code| if (states.resistsDiscover(self, w, t.*, code)) {
-        d = 0;
+    if (immunity.damageCode(.from(wpn.getInt("damage_kind")))) |code| if (states.resistsDiscover(self, w, t.*, code)) {
+        // OpenGorky: OnResist may let some through (a resisted strike is still one).
+        const through = try hooks.resist(w, t.obj, std.enums.tagName(immunity.DamageType, .from(wpn.getInt("damage_kind"))) orelse "other", d);
+        if (through != 0) battle.note(self, "  OnResist {s}: {d} -> {d}", .{ t.obj.name, d, through });
+        d = through;
         immune = true;
     };
     // Defending: damage ×0.5, frozen: ×1.5 (0x49132c, 0x49134b).
     if (t.defending) d = value.scaleInt(d, 0.5);
     if (t.frozen > 0) d = value.scaleInt(d, 1.5);
+    if (!immune) {
+        // OpenGorky: the attacker's scripted OnStrike, the target's OnHit (combat/events.zig).
+        d = try events.hit(self, w, who, v, wpn, d);
+        const hooked = try hooks.damage(w, attacker.obj, t.obj, wpn, d);
+        if (hooked != d) battle.note(self, "  OnDamage {s} -> {s} with {s}: {d} -> {d}", .{ attacker.obj.name, t.obj.name, wpn.name, d, hooked });
+        d = hooked;
+    }
     // Monitors (class 5, +0xcc = 0x4bcff0): only damage 0x490f10, without the last
     // attacker (+0x24aec), reaction (0x491920, which includes the shocker's
     // "current") and blood (0x491510).
-    const monitor = Class.of(t.obj) == .monitor;
+    const monitor = t.obj.implementsC("Monitor");
     if (!monitor) t.last_attacker = who;
     const hp_before = @max(0, t.hp());
     // Damage popup (0x492170) only for non-zero damage (0x491366); a hit fully
@@ -384,16 +441,16 @@ fn hitVictim(self: *Battle, w: *World, who: u16, wpn: *Object, v: u16, st: Strik
         ta.instant = true; // 0x491add
         ta.play(ta.resolve("hit"), false, true);
     }
-    // Reaction by weapon nameID (0x491c76): shocker and dischargers (0x491c91: 52,
+    // Reaction by weapon classic_id (0x491c76): shocker and dischargers (0x491c91: 52,
     // 55, 92) put "current" on the fighter for attack_shocker_shocked_timeout (30)
     // ticks; the flare gun (0x491e5e: 46) gives sparks.
-    if (!monitor) switch (fields.nameId(wpn)) {
-        52, 55, 92 => if (t.alive()) world.actorOf(t.*.obj).shock(),
-        46 => if (t.alive()) fx.blood.flare(w, t.obj, attacker.obj),
-        else => {},
-    };
-    // The Judge's child heals the Judge by the damage dealt (0x4dd010).
-    if (Class.of(attacker.obj) == .judge_child and d > 0) healJudge(self, w, hp_before - @max(0, t.hp()));
+    if (!monitor and t.alive()) {
+        const ww = core.entity.weaponOf(rules_mod.who(wpn));
+        const wo = rules_mod.who(wpn);
+        if (ww.shock) world.actorOf(t.*.obj).shockWith(rules_mod.weaponInt("attack_shocker_shocked_timeout", wo), rules_mod.weaponFloat("attack_shocker_light_range", wo), rules_mod.weaponFloat("attack_shocker_light_level", wo)) else if (ww.sparks) fx.blood.flare(w, t.obj, attacker.obj);
+    }
+    // Its OnDamageDealt: native Heals, the Judge's child heals the Judge by it (0x4dd010).
+    if (d > 0 and attacker.obj.implementsC("OnDamageDealt")) _ = try natives.ask(w, attacker.obj, "Fighter.OnDamageDealt", .{ t.obj.ref(), wpn.ref(), value.Value{ .int = hp_before - @max(0, t.hp()) } });
     // Blood and red flash (0x491510) when the strike strength before armour is > 0
     // (0x490ed6) and not resisted.
     if (!immune and !monitor and base > 0) {
@@ -408,8 +465,11 @@ fn hitVictim(self: *Battle, w: *World, who: u16, wpn: *Object, v: u16, st: Strik
         const lost = hp_before - @max(0, t.hp());
         attacker.pending_exp += value.scaleInt(lost, 1.75);
         if (t.dead and killCredit(t.*)) {
-            attacker.pending_exp += value.scaleInt(fields.maxHp(t.obj), 0.2);
-            attacker.addKill(fields.nameId(t.obj));
+            var reward = value.scaleInt(fields.maxHp(t.obj), rules.perMille(.kill_exp_pm));
+            // OpenGorky: the killed one's KillReward(killer, amount) (its Enemy role's).
+            if (t.obj.implementsC("KillReward")) reward = try events.chain(self, w, t.obj, "Enemy.KillReward", .{ attacker.obj.ref(), value.Value{ .int = reward } });
+            attacker.pending_exp += reward;
+            attacker.addKill(rules_mod.who(t.obj));
         }
     }
     // Weapon effect on a live target (subclass methods +0xf0).
@@ -417,8 +477,9 @@ fn hitVictim(self: *Battle, w: *World, who: u16, wpn: *Object, v: u16, st: Strik
         // Nitrogen gun (+0xdc 0x4bbcb0): fire is put out (+0x248dc = 0) before the cold
         // resistance check, resistant targets included.
         if (wc == .nitrogen) t.burning = 0;
-        if (rules.weaponEffect(cls)) |k| states.applyEffect(self, w, t, k);
-        if (t.soaked > 0 and rules.ignitesSoaked(cls)) {
+        var one: [1]rules.Effect = undefined;
+        for (rules.weaponEffects(cls, &one)) |k| states.applyEffect(self, w, t, k);
+        if (t.soaked > 0 and rules_mod.weaponClass(cls).ignites_soaked) {
             t.soaked = 0;
             states.applyEffect(self, w, t, .burn);
         }
@@ -429,53 +490,43 @@ fn hitVictim(self: *Battle, w: *World, who: u16, wpn: *Object, v: u16, st: Strik
     // `rand() % 1000 ≤ counterAttack × 10`. No alive check: a killed hero still draws
     // (startCounter skips the dead). An empty hand or a non-weapon never rolls.
     const hand = if (t.side == .hero) inventory.equipment.equipped(w, t.obj, .hand) else null;
-    const hand_ok = if (hand) |h| switch (fields.nameId(h)) {
-        1031, 33, 45, 1025, 52, 34, 55 => false,
-        else => World.nativeOf(h).kind == .weapon,
-    } else false;
+    const hand_ok = if (hand) |h| !core.entity.weaponOf(rules_mod.who(h)).no_counter and World.nativeOf(h).kind == .weapon else false;
     if (d != 0 and self.phase == .enemy and t.side == .hero and attacker.side == .enemy and
-        t.obj.getInt("attackLock") == 0 and hand_ok and t.frozen == 0 and t.asleep == 0)
+        t.obj.getInt("attack_locked") == 0 and hand_ok and t.frozen == 0 and t.asleep == 0)
     {
-        const ca = floatToInt(fields.getF(t.obj, "counterAttack") * 10);
+        var ca = floatToInt(fields.getF(t.obj, "counter_attack") * @as(f32, @floatFromInt(rules_mod.value(.counter_step))));
+        // OpenGorky: its CounterChance(attacker, chance) (Hero), the roll drawn as ever.
+        if (t.obj.implementsC("CounterChance")) ca = try events.chain(self, w, t.obj, "Hero.CounterChance", .{ attacker.obj.ref(), value.Value{ .int = ca } });
         if (@as(i32, @intCast(rand.below(1000))) <= ca) t.counter = true;
     }
 }
 
 fn awardExp(self: *Battle, w: *World, f: *Fighter) !void {
-    const gain = f.pending_exp;
+    var gain = f.pending_exp;
+    // OpenGorky: its ExperienceGain(amount) (Hero): what goes into experience; below 0 is 0
+    // (experience never goes down).
+    if (f.obj.implementsC("ExperienceGain")) gain = @max(0, try events.chain(self, w, f.obj, "Hero.ExperienceGain", .{value.Value{ .int = gain }}));
     battle.note(self, "  {s}: +{d} exp", .{ f.obj.name, gain });
     f.exp_gained += gain;
     f.pending_exp = 0;
     // "N exp" (string 578) over the hero 40 ticks later (0x4cf4e5).
     var buf: [32]u8 = undefined;
-    try battle.popup(self, f.*, std.fmt.bufPrint(&buf, "{d} {s}", .{ gain, w.stringOr(578, "exp") }) catch "exp", .exp);
+    try battle.popup(self, f.*, std.fmt.bufPrint(&buf, "{d} {s}", .{ gain, w.stringOr(ut.id(.exp), "exp") }) catch "exp", .exp);
     const exp = fields.experience(f.obj) + gain;
     fields.setExperience(f.obj, exp);
     var level = f.obj.getInt("level");
     var points: i32 = 0;
-    while (exp > rules.levelThreshold(level) and level < 19) {
+    while (exp > rules.levelThreshold(level) and level < rules.maxLevel()) {
         level += 1;
-        points += 5;
+        points += rules_mod.value(.level_points);
     }
     if (points > 0) {
         f.obj.setInt("level", level);
         World.nativeOf(f.obj).growth.stat_points += points;
-        try battle.popup(self, f.*, w.stringOr(524, "Level up"), .level);
+        try battle.popup(self, f.*, w.stringOr(ut.id(.level_up), "Level up"), .level);
         battle.note(self, "  {s}: level {d}, points {d}", .{ f.obj.name, level, World.nativeOf(f.obj).growth.stat_points });
-    }
-}
-
-fn healJudge(self: *Battle, w: *World, dealt: i32) void {
-    _ = w;
-    if (dealt <= 0) return;
-    for (self.fighters.items) |*j| {
-        if (!j.alive() or !std.ascii.eqlIgnoreCase(j.obj.name, "01_judge")) continue;
-        const add = @min(dealt, fields.maxHp(j.obj) - j.hp());
-        if (add <= 0) return;
-        fields.setHp(j.obj, j.hp() + add);
-        var buf: [16]u8 = undefined;
-        battle.popup(self, j.*, std.fmt.bufPrint(&buf, "{d}", .{add}) catch "", .heal) catch {};
-        return;
+        // OpenGorky: its OnLevelUp(level) (Hero).
+        if (f.obj.implementsC("OnLevelUp")) try events.tell(w, f.obj, "Hero.OnLevelUp", .{value.Value{ .int = level }});
     }
 }
 
@@ -490,16 +541,32 @@ fn popupText(buf: []u8, dmg: i32, bonus: i32) PopupText {
     return .{ .text = std.fmt.bufPrint(buf, "{d}+{d}", .{ @abs(v), bonus }) catch "", .heal = v >= 0 };
 }
 
+/// Tile `t` as an OGS list `[x, y]` (a handler's argument).
+fn tileValue(w: *World, t: Tile) !value.Value {
+    return .{ .list = try w.rt.strings().dupe(value.Value, &.{ .{ .int = t[0] }, .{ .int = t[1] } }) };
+}
+
 /// Side or back bonus (0x490f10, 0x490f3d…0x491042). Only with an attacker and
 /// damage before armour > 0, not for monitors (classType 5). The angle to the
 /// attacker atan2(dy, dx) vs the target's current angle +0x2457c, difference mod
 /// 2π reduced to [0, π]: at least 0.7125π (0x50a230) back, +4; at least 0.2375π
 /// (0x50a228) side, +2; else front, 0.
 fn sideBonus(attacker: Fighter, t: Fighter, base: i32) i32 {
-    if (base <= 0 or Class.of(t.obj) == .monitor) return 0;
+    if (base <= 0 or t.obj.implementsC("Monitor")) return 0;
     const ap = fields.pos(attacker.obj);
     const tp = fields.pos(t.obj);
     return rules.sideBonus(fields.facing(ap[0] - tp[0], ap[1] - tp[1]), fields.angle(t.obj));
+}
+
+/// A scripted ability's damage (FighterDamage, combat/events.zig): `amount` to fighter `v` of
+/// kind `kind` (noted; no OnHit: a reflection can't reflect back), on behalf of `from` (its
+/// last attacker: the killer if it dies).
+pub fn scriptDamage(self: *Battle, w: *World, v: u16, amount: i32, kind: []const u8, from: ?u16) !void {
+    const t = &self.fighters.items[v];
+    if (!t.alive() or t.side == .neutral) return;
+    if (from) |k| t.last_attacker = k;
+    battle.note(self, "  {s}: {s} damage {d}", .{ t.obj.name, if (kind.len > 0) kind else "script", amount });
+    try hurt(self, w, v, amount);
 }
 
 pub fn hurt(self: *Battle, w: *World, v: u16, dmg: i32) !void {
@@ -520,7 +587,9 @@ fn hurtBonus(self: *Battle, w: *World, v: u16, dmg: i32, bonus: i32) !void {
     try battle.popup(self, t.*, text.text, if (text.heal) .heal else .damage);
     if (dmg <= 0) return;
     if (w.debug.god and t.side == .hero) return;
-    fields.setHp(t.obj, t.hp() - dmg);
+    // OpenGorky: its CanDie(killer) as this blow would bring it to 0; false: it stays at 1.
+    const spared = t.hp() - dmg <= 0 and t.obj.implementsC("CanDie") and !try events.canDie(self, w, v);
+    fields.setHp(t.obj, if (spared) 1 else t.hp() - dmg);
     // Rage (0x49140c): every hit accumulates rage up to max_rage.
     if (t.obj.getInt("max_rage") > 0) {
         const r = t.obj.getInt("rage") + 1;
@@ -538,14 +607,10 @@ fn hurtBonus(self: *Battle, w: *World, v: u16, dmg: i32, bonus: i32) !void {
         a.play(a.resolve("death"), false, true);
         a.hold_last = true;
         a.startCorpseFade();
-        // Grandma's child dies (0x4e08d0): her target is whoever hit it last. Burning
-        // and gas (0x4903d0) strike without an attacker (0x490e9a), so after a death by
-        // fire it's the one who set it alight; walked into fire on its own, nobody.
-        if (Class.of(t.obj) == .grandma_child) for (self.fighters.items) |*g| {
-            if (std.ascii.eqlIgnoreCase(g.obj.name, "grandma")) g.grandma_target = t.last_attacker;
-        };
-        if (t.side == .enemy) if (w.level) |l| l.setInt("killedEnemies", l.getInt("killedEnemies") + 1);
-    } else if (Class.of(t.obj) != .monitor) {
+        // Its OnDeath: native Avenger first (Grandma's child, combat/natives.zig).
+        try events.death(self, w, v);
+        if (t.side == .enemy) if (w.level) |l| l.setInt("enemies_killed", l.getInt("enemies_killed") + 1);
+    } else if (!t.obj.implementsC("Monitor")) {
         // Hit reaction (0x491920) without the blend (0x491add); monitors have none (0x4bcff0).
         a.instant = true;
         a.play(a.resolve("hit"), false, true);
@@ -558,12 +623,8 @@ fn hurtBonus(self: *Battle, w: *World, v: u16, dmg: i32, bonus: i32) !void {
 /// it is neither `movable` nor `explosive`; for heroes (0x492340, vtable 0x50a244:
 /// heroes and the `.hro` ally), monitors (classType 5) and ally Lamar (19)
 /// 0x492420 = 0. Enemy Lamar in 05__lab_lamare (`.ftr`, classType −5) is ordinary: it counts.
-fn killCredit(t: Fighter) bool {
-    if (t.side == .hero) return false;
-    switch (Class.of(t.obj)) {
-        .hero, .hero3, .hero4, .monitor, .lamare => return false,
-        else => {},
-    }
+pub fn killCredit(t: Fighter) bool {
+    if (t.side == .hero or t.obj.implementsC("NoKillCredit")) return false;
     return !t.movable and !t.explosive;
 }
 

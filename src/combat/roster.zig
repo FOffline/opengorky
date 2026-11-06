@@ -13,6 +13,7 @@ const Battle = battle.Battle;
 const World = @import("../state.zig").world.World;
 const grid = @import("../battle.zig").grid;
 const generic = @import("../battle.zig").generic;
+const rules = @import("../rules.zig");
 const Fighter = @import("../battle.zig").fighter.Fighter;
 const max_fighters = battle.max_fighters;
 
@@ -20,7 +21,7 @@ const max_fighters = battle.max_fighters;
 /// via AIEnemyAppear). A party hero the battle script didn't place (Slavsky in
 /// 03__museum_child stays at the level coordinates outside the grid) doesn't take
 /// part: not a fighter, target or AI opponent, doesn't act, doesn't count for
-/// victory or defeat, isn't shown on the field (player's decision; in the exe such
+/// victory or defeat, isn't shown on the field (OpenGorky's rule; in the exe such
 /// a hero stays in the AI opponent list 0x498da0 with an old tile +0x24600).
 fn participates(self: *Battle, f: Fighter) bool {
     return self.grid().inside(f.tile);
@@ -35,7 +36,7 @@ pub fn fighterSize(o: *Object) u32 {
 /// Fighters not yet in the battle: placed by restore() or walking in
 /// (AIEnemyAppear, also between turns). Returns whether any are walking in.
 pub fn addNewcomers(self: *Battle, w: *World) !bool {
-    const cm = w.combat_map.?;
+    const cm = w.map.combat.?;
     const first = self.fighters.items.len;
     for (w.rt.objects.items) |o| {
         const nat = World.nativeOf(o);
@@ -49,10 +50,11 @@ pub fn addNewcomers(self: *Battle, w: *World) !bool {
             .obj = o,
             // An extra hero (`.hro` with avoidEnumerate, the singer on the barge) is on the
             // hero side too: enemies hit him and his death ends the game (0x490620).
-            .side = if (nat.hero or (nat.hro and o.getInt("avoidEnumerate") != 0)) .hero else if (nat.obstacle) .neutral else .enemy,
+            // OpenGorky: BattleSpawnHero's is on the hero side, BattleSpawnCivilian's on neither.
+            .side = if (nat.hero or nat.fight.spawned == .hero or (nat.hro and o.getInt("outside_party") != 0)) .hero else if (nat.obstacle) .neutral else if (nat.fight.spawned == .civilian) .civilian else .enemy,
             .tile = cm.tileOf(fields.pos(o), size),
             .size = size,
-            .explosive = nat.obstacle and o.getInt("explosive") != 0,
+            .explosive = nat.obstacle and (fields.explodable(o) orelse (o.getInt("explosive") != 0)),
             .movable = nat.obstacle and o.getInt("movable") != 0,
         };
         if (nat.fight.appear) |ap| {
@@ -60,21 +62,69 @@ pub fn addNewcomers(self: *Battle, w: *World) !bool {
             f.appear_to = ap.to;
         } else if (!participates(self, f)) continue;
         if (self.fighters.items.len == max_fighters) break;
-        // An invisible monster (0x48e890) starts the battle invisible.
-        if (fields.isInvisibleMonster(o)) {
+        // Natives as it was made (world/start.zig actorHooks); one made otherwise gets them here.
+        try @import("../core.zig").natives.attach(&w.rt, o);
+        // One StartsUnseen (native Invisible: the Invisible, 0x48e890) starts the battle unseen.
+        if (o.implementsC("StartsUnseen")) {
             nat.actor.invisible = true;
             nat.actor.alpha = 0;
         }
         generic.registerFighter(w.immunity, o);
         try self.fighters.append(w.gpa, f);
     }
+    for (self.fighters.items[first..]) |f| try prepareAttacks(self, w, f);
     var appearing = false;
     for (self.fighters.items[first..], first..) |*f, i| {
         if (f.side != .neutral) f.weapon = weapons.defaultWeapon(w, f.*);
         if (f.appear_to == null) self.grid().place(f.tile, f.size, @intCast(i)) else appearing = true;
         anim.snap(w, f.*);
     }
+    // OpenGorky: their scripted abilities attached, OnSpawn.
+    try @import("events.zig").spawn(self, w, first);
     return appearing;
+}
+
+/// OpenGorky: a fighter's attacks by its MonsterAttack rows (rules attacks.ss): a `give`
+/// row's weapon class is made for it if it holds none (a new attack: a wp_ class as a
+/// `.wpn` includes it, a cw_ one as Weapon_New), then each of its weapons takes its
+/// row's `zone`, `damage`, `damage_type`. Classic (the exe has no such rows): nothing.
+fn prepareAttacks(self: *Battle, w: *World, f: Fighter) !void {
+    if (!rules.og or f.side == .neutral) return;
+    const who = rules.who(f.obj);
+    var gb: [8][]const u8 = undefined;
+    for (rules.givenWeapons(who, &gb)) |class| {
+        var held: [16]*Object = undefined;
+        const has = for (weapons.threatWeaponsOf(w, f, &held)) |o| {
+            if (std.ascii.eqlIgnoreCase(rules.classOf(o.class), class)) break true;
+        } else false;
+        if (has) continue;
+        const a = w.rt.arena();
+        const name = try std.fmt.allocPrint(a, "{s}_{s}", .{ f.obj.name, class });
+        const cw = std.ascii.startsWithIgnoreCase(class, "cw_");
+        const file = if (cw) try std.fmt.allocPrint(a, "{s}.s", .{class}) else try std.fmt.allocPrint(a, "og_{s}.wpn", .{name});
+        if (!cw) try @import("../world.zig").sources.addSource(w, file, try std.fmt.allocPrint(a,
+            \\#include Weapon.s
+            \\function init()
+            \\{{
+            \\#include {s}.ss
+            \\  Owner="{s}";
+            \\  place=10;
+            \\}};
+            \\
+        , .{ class, f.obj.name }));
+        const o = try @import("../inventory.zig").create.newItem(w, name, file, if (cw) f.obj.name else null, null, .weapon) orelse continue;
+        battle.note(self, "  {s} gets {s} (rules)", .{ f.obj.name, o.name });
+    }
+    var held: [16]*Object = undefined;
+    for (weapons.threatWeaponsOf(w, f, &held)) |o| {
+        const r = rules.monsterAttack(who, rules.who(o)) orelse continue;
+        if (r.attack_zone.len > 0) if (rules.weaponClassId(r.attack_zone)) |z| {
+            try o.declare(w.rt.arena(), "attack_zone", .{ .type = .int, .value = .{ .int = 0 } });
+            o.getVarDyn("attack_zone").?.value = .{ .int = z };
+        };
+        if (r.max_damage > 0) o.setInt("max_damage", r.max_damage);
+        if (r.damage_kind != .none) o.setInt("damage_kind", @backingInt(r.damage_kind));
+    }
 }
 
 /// Enemy appearance (AIEnemyAppear); the `appear` phase ends on the first tick when
@@ -88,7 +138,7 @@ pub fn startAppear(self: *Battle, w: *World) void {
 
 /// Battle on an already started battle level: heroes and enemies placed by restore().
 pub fn init(w: *World) !Battle {
-    const cm = w.combat_map orelse return error.NoCombatMap;
+    const cm = w.map.combat orelse return error.NoCombatMap;
     const n = @as(usize, cm.width) * cm.height;
     var b: Battle = .{
         .gpa = w.gpa,
@@ -133,7 +183,7 @@ pub fn unlockAll(w: *World) void {
     for (w.rt.objects.items) |o| {
         if (World.nativeOf(o).kind != .actor or !fields.isFighter(o)) continue;
         fields.clearMoveLock(o);
-        o.setInt("attackLock", 0);
+        o.setInt("attack_locked", 0);
     }
 }
 

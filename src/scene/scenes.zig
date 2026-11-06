@@ -3,8 +3,7 @@
 const std = @import("std");
 const show_cmds = @import("show_cmds.zig");
 const fields = @import("../fields.zig");
-const archive = @import("../formats.zig").archive;
-const scriptlet = @import("../formats.zig").scriptlet;
+const scriptlet = @import("../core.zig").scene;
 const world = @import("../state.zig").world;
 const World = world.World;
 const fx_mod = @import("../fx.zig");
@@ -69,7 +68,7 @@ pub fn tickRockets(self: *World) !void {
         _ = rockets.orderedRemove(pi);
         fx_mod.explosion.explosion(self, sr.target);
         const q = self.cam.project(sr.target);
-        self.out.sound(self.gpa, "granat", .{ q.x, q.y });
+        self.out.sound(self.gpa, @import("../core.zig").modules.ui().sounds.explosion, .{ q.x, q.y });
     }
 }
 
@@ -201,16 +200,10 @@ pub fn startScriptlet(self: *World, name: []const u8) !void {
     if (!gop.found_existing) {
         errdefer self.scene.scriptlet_cache.removeByPtr(gop.key_ptr);
         gop.key_ptr.* = try a.dupe(u8, name);
-        var buf: [archive.name_size]u8 = undefined;
-        const scr = self.res.common.find(try std.fmt.bufPrint(&buf, "scriptlets\\{s}.scr", .{name})) orelse return error.NotFound;
-        const cmds = try scriptlet.parse(a, try self.res.common.readAlloc(self.io, a, scr));
-        const pts = if (self.res.common.find(try std.fmt.bufPrint(&buf, "scriptlets\\{s}.pts", .{name}))) |e|
-            try scriptlet.parsePoints(a, try self.res.common.readAlloc(self.io, a, e))
-        else
-            &.{};
-        gop.value_ptr.* = .{ .cmds = cmds, .pts = pts };
+        gop.value_ptr.* = try self.res.scenes.loadScene(a, name);
     }
-    self.scene.runner = .{ .name = gop.key_ptr.*, .commands = gop.value_ptr.cmds, .points = gop.value_ptr.pts };
+    if (gop.value_ptr.off) return;
+    self.scene.runner = .{ .name = gop.key_ptr.*, .commands = gop.value_ptr.commands, .points = gop.value_ptr.points };
 }
 
 /// Defer a scene until the current one ends (SetAddonScriptlet 0x4791e0,
@@ -241,9 +234,9 @@ pub fn startDialog(self: *World, name: []const u8, file: []const u8) !void {
 
 /// Speaker name in the line box (0x459b93…0x459c3c): if the world has an actor
 /// with that name (0x431b40, first object, case-insensitive; +0x60 actor,
-/// 0x459249), the `string.tab` line by its nameID (+0x58, 0x40f370; "Not
+/// 0x459249), the `string.tab` line by its classic_id (+0x58, 0x40f370; "Not
 /// Defined" if missing), else the `.dlg` name as is (HQ, Lamar on the radio).
 pub fn speakerName(self: *World, speaker: []const u8) []const u8 {
     const o = self.actorObject(speaker) orelse return speaker;
-    return self.stringOr(fields.nameId(o), "Not Defined");
+    return self.stringOr(fields.classicId(o), "Not Defined");
 }

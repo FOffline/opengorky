@@ -2,10 +2,9 @@
 //! (steps/commands in scene/scenario.zig, start/tick in scene/scenes.zig).
 
 const std = @import("std");
-const scriptlet = @import("../formats.zig").scriptlet;
-const dialog_fmt = @import("../formats.zig").dialog;
+const scriptlet = @import("../core.zig").scene;
 const Object = @import("../script.zig").object.Object;
-const Font = @import("../formats.zig").font.Font;
+const Font = @import("../core.zig").entity.Font;
 
 const Subtitle = struct { speaker: []const u8, text: []const u8 };
 
@@ -29,8 +28,8 @@ pub const State = struct {
     addon: ?[]const u8 = null,
     /// Parsed scenes and dialogues by name: ladders and DIALOG_INIT reuse them and the
     /// location arena lives all session (commands are read-only).
-    scriptlet_cache: std.StringHashMapUnmanaged(struct { cmds: []const scriptlet.Command, pts: []const scriptlet.Point }) = .empty,
-    dialog_cache: std.StringHashMapUnmanaged(dialog_fmt.Dialog) = .empty,
+    scriptlet_cache: std.StringHashMapUnmanaged(scriptlet.Scene) = .empty,
+    dialog_cache: std.StringHashMapUnmanaged(scriptlet.Dialog) = .empty,
     /// ROCKET missiles: effect projectile id and blast point.
     rockets: std.ArrayList(Rocket) = .empty,
     /// The scene used MP3_PLAY: restore the previous music when it ends.
@@ -63,8 +62,9 @@ pub const State = struct {
     autocamera: bool = true,
     /// Signature(n) caption: `intro.spr` frame and start tick.
     signature: ?struct { frame: u32, start: u64 } = null,
-    /// Hero of the last action (#LAST_ACTION_HERO in scenes).
-    last_action_hero: []const u8 = "Sullivan",
+    /// Hero of the last action (#LAST_ACTION_HERO in scenes; game/life.zig create: the
+    /// campaign's leader first).
+    last_action_hero: []const u8 = "",
     /// Pre-battle dialogue deferred until enemies have appeared (name, file).
     pending_dialog: ?[2][]const u8 = null,
 
@@ -83,6 +83,9 @@ pub const State = struct {
         self.cutscene = false;
         self.panorama = false;
         self.autocamera = true;
+        // The exe load (0x472400) re-runs location init 0x411890, whose 0x45a950 zeroes
+        // the Signature flag [0x651cd8]: the intro caption post_init set must not survive.
+        self.signature = null;
     }
 
     /// Split `text` into pages exactly as the dialog box draws them (0x459b40):
@@ -163,10 +166,9 @@ test "splitPages: 2 lines per page, one page without a font" {
     try std.testing.expectEqual(1, st.subtitle_pages);
     try std.testing.expectEqual(7, st.pages[0].to);
     // Glyphs 2 px wide advance 1 px: 100 words of 10 chars → lines of 390, 3 lines, 2 pages.
-    const px = [_]u8{ 1, 1 };
-    var f: Font = .{ .glyphs = @splat(null), .height = 1, .max_level = 1 };
-    f.glyphs['a'] = .{ .width = 2, .height = 1, .pixels = &px };
-    f.glyphs[' '] = .{ .width = 2, .height = 1, .pixels = &px };
+    var f: Font = .{};
+    f.widths['a'] = 2;
+    f.widths[' '] = 2;
     var buf: [999]u8 = undefined;
     for (&buf, 0..) |*ch, i| ch.* = if (i % 10 == 9) ' ' else 'a';
     const text: []const u8 = &buf;
@@ -204,7 +206,7 @@ pub const Runner = struct {
     skip: bool = false,
     /// NO_SKIP: the scene can't be skipped.
     no_skip: bool = false,
-    dialog: ?dialog_fmt.Dialog = null,
+    dialog: ?scriptlet.Dialog = null,
     dialog_file: []const u8 = "",
 
     pub fn done(self: Runner) bool {
@@ -219,5 +221,5 @@ pub const Runner = struct {
 
 /// gui_panorama_height (adjust.kdt, 42): the panorama bar's height.
 pub fn panoramaHeight() f32 {
-    return @floatFromInt(@import("../formats.zig").adjust.getInt("gui_panorama_height", 42));
+    return @floatFromInt(@import("../rules.zig").adjust.int("gui_panorama_height"));
 }

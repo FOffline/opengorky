@@ -1,0 +1,49 @@
+ExpLevel(level = 0, exp = 0);
+ExpLevel(level = 1, exp = 220);
+ExpLevel(level = 2, exp = 450);
+ExpLevel(level = 3, exp = 705);
+ExpLevel(level = 4, exp = 1010);
+ExpLevel(level = 5, exp = 1385);
+ExpLevel(level = 6, exp = 1910);
+ExpLevel(level = 7, exp = 2720);
+ExpLevel(level = 8, exp = 4260);
+ExpLevel(level = 9, exp = 8745);
+ExpLevel(level = 10, exp = 17490);
+ExpLevel(level = 11, exp = 34980);
+ExpLevel(level = 12, exp = 69960);
+ExpLevel(level = 13, exp = 139920);
+ExpLevel(level = 14, exp = 279840);
+ExpLevel(level = 15, exp = 559680);
+ExpLevel(level = 16, exp = 1119360);
+ExpLevel(level = 17, exp = 2238720);
+ExpLevel(level = 18, exp = 4477440);
+ExpLevel(level = 19, exp = 8954880);
+IdleChatter(hero = 20, dialog = "idle_su_01.dlg");
+IdleChatter(hero = 21, dialog = "idle_ov_01.dlg", anim = "medicine");
+IdleChatter(hero = 22, dialog = "idle_tr_01.dlg");
+HiddenWeapons(hero = 29, weapons = "34 98 1022 1023 1024 1025 1026 1037 1028 1029");
+HiddenWeapons(hero = 24, weapons = "34 1022 1024 1025 1026 1037 1028 1029");
+Value(name = "incubus", value = 138);
+Value(name = "idle_ticks", value = 1800);
+Value(name = "party_max", value = 6);
+Value(name = "kill_exp_pm", value = 200);
+Value(name = "level_points", value = 5);
+Value(name = "stat_cap", value = 100);
+Value(name = "skill_step", value = 10);
+Value(name = "crit_pm", value = 1200);
+Value(name = "rage_pm", value = 2000);
+Value(name = "side_bonus", value = 2);
+Value(name = "back_bonus", value = 4);
+Value(name = "counter_step", value = 10);
+Value(name = "lose_on_hero_death", value = 1);
+AiProfile(
+    scoring = "generic",
+    damage_bonus = 5,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 2,
+    decoy_pull = 2000,
+    decoys = 1,
+    step_away = 1,
+    threat = 1,
+);

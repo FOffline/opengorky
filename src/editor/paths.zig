@@ -9,56 +9,64 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const og = @import("opengorky");
 const c = @import("sdl");
-const ui = @import("ui");
-const lf = og.formats.level_files;
+const map_io = og.loaders.map;
+const core_map = og.core.map;
 const clay = @import("clay.zig");
+const gui = @import("widgets.zig");
+const lay = @import("layout.zig");
+const ink = @import("render.zig").ink;
 const font_mod = @import("font.zig");
 const tx = @import("text.zig");
-const textedit = @import("textedit.zig");
-const codeview = @import("codeview.zig");
+const doctabs = @import("doctabs.zig");
 const level = @import("level.zig");
+const paint = @import("paint.zig");
 const Doc = level.Doc;
-const main = @import("app.zig");
-const App = main.App;
-const theme = main.theme;
-const txt = main.txt;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
+const theme = app_mod.theme;
 
 /// The Paths tool (`app.paths`): the picked path, what a click does, a node dragged.
 pub const State = struct {
-    sel: main.Name(64) = .{},
+    sel: app_mod.Name(64) = .{},
     mode: Mode = .pick,
     drag: ?struct { node: usize, at: [2]f32 } = null,
 };
 
-const Mode = enum { pick, add, start, end };
+pub const Mode = enum { pick, add, start, end };
 
 fn apEntry(a: Allocator, d: *Doc) []const u8 {
     return std.fmt.allocPrint(a, "{s}.ap", .{d.name}) catch "";
 }
 
 /// The paths as the Store has them (frame memory; names copied).
-pub fn load(app: *App, d: *Doc) []lf.Path {
+pub fn load(app: *App, d: *Doc) []core_map.Path {
     const a = app.frame.allocator();
     const f = app.store.file(d.level_archive, apEntry(a, d)) catch return &.{};
-    const ps = lf.parsePaths(a, app.store.text(f)) catch return &.{};
+    const ps = map_io.parsePaths(a, app.store.text(f)) catch return &.{};
     return ps;
 }
 
-fn save(app: *App, d: *Doc, ps: []const lf.Path, what: []const u8) void {
+fn save(app: *App, d: *Doc, ps: []const core_map.Path, what: []const u8) void {
     const a = app.frame.allocator();
     const entry = apEntry(a, d);
-    const t = lf.encodePaths(app.gpa, ps) catch return;
+    const t = map_io.encodePaths(app.gpa, ps) catch return;
     if (app.store.file(d.level_archive, entry)) |f| {
         app.store.replaceLabeled(f, t, std.fmt.allocPrint(a, "{s}: {s}", .{ entry, what }) catch entry) catch |err| {
             app.gpa.free(t);
-            app.setStatus(tx.st_set_failed, .{err});
+            app.failed(err);
         };
     } else |_| {
-        _ = app.store.addNew(&.{.{ .archive = d.level_archive, .entry = entry, .text = t }}) catch |err| app.setStatus(tx.st_set_failed, .{err});
+        _ = app.store.addNew(&.{.{ .archive = d.level_archive, .entry = entry, .text = t }}) catch |err| app.failed(err);
     }
 }
 
-fn selIndex(app: *App, ps: []const lf.Path) ?usize {
+/// Another path than `k` has `cell` as its link end `j` (0: start, 2: end).
+fn usedBy(ps: []const core_map.Path, k: usize, j: usize, cell: [2]f32) bool {
+    for (ps, 0..) |p, i| if (i != k and p.link[j] == cell[0] and p.link[j + 1] == cell[1]) return true;
+    return false;
+}
+
+fn selIndex(app: *App, ps: []const core_map.Path) ?usize {
     for (ps, 0..) |p, k| if (std.mem.eql(u8, p.name, app.paths.sel.get())) return k;
     return null;
 }
@@ -67,11 +75,11 @@ fn selIndex(app: *App, ps: []const lf.Path) ?usize {
 /// nodes numbered and its start and end cells marked.
 pub fn draw(app: *App, d: *Doc, rect: c.SDL_FRect) void {
     const ps = load(app, d);
-    const cs = lf.WalkMap.cell_size;
+    const cs = core_map.WalkMap.cell_size;
     for (ps, 0..) |p, k| {
         const sel = selIndex(app, ps) == k;
         const a: u8 = if (sel) 255 else 120;
-        _ = c.SDL_SetRenderDrawColor(app.r, 120, 220, 255, a);
+        ink(app.r, lay.canvas.alpha(lay.canvas.path, a));
         var prev: ?[2]f32 = null;
         for (p.points, 0..) |pt0, i| {
             var pt: [2]f32 = .{ pt0[0], pt0[1] };
@@ -82,18 +90,18 @@ pub fn draw(app: *App, d: *Doc, rect: c.SDL_FRect) void {
             if (prev) |q| _ = c.SDL_RenderLine(app.r, q[0], q[1], s[0], s[1]);
             const r: f32 = if (sel) 5 else 3;
             _ = c.SDL_RenderFillRect(app.r, &.{ .x = s[0] - r, .y = s[1] - r, .w = r * 2, .h = r * 2 });
-            if (sel) app.font.draw(app.r, std.fmt.allocPrint(app.frame.allocator(), "{d}", .{i}) catch "", font_mod.regular, 13, s[0] + 7, s[1] - 8, .{ 160, 235, 255, 255 });
+            if (sel) app.font.draw(app.r, std.fmt.allocPrint(app.frame.allocator(), "{d}", .{i}) catch "", font_mod.regular, lay.Type.body.pt(), s[0] + 7, s[1] - 8, lay.canvas.alpha(lay.canvas.path_text, 255));
             prev = s;
         }
         if (p.points.len > 0) {
             const s = d.toScreen(rect, .{ p.points[0][0], p.points[0][1] });
-            app.font.draw(app.r, p.name, font_mod.bold, 13, s[0] + 7, s[1] + 6, .{ 160, 235, 255, a });
+            app.font.draw(app.r, p.name, font_mod.bold, lay.Type.body.pt(), s[0] + 7, s[1] + 6, lay.canvas.alpha(lay.canvas.path_text, a));
         }
         if (!sel) continue;
         // The start (green) and end (orange) cells of the walk grid.
         for ([_][2]f32{ .{ p.link[0], p.link[1] }, .{ p.link[2], p.link[3] } }, 0..) |cell, i| {
             const s = d.toScreen(rect, .{ cell[0] * cs, cell[1] * cs });
-            if (i == 0) _ = c.SDL_SetRenderDrawColor(app.r, 90, 230, 120, 255) else _ = c.SDL_SetRenderDrawColor(app.r, 255, 160, 60, 255);
+            ink(app.r, if (i == 0) lay.canvas.path_start else lay.canvas.path_end);
             _ = c.SDL_RenderRect(app.r, &.{ .x = s[0], .y = s[1], .w = cs * d.zoom, .h = cs * d.zoom });
             _ = c.SDL_RenderRect(app.r, &.{ .x = s[0] - 1, .y = s[1] - 1, .w = cs * d.zoom + 2, .h = cs * d.zoom + 2 });
         }
@@ -104,7 +112,7 @@ pub fn draw(app: *App, d: *Doc, rect: c.SDL_FRect) void {
 /// picked path (or any) taken to drag, a path picked.
 pub fn press(app: *App, d: *Doc, rect: c.SDL_FRect, m: [2]f32) void {
     const ps = load(app, d);
-    const bg = d.toBackground(rect, m);
+    const bg = d.onPicture(d.toBackground(rect, m));
     if (selIndex(app, ps)) |k| switch (app.paths.mode) {
         .add => {
             const a = app.frame.allocator();
@@ -115,15 +123,13 @@ pub fn press(app: *App, d: *Doc, rect: c.SDL_FRect, m: [2]f32) void {
             return save(app, d, ps, "node");
         },
         .start, .end => {
-            const cs = lf.WalkMap.cell_size;
+            const cs = core_map.WalkMap.cell_size;
             const cell: [2]f32 = .{ @floor(bg[0] / cs), @floor(bg[1] / cs) };
-            if (app.paths.mode == .start) {
-                ps[k].link[0] = cell[0];
-                ps[k].link[1] = cell[1];
-            } else {
-                ps[k].link[2] = cell[0];
-                ps[k].link[3] = cell[1];
-            }
+            const j: usize = if (app.paths.mode == .start) 0 else 2;
+            const old: [2]f32 = .{ ps[k].link[j], ps[k].link[j + 1] };
+            ps[k].link[j] = cell[0];
+            ps[k].link[j + 1] = cell[1];
+            if (app.paint) |p| paint.linkMark(app, p, if (j == 0) 2 else 4, old, usedBy(ps, k, j, old), cell);
             app.paths.mode = .pick;
             return save(app, d, ps, "link");
         },
@@ -147,7 +153,7 @@ pub fn press(app: *App, d: *Doc, rect: c.SDL_FRect, m: [2]f32) void {
 
 pub fn drag(app: *App, d: *Doc, rect: c.SDL_FRect, m: [2]f32) void {
     const dr = &(app.paths.drag orelse return);
-    const bg = d.toBackground(rect, m);
+    const bg = d.onPicture(d.toBackground(rect, m));
     dr.at = .{ @round(bg[0]), @round(bg[1]) };
 }
 
@@ -166,44 +172,50 @@ pub fn release(app: *App, d: *Doc) void {
 /// The tool's panel: the paths (one picked), its nodes (typed: x, y, angle, the last
 /// number), the click modes, its script, a new path, delete.
 pub fn panel(app: *App, a: Allocator, d: *Doc) void {
-    clay.text(tx.get(tx.pa_hint), .{ .textColor = theme.text, .fontSize = 12, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
+    gui.note(tx.get(tx.pa_hint));
     const ps = load(app, d);
     for (ps, 0..) |p, k| {
         const sel = selIndex(app, ps) == k;
         const rid = clay.idi("path_row", @intCast(k));
-        if (main.clickable(app, .{ .id = rid, .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.fixed(28) }, .padding = .{ .left = 8, .right = 8 }, .childGap = 8, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } }, .backgroundColor = theme.panel, .cornerRadius = clay.radius(4) }, sel)) {
+        if (gui.listRow(app, rid, .{ .selected = sel })) {
             app.paths.sel.set(p.name);
             app.paths.mode = .pick;
         }
-        txt(p.name, 14, theme.text, if (sel) font_mod.bold else font_mod.regular);
-        txt(tx.alloc(a, tx.pa_nodes, .{p.points.len}), 12, theme.dim, font_mod.regular);
+        gui.txt(p.name, .label, theme.text, if (sel) font_mod.bold else font_mod.regular);
+        gui.txt(tx.alloc(a, tx.pa_nodes, .{p.points.len}), .caption, theme.dim, font_mod.regular);
         clay.close();
     }
-    if (main.toolButton(app, "path_new", .plus, tx.get(tx.pa_new), false, false)) newPath(app, d, ps);
+    if (gui.footer(app, "path_new", &.{tx.get(tx.pa_new)}, null) != null) newPath(app, d, ps);
     const k = selIndex(app, ps) orelse return;
     const p = ps[k];
-    main.panelHeader(p.name);
-    clay.open(.{ .layout = .{ .childGap = 6 } });
-    if (main.toolButton(app, "path_add", .plus, tx.get(tx.pa_add), app.paths.mode == .add, false)) app.paths.mode = if (app.paths.mode == .add) .pick else .add;
-    if (main.toolButton(app, "path_start", .crosshair, tx.get(tx.pa_start), app.paths.mode == .start, false)) app.paths.mode = .start;
-    if (main.toolButton(app, "path_end", .crosshair, tx.get(tx.pa_end), app.paths.mode == .end, false)) app.paths.mode = .end;
-    clay.close();
-    txt(tx.alloc(a, tx.pa_link, .{ p.link[0], p.link[1], p.link[2], p.link[3] }), 12, theme.dim, font_mod.regular);
+    gui.subhead(p.name);
+    // The click modes, wrapped in a narrow panel.
+    const modes = [_]gui.Item{
+        .{ .id = clay.id("path_add"), .b = .{ .icon = .plus, .label = tx.get(tx.pa_add), .on = app.paths.mode == .add, .size = .tool } },
+        .{ .id = clay.id("path_start"), .b = .{ .icon = .crosshair, .label = tx.get(tx.pa_start), .on = app.paths.mode == .start, .size = .tool } },
+        .{ .id = clay.id("path_end"), .b = .{ .icon = .crosshair, .label = tx.get(tx.pa_end), .on = app.paths.mode == .end, .size = .tool } },
+    };
+    if (gui.buttonRow(app, clay.id("path_modes"), &modes)) |m| app.paths.mode = switch (m) {
+        0 => if (app.paths.mode == .add) .pick else .add,
+        1 => .start,
+        else => .end,
+    };
+    gui.txt(tx.alloc(a, tx.pa_link, .{ p.link[0], p.link[1], p.link[2], p.link[3] }), .caption, theme.dim, font_mod.regular);
     for (p.points, 0..) |pt, i| {
-        clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .childGap = 4, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-        clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(20) } } });
-        txt(std.fmt.allocPrint(a, "{d}", .{i}) catch "", 12, theme.dim, font_mod.regular);
+        gui.row(lay.space.xs);
+        clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(lay.height.small) } } });
+        gui.txt(std.fmt.allocPrint(a, "{d}", .{i}) catch "", .caption, theme.dim, font_mod.regular);
         clay.close();
         inline for (0..4) |j| {
             const shown = if (j == 2) std.fmt.allocPrint(a, "{d:.2}", .{pt[j]}) catch "" else std.fmt.allocPrint(a, "{d}", .{@as(i32, @intFromFloat(pt[j]))}) catch "";
-            if (textedit.field(app, std.fmt.allocPrint(a, "pn{d}_{d}_{d}", .{ k, i, j }) catch "pn", shown, 64, "")) |v| {
+            if (gui.textField(app, std.fmt.allocPrint(a, "pn{d}_{d}_{d}", .{ k, i, j }) catch "pn", shown, lay.width.number, "")) |v| {
                 if (std.fmt.parseFloat(f32, std.mem.trim(u8, v, " "))) |num| {
                     ps[k].points[i][j] = num;
                     save(app, d, ps, "node");
                 } else |_| {}
             }
         }
-        if (main.toolButton(app, std.fmt.allocPrint(a, "pn_del{d}", .{i}) catch "pd", .trash_2, "", false, false)) {
+        if (gui.toolButton(app, std.fmt.allocPrint(a, "pn_del{d}", .{i}) catch "pd", .trash_2, "", false, false)) {
             var fewer = a.alloc([4]f32, p.points.len - 1) catch return clay.close();
             @memcpy(fewer[0..i], p.points[0..i]);
             @memcpy(fewer[i..], p.points[i + 1 ..]);
@@ -212,13 +224,10 @@ pub fn panel(app: *App, a: Allocator, d: *Doc) void {
         }
         clay.close();
     }
-    clay.open(.{ .layout = .{ .childGap = 6 } });
-    if (main.toolButton(app, "path_script", .code, tx.get(tx.pa_script), false, false)) openScript(app, d, p.name);
-    if (main.toolButton(app, "path_del", .trash_2, tx.get(tx.cm_delete), false, false)) app.askDelete(.path, 0, p.name);
-    clay.close();
+    if (gui.footer(app, "path_acts", &.{ tx.get(tx.pa_script), tx.get(tx.cm_delete) }, null)) |m| if (m == 0) openScript(app, d, p.name) else app.askDelete(.path, 0, p.name);
 }
 
-fn newPath(app: *App, d: *Doc, ps: []lf.Path) void {
+pub fn newPath(app: *App, d: *Doc, ps: []core_map.Path) void {
     const a = app.frame.allocator();
     const name = for (1..1000) |n| {
         const s = std.fmt.allocPrint(a, "path{d}", .{n}) catch return;
@@ -226,7 +235,7 @@ fn newPath(app: *App, d: *Doc, ps: []lf.Path) void {
             if (std.ascii.eqlIgnoreCase(p.name, s)) break;
         } else break s;
     } else return;
-    var more = a.alloc(lf.Path, ps.len + 1) catch return;
+    var more = a.alloc(core_map.Path, ps.len + 1) catch return;
     @memcpy(more[0..ps.len], ps);
     more[ps.len] = .{ .name = name, .link = .{ 0, 0, 0, 0 }, .points = &.{} };
     save(app, d, more, "new path");
@@ -238,8 +247,18 @@ fn newPath(app: *App, d: *Doc, ps: []lf.Path) void {
 /// Path `name` deleted (its `.pth` stays: a script nothing names is harmless).
 pub fn remove(app: *App, d: *Doc, name: []const u8) void {
     const ps = load(app, d);
-    var out: std.ArrayList(lf.Path) = .empty;
-    for (ps) |p| if (!std.ascii.eqlIgnoreCase(p.name, name)) out.append(app.frame.allocator(), p) catch return;
+    var out: std.ArrayList(core_map.Path) = .empty;
+    for (ps, 0..) |p, k| {
+        if (!std.ascii.eqlIgnoreCase(p.name, name)) {
+            out.append(app.frame.allocator(), p) catch return;
+            continue;
+        }
+        // Its cells' marks go too (another path's on the same cell stay).
+        if (app.paint) |pt| for ([_]usize{ 0, 2 }) |j| {
+            const cell: [2]f32 = .{ p.link[j], p.link[j + 1] };
+            paint.linkMark(app, pt, if (j == 0) 2 else 4, cell, usedBy(ps, k, j, cell), null);
+        };
+    }
     save(app, d, out.items, "path deleted");
     app.paths.sel.set("");
 }
@@ -248,8 +267,8 @@ pub fn remove(app: *App, d: *Doc, name: []const u8) void {
 fn openScript(app: *App, d: *Doc, name: []const u8) void {
     const a = app.frame.allocator();
     const entry = std.fmt.allocPrint(a, "{s}.pth", .{name}) catch return;
-    if (app.store.file(d.level_archive, entry)) |f| return codeview.open(app, f, null) else |_| {}
+    if (app.store.file(d.level_archive, entry)) |f| return doctabs.showCode(app, f, null) else |_| {}
     const t = app.gpa.dupe(u8, "// The walk along this path: node `no` reached, `dir` 1 forward, 0 back.\r\nfunction NodeResponse(int no, int dir)\r\n{\r\n};\r\n") catch return;
-    const f = app.store.addNew(&.{.{ .archive = d.level_archive, .entry = entry, .text = t }}) catch |err| return app.setStatus(tx.st_set_failed, .{err});
-    codeview.open(app, f, null);
+    const f = app.store.addNew(&.{.{ .archive = d.level_archive, .entry = entry, .text = t }}) catch |err| return app.failed(err);
+    doctabs.showCode(app, f, null);
 }

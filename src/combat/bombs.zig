@@ -2,11 +2,10 @@
 //! Sits above combat/strike.zig because a blast strikes with a weapon;
 //! combat/devices.zig places the bombs.
 
-const adjust = @import("../formats.zig").adjust;
+const rules = @import("../rules.zig");
 const fields = @import("../fields.zig");
 const strike_mod = @import("strike.zig");
 const devices = @import("devices.zig");
-const fx = @import("../fx.zig");
 const battle = @import("../battle.zig").battle;
 const Battle = battle.Battle;
 const Bomb = battle.Bomb;
@@ -83,13 +82,7 @@ fn explodeBomb(self: *Battle, w: *World, bomb: Bomb) !void {
         }
         removeDevice(self, fi);
     }
-    if (w.combat_map) |cm| {
-        const c = cm.tileCenter(bomb.tile, 1);
-        const p = [3]f32{ c[0], c[1], c[2] + adjust.getFloat("attack_grenade_exp", 250) * w.actorScale() };
-        fx.explosion.explosion(w, p);
-        const q = w.cam.project(p);
-        w.out.sound(w.gpa, "granat", .{ q.x, q.y });
-    }
+    devices.blastAt(w, bomb.tile);
     World.nativeOf(bomb.obj).deleted = true;
     bomb.obj.enabled = false;
     self.bomb_cam = bomb.tile;
@@ -100,7 +93,7 @@ fn explodeBomb(self: *Battle, w: *World, bomb: Bomb) !void {
 /// is this attack's.
 pub fn placeCharge(self: *Battle, c: Charge) !void {
     var x = c;
-    x.left = @max(2, adjust.getInt("attack_ball_exp", 0) + 3);
+    x.left = @max(2, rules.weaponInt("attack_ball_exp", rules.who(c.weapon)) + 3);
     for (self.charges.items) |*o| if (o.weapon == x.weapon) {
         o.strike = x.strike;
     };

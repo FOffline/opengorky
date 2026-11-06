@@ -1,0 +1,18 @@
+Action(name = "Open", classic_id = 1, on_exit = 1);
+Action(name = "Close", classic_id = 2, walk_click = 1);
+Action(name = "Take", classic_id = 3, kind = "take");
+Action(name = "Use", classic_id = 4);
+Action(name = "Cancel", classic_id = 5);
+Action(name = "Ok", classic_id = 6);
+Action(name = "Explore", classic_id = 7, kind = "explore", auto_open = 1);
+Action(name = "TakeAll", classic_id = 8);
+Action(name = "TakeSelected", classic_id = 9);
+Action(name = "TurnOn", classic_id = 10);
+Action(name = "TurnOff", classic_id = 11);
+Action(name = "SwitchOn", classic_id = 12);
+Action(name = "SwitchOff", classic_id = 13);
+Action(name = "PullOn", classic_id = 14);
+Action(name = "PullOff", classic_id = 15);
+Action(name = "Up", classic_id = 16);
+Action(name = "Down", classic_id = 17);
+Action(name = "Heal", classic_id = 18);

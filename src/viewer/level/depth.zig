@@ -5,15 +5,15 @@ const floor_mod = og.world.floor;
 const level_view = @import("../level.zig");
 const LevelView = level_view.LevelView;
 const og = @import("opengorky");
-const lf = og.formats.level_files;
+const core_map = og.core.map;
 const render_layer = og.render.layer;
 
 /// Floor points for the depth fit: centres of every other walkable `.wm` cell
 /// at floor height.
 fn walkPoints(self: *LevelView, pts: *[4096][3]f32) [][3]f32 {
-    const wm = self.world.walk_map orelse return pts[0..0];
+    const wm = self.world.map.walk orelse return pts[0..0];
     var n: usize = 0;
-    const cs = lf.WalkMap.cell_size;
+    const cs = core_map.WalkMap.cell_size;
     var y: usize = 0;
     while (y < wm.height) : (y += 2) {
         var x: usize = 0;
@@ -35,7 +35,7 @@ fn walkPoints(self: *LevelView, pts: *[4096][3]f32) [][3]f32 {
 /// round platform in 01_port_silos the background floor is 1–3 `.zbf` steps
 /// closer than the actor floor plane, and shadows (shifted toward the camera by
 /// only 0.002·tl, half a step) were torn into stripes by the depth test.
-fn cfgTol(self: *LevelView, cam: og.actor.camera.Persp, z: og.formats.zbuffer.ZBuffer, far: f32, tl: f32) f32 {
+fn cfgTol(self: *LevelView, cam: og.actor.camera.Persp, z: og.core.map.Heights, far: f32, tl: f32) f32 {
     if (self.cfg_tol) |t| return t;
     var pts: [4096][3]f32 = undefined;
     const t = og.render.depth_fit.perspTolerance(cam, walkPoints(self, &pts), z, far, tl) orelse 0;
@@ -44,10 +44,10 @@ fn cfgTol(self: *LevelView, cam: og.actor.camera.Persp, z: og.formats.zbuffer.ZB
 }
 
 /// Depth fit over walkable `.wm` cells (once per level).
-fn walkFit(self: *LevelView, cam: og.actor.camera.Persp, z: og.formats.zbuffer.ZBuffer) ?[3]f32 {
+fn walkFit(self: *LevelView, cam: og.actor.camera.Persp, z: og.core.map.Heights) ?[3]f32 {
     if (self.walk_fit_done) return self.walk_fit;
     self.walk_fit_done = true;
-    if (self.world.walk_map == null) return null;
+    if (self.world.map.walk == null) return null;
     var buf: [4096][3]f32 = undefined;
     const pts = walkPoints(self, &buf);
     const n = pts.len;
@@ -67,23 +67,23 @@ fn walkFit(self: *LevelView, cam: og.actor.camera.Persp, z: og.formats.zbuffer.Z
 /// The level's frontPlane − backPlane; null without a level.
 fn planeSpan(self: *LevelView) ?f32 {
     const l = self.world.level orelse return null;
-    return og.fields.getF(l, "frontPlane") - og.fields.getF(l, "backPlane");
+    return og.fields.getF(l, "near_plane") - og.fields.getF(l, "far_plane");
 }
 
 pub fn depthSource(self: *LevelView) render_layer.DepthSource {
     if (self.debug.no_depth) return .none;
-    const z = self.level.heights orelse return .none;
+    const z = self.backdrop.heights orelse return .none;
     switch (self.world.cam) {
         .ortho => {
-            const cfg = self.level.ortho orelse return .none;
+            const cfg = self.backdrop.ortho orelse return .none;
             return .{ .heights = .{ .z = z, .cfg = cfg } };
         },
         // Background depth (0x41cf07) is a W-buffer: on battle maps far and tl
         // are fitted to the grid, otherwise from `.cfg`, without it far = tl =
         // frontPlane − backPlane (initCamera).
         .persp => |cam| {
-            if (self.world.combat_map) |cm| if (og.render.depth_fit.fitPersp(cam, cm, z)) |ft| return .{ .persp = .{ .z = z, .far = ft[0], .tl = ft[1], .tol = ft[2] } };
-            if (self.level.persp) |pc| return .{ .persp = .{ .z = z, .far = pc.far(), .tl = pc.tl, .tol = cfgTol(self, cam, z, pc.far(), pc.tl) } };
+            if (self.world.map.combat) |cm| if (og.render.depth_fit.fitPersp(cam, cm, z)) |ft| return .{ .persp = .{ .z = z, .far = ft[0], .tl = ft[1], .tol = ft[2] } };
+            if (self.backdrop.persp) |pc| return .{ .persp = .{ .z = z, .far = pc.far(), .tl = pc.tl, .tol = cfgTol(self, cam, z, pc.far(), pc.tl) } };
             // No `.cfg`: fit to walkable `.wm` cells (the fallback far = tl
             // from the planes hides actors in 01_port_worker).
             if (walkFit(self, cam, z)) |ft| return .{ .persp = .{ .z = z, .far = ft[0], .tl = ft[1], .tol = ft[2] } };
@@ -117,7 +117,7 @@ fn floorSpread(self: *LevelView, pz: @FieldType(render_layer.DepthSource, "persp
         else => return 0,
     };
     var pts: [4096][3]f32 = undefined;
-    const fp = if (self.world.combat_map) |cm| og.render.depth_fit.gridPoints(cm, &pts) else walkPoints(self, &pts);
+    const fp = if (self.world.map.combat) |cm| og.render.depth_fit.gridPoints(cm, &pts) else walkPoints(self, &pts);
     const t = og.render.depth_fit.perspSpread(cam, fp, pz.z, pz.far, pz.tl, pz.tol);
     self.floor_spread = t;
     return t;

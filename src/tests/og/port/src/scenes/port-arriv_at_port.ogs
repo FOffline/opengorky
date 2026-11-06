@@ -1,0 +1,4 @@
+scene "port-arriv_at_port" {
+    points = [Point(name = "suliv_p1", x = 512, y = 388, angle = 1.57)];
+    actor::WalkTo(@Sullivan, "suliv_p1");
+}

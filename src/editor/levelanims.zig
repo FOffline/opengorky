@@ -12,36 +12,35 @@ const og = @import("opengorky");
 const c = @import("sdl");
 const ui = @import("ui");
 const clay = @import("clay.zig");
+const gui = @import("widgets.zig");
+const lay = @import("layout.zig");
+const ink = @import("render.zig").ink;
 const font_mod = @import("font.zig");
 const tx = @import("text.zig");
-const icons = @import("icons.zig");
-const textedit = @import("textedit.zig");
-const codeview = @import("codeview.zig");
+const doctabs = @import("doctabs.zig");
 const sprview = @import("sprview.zig");
 const level = @import("level.zig");
 const Doc = level.Doc;
-const vars = @import("vars.zig");
-const main = @import("app.zig");
-const App = main.App;
-const theme = main.theme;
-const txt = main.txt;
+const model = @import("model.zig");
+const app_mod = @import("app.zig");
+const App = app_mod.App;
+const theme = app_mod.theme;
 const common_archive = @import("store.zig").common_archive;
 
 /// The location's bitmap animations (`app.anims`): the picked one, shown on the map,
 /// the new-one sprite list open, one being dragged, first frames (key → texture).
 pub const State = struct {
-    sel: main.Name(64) = .{},
+    sel: app_mod.Name(64) = .{},
     shown: bool = true,
     add_open: bool = false,
-    drag: ?main.AnimDrag = null,
+    drag: ?app_mod.AnimDrag = null,
     tex: std.StringHashMapUnmanaged(?*c.SDL_Texture) = .empty,
 };
 
 pub const Anim = struct {
     name: []const u8,
-    /// Its script (Store index) and `.var` (null: none — it stands at 0,0).
+    /// Its script (Store index); with no `.var` it stands at 0,0.
     file: usize,
-    var_file: ?usize,
     active: bool,
     pos: [2]i32,
     speed: i32,
@@ -52,15 +51,7 @@ pub const Anim = struct {
 /// The level's animations as the Store has them (names in `a`).
 pub fn list(app: *App, a: Allocator, d: *Doc) []const Anim {
     var out: std.ArrayList(Anim) = .empty;
-    var names: std.ArrayList([]const u8) = .empty;
-    var ar = og.formats.archive.Archive.open(app.io, app.gpa, app.dat, d.level_archive) catch return out.items;
-    defer ar.close(app.io, app.gpa);
-    for (ar.entries) |e| if (isAnim(e.name)) names.append(a, a.dupe(u8, e.name) catch continue) catch {};
-    for (app.store.files.items, 0..) |f, i| {
-        if (!std.mem.eql(u8, f.archive, d.level_archive) or !isAnim(f.entry) or app.store.gone(i) or ar.find(f.entry) != null) continue;
-        names.append(a, f.entry) catch {};
-    }
-    for (names.items) |entry| {
+    for (app.store.listing(a, d.level_archive, isAnim, false)) |entry| {
         const fi = app.store.file(d.level_archive, entry) catch continue;
         if (app.store.gone(fi)) continue;
         const name = entry[0 .. std.mem.lastIndexOfScalar(u8, entry, '.') orelse entry.len];
@@ -70,12 +61,11 @@ pub fn list(app: *App, a: Allocator, d: *Doc) []const Anim {
         out.append(a, .{
             .name = name,
             .file = fi,
-            .var_file = vf,
             .active = std.ascii.endsWithIgnoreCase(entry, ".aba"),
             .pos = .{ @intFromFloat(level.varValue(vt, "pos_x") orelse 0), @intFromFloat(level.varValue(vt, "pos_y") orelse 0) },
-            .speed = @intFromFloat(vars.get(script, "speed") orelse level.varValue(vt, "speed") orelse 15),
-            .sprite = vars.getStr(script, "spriteFile") orelse "",
-            .zbuf = vars.getStr(script, "zbufFile") orelse "",
+            .speed = @intFromFloat(model.get(script, "frames_per_second") orelse level.varValue(vt, "frames_per_second") orelse 15),
+            .sprite = model.getStr(script, "sprite") orelse "",
+            .zbuf = model.getStr(script, "depth_sprite") orelse "",
         }) catch {};
     }
     return out.items;
@@ -146,10 +136,10 @@ pub fn draw(app: *App, d: *Doc, rect: c.SDL_FRect) void {
         if (sel) if (fr) |f| {
             _ = c.SDL_RenderTexture(app.r, f.tex, null, &.{ .x = s[0], .y = s[1], .w = w, .h = h });
         };
-        _ = c.SDL_SetRenderDrawColor(app.r, 255, 160, 60, if (sel) 255 else 140);
+        ink(app.r, lay.canvas.alpha(lay.canvas.anim, if (sel) 255 else 140));
         _ = c.SDL_RenderRect(app.r, &.{ .x = s[0], .y = s[1], .w = w, .h = h });
         if (sel) _ = c.SDL_RenderRect(app.r, &.{ .x = s[0] - 1, .y = s[1] - 1, .w = w + 2, .h = h + 2 });
-        app.font.draw(app.r, an.name, font_mod.regular, 13, s[0] + 3, s[1] - 17, .{ 255, 190, 120, 255 });
+        app.font.draw(app.r, an.name, font_mod.regular, lay.Type.body.pt(), s[0] + 3, s[1] - 17, lay.canvas.anim_text);
     }
 }
 
@@ -190,7 +180,7 @@ pub fn place(app: *App, d: *Doc, name: []const u8, pos: [2]f32) void {
         app.gpa.free(t);
         t = next;
     }
-    app.store.replaceLabeled(vf, t, std.fmt.allocPrint(app.frame.allocator(), "{s}: place", .{name}) catch name) catch |err| app.setStatus(tx.st_set_failed, .{err});
+    app.store.replaceLabeled(vf, t, tx.both(app.frame.allocator(), tx.step_placed, .{name})) catch |err| app.failed(err);
 }
 
 /// A new animation of level sprite `sprite` at background point `at`: its script and
@@ -208,7 +198,7 @@ pub fn add(app: *App, d: *Doc, sprite: []const u8, at: [2]f32) void {
     _ = app.store.addNew(&.{
         .{ .archive = d.level_archive, .entry = std.fmt.allocPrint(a, "{s}.ba", .{name}) catch return, .text = script },
         .{ .archive = common_archive, .entry = std.fmt.allocPrint(a, "variables\\{s}.var", .{name}) catch return, .text = v },
-    }) catch |err| return app.setStatus(tx.st_set_failed, .{err});
+    }) catch |err| return app.failed(err);
     app.anims.sel.set(name);
     app.setStatus(tx.st_anim_added, .{name});
 }
@@ -231,38 +221,28 @@ pub fn group(app: *App, a: Allocator, d: *Doc) void {
     const okey = "objopen/anims";
     const open = app.tree_open.contains(okey);
     const gid = clay.id(okey);
-    _ = main.clickable(app, .{ .id = gid, .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.fixed(28) }, .padding = .{ .left = 8, .right = 8 }, .childGap = 6, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } }, .backgroundColor = theme.panel }, false);
-    const over = clay.hovered();
-    icons.leaf(app.r, app.gpa, if (open) .chevron_down else .chevron_right, 13, theme.dim);
-    icons.leaf(app.r, app.gpa, .play, 15, theme.dim);
-    txt(tx.get(tx.an_title), 13, theme.text, font_mod.bold);
-    txt(std.fmt.allocPrint(a, "({d})", .{anims.len}) catch "", 12, theme.dim, font_mod.regular);
-    clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.grow() } } });
-    const eid = clay.id("anims_eye");
-    clay.open(.{ .id = eid, .layout = .{ .sizing = .{ .width = clay.fixed(22), .height = clay.fixed(22) }, .childAlignment = .{ .x = ui.CLAY_ALIGN_X_CENTER, .y = ui.CLAY_ALIGN_Y_CENTER } } });
-    const eye = clay.hovered() and app.clicked;
-    icons.leaf(app.r, app.gpa, if (app.anims.shown) .eye else .eye_off, 15, theme.accent_hover);
+    const folded = gui.folderRow(app, gid, 0, open, .play, false, tx.get(tx.an_title), true, anims.len, a);
+    const eye = gui.eye(app, clay.id("anims_eye"), app.anims.shown);
     clay.close();
-    clay.close();
-    if (eye) app.anims.shown = !app.anims.shown else if (over and app.clicked) @import("assettree.zig").toggleKey(app, okey);
+    if (eye) app.anims.shown = !app.anims.shown else if (folded) @import("assettree.zig").toggleKey(app, okey);
     if (!open) return;
     for (anims, 0..) |an, k| {
         const sel = std.mem.eql(u8, app.anims.sel.get(), an.name);
         const rid = clay.idi("anim_row", @intCast(k));
-        if (main.clickable(app, .{ .id = rid, .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.fixed(28) }, .padding = .{ .left = 34, .right = 8 }, .childGap = 8, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } }, .backgroundColor = theme.panel, .cornerRadius = clay.radius(4) }, sel)) app.anims.sel.set(if (sel) "" else an.name);
-        txt(an.name, 14, theme.text, if (sel) font_mod.bold else font_mod.regular);
-        txt(tx.get(if (an.active) tx.an_active else tx.an_loop), 12, theme.dim, font_mod.regular);
+        if (gui.listRow(app, rid, .{ .selected = sel, .indent = gui.leafIndent(0) })) app.anims.sel.set(if (sel) "" else an.name);
+        gui.txt(an.name, .label, theme.text, if (sel) font_mod.bold else font_mod.regular);
+        gui.txt(tx.get(if (an.active) tx.an_active else tx.an_loop), .caption, theme.dim, font_mod.regular);
         clay.close();
         if (sel) card(app, a, d, an);
     }
     // New: one of the level's sprites, at the view's middle.
-    if (main.toolButton(app, "anim_new", .plus, tx.get(tx.an_new), app.anims.add_open, false)) app.anims.add_open = !app.anims.add_open;
+    if (gui.toolButton(app, "anim_new", .plus, tx.get(tx.an_new), app.anims.add_open, false)) app.anims.add_open = !app.anims.add_open;
     if (app.anims.add_open) {
         const spr_archive = std.fmt.allocPrint(a, "{s}/sprite.dat", .{d.name}) catch return;
         for (sprview.entries(app, a, spr_archive), 0..) |s, k| {
             if (!std.ascii.endsWithIgnoreCase(s, ".spr")) continue;
-            if (main.toolButton(app, std.fmt.allocPrint(a, "anim_spr{d}", .{k}) catch "s", .image, s, false, false)) {
-                const mid = if (main.App.viewportRect()) |v| d.toBackground(v, .{ v.x + v.w / 2, v.y + v.h / 2 }) else [2]f32{ 100, 100 };
+            if (gui.toolButton(app, std.fmt.allocPrint(a, "anim_spr{d}", .{k}) catch "s", .image, s, false, false)) {
+                const mid = if (app_mod.App.viewportRect()) |v| d.toBackground(v, .{ v.x + v.w / 2, v.y + v.h / 2 }) else [2]f32{ 100, 100 };
                 add(app, d, s, mid);
                 app.anims.add_open = false;
             }
@@ -272,44 +252,50 @@ pub fn group(app: *App, a: Allocator, d: *Doc) void {
 
 /// The picked animation: sprite, speed, place (typed), its script, delete.
 fn card(app: *App, a: Allocator, d: *Doc, an: Anim) void {
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = .{ .left = 34, .right = 8, .top = 4, .bottom = 8 }, .childGap = 6 } });
+    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = .{ .left = gui.leafIndent(0), .right = lay.space.sm, .top = lay.space.xs, .bottom = lay.space.sm }, .childGap = lay.space.sm } });
     fieldRow(app, a, tx.an_sprite, "an_spr", an.sprite, an, .sprite, d);
     fieldRow(app, a, tx.an_speed, "an_speed", std.fmt.allocPrint(a, "{d}", .{an.speed}) catch "", an, .speed, d);
     fieldRow(app, a, tx.an_x, "an_x", std.fmt.allocPrint(a, "{d}", .{an.pos[0]}) catch "", an, .x, d);
     fieldRow(app, a, tx.an_y, "an_y", std.fmt.allocPrint(a, "{d}", .{an.pos[1]}) catch "", an, .y, d);
-    if (an.zbuf.len > 0) txt(tx.alloc(a, tx.an_zbuf, .{an.zbuf}), 12, theme.dim, font_mod.regular);
-    clay.open(.{ .layout = .{ .childGap = 6 } });
-    // Each in a tab of its own, the level's kept.
-    if (main.toolButton(app, "an_code", .code, tx.get(tx.code_open), false, false)) {
-        @import("doctabs.zig").keepCurrent(app);
-        codeview.open(app, an.file, null);
-    }
-    if (main.toolButton(app, "an_sprite_edit", .image, tx.get(tx.an_edit_sprite), false, false)) {
-        @import("doctabs.zig").keepCurrent(app);
-        sprview.openEntry(app, std.fmt.allocPrint(a, "{s}/sprite.dat", .{d.name}) catch return clay.close(), std.fmt.allocPrint(a, "{s}.spr", .{an.sprite}) catch "") catch |err| app.setStatus(tx.st_open_failed, .{ an.sprite, err });
-    }
-    if (main.toolButton(app, "an_del", .trash_2, tx.get(tx.cm_delete), false, false)) app.askDelete(.anim, 0, an.name);
+    if (an.zbuf.len > 0) gui.txt(tx.alloc(a, tx.an_zbuf, .{an.zbuf}), .caption, theme.dim, font_mod.regular);
+    // Each in a tab of its own, the level's kept; wrapped in a narrow panel.
+    const items = [_]gui.Item{
+        .{ .id = clay.id("an_code"), .b = .{ .label = tx.get(tx.code_open), .icon = .code, .size = .tool } },
+        .{ .id = clay.id("an_sprite_edit"), .b = .{ .label = tx.get(tx.an_edit_sprite), .icon = .image, .size = .tool } },
+        .{ .id = clay.id("an_del"), .b = .{ .label = tx.get(tx.cm_delete), .icon = .trash_2, .size = .tool } },
+    };
+    const clicked = gui.buttonRow(app, clay.id("an_buttons"), &items);
     clay.close();
-    clay.close();
+    switch (clicked orelse return) {
+        0 => {
+            @import("doctabs.zig").keepCurrent(app);
+            doctabs.showCode(app, an.file, null);
+        },
+        1 => {
+            @import("doctabs.zig").keepCurrent(app);
+            sprview.openEntry(app, std.fmt.allocPrint(a, "{s}/sprite.dat", .{d.name}) catch return, std.fmt.allocPrint(a, "{s}.spr", .{an.sprite}) catch "") catch |err| app.setStatus(tx.st_open_failed, .{ an.sprite, err });
+        },
+        else => app.askDelete(.anim, 0, an.name),
+    }
 }
 
 const Field = enum { sprite, speed, x, y };
 
 fn fieldRow(app: *App, a: Allocator, label: tx.Msg, key: []const u8, value: []const u8, an: Anim, what: Field, d: *Doc) void {
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .childGap = 8, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(80) } } });
-    txt(tx.get(label), 12, theme.dim, font_mod.regular);
+    gui.row(lay.space.sm);
+    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(lay.width.label_min) } } });
+    gui.txt(tx.get(label), .caption, theme.dim, font_mod.regular);
     clay.close();
-    if (textedit.field(app, key, value, 0, "")) |v| set(app, a, d, an, what, std.mem.trim(u8, v, " ")) catch |err| app.setStatus(tx.st_set_failed, .{err});
+    if (gui.textField(app, key, value, 0, "")) |v| set(app, a, d, an, what, std.mem.trim(u8, v, " ")) catch |err| app.failed(err);
     clay.close();
 }
 
 fn set(app: *App, a: Allocator, d: *Doc, an: Anim, what: Field, v: []const u8) !void {
     switch (what) {
-        .sprite => try app.store.setVar(an.file, &.{"spriteFile"}, try std.fmt.allocPrint(a, "\"{s}\"", .{std.fs.path.stem(v)}), "{"),
+        .sprite => try model.set(app, an.file, &.{"sprite"}, try std.fmt.allocPrint(a, "\"{s}\"", .{std.fs.path.stem(v)}), "{"),
         .speed => {
             _ = try std.fmt.parseInt(i32, v, 10);
-            try app.store.setVar(an.file, &.{"speed"}, v, "{");
+            try model.set(app, an.file, &.{"frames_per_second"}, v, "{");
         },
         .x, .y => {
             const n: f32 = @floatFromInt(try std.fmt.parseInt(i32, v, 10));

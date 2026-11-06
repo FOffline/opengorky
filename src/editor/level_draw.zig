@@ -4,15 +4,17 @@
 const std = @import("std");
 const og = @import("opengorky");
 const c = @import("sdl");
+const lay = @import("layout.zig");
+const ink = @import("render.zig").ink;
 const Font = @import("font.zig").Font;
 const placement = @import("placement.zig");
-const lf = og.formats.level_files;
+const core_map = og.core.map;
 const level = @import("level.zig");
 const Doc = level.Doc;
 const Obj = level.Obj;
 const Kind = level.Kind;
 
-pub fn polyArea(poly: []const [3]f32) f32 {
+fn polyArea(poly: []const [3]f32) f32 {
     var sum: f32 = 0;
     for (poly, 0..) |p, i| {
         const q = poly[(i + 1) % poly.len];
@@ -22,7 +24,7 @@ pub fn polyArea(poly: []const [3]f32) f32 {
 }
 
 /// Fills polygon `poly` (background pixels, maybe concave) by ear clipping.
-pub fn fillPoly(self: *const Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect, poly: []const [3]f32, rgba: [4]u8) void {
+fn fillPoly(self: *const Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect, poly: []const [3]f32, rgba: [4]u8) void {
     if (poly.len < 3 or poly.len > 64) return;
     var idx: [64]usize = undefined;
     var n = poly.len;
@@ -66,7 +68,7 @@ pub fn fillPoly(self: *const Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect, poly: [
     }
 }
 
-pub fn inTri(p: [3]f32, a: [3]f32, b: [3]f32, cc: [3]f32) bool {
+fn inTri(p: [3]f32, a: [3]f32, b: [3]f32, cc: [3]f32) bool {
     const d1 = (p[0] - b[0]) * (a[1] - b[1]) - (a[0] - b[0]) * (p[1] - b[1]);
     const d2 = (p[0] - cc[0]) * (b[1] - cc[1]) - (b[0] - cc[0]) * (p[1] - cc[1]);
     const d3 = (p[0] - a[0]) * (cc[1] - a[1]) - (cc[0] - a[0]) * (p[1] - a[1]);
@@ -85,13 +87,13 @@ pub fn hiddenInView(self: *const Doc, o: Obj) bool {
 
 pub fn kindColor(k: Kind) [3]u8 {
     return switch (k) {
-        .enemy => .{ 235, 70, 60 },
-        .hero => .{ 70, 140, 255 },
-        .neutral => .{ 170, 170, 170 },
-        .prop => .{ 190, 120, 255 },
-        .item => .{ 250, 200, 60 },
-        .actor => .{ 120, 220, 140 },
-        .area => .{ 80, 200, 230 },
+        .enemy => lay.canvas.kind.enemy,
+        .hero => lay.canvas.kind.hero,
+        .neutral => lay.canvas.kind.neutral,
+        .prop => lay.canvas.kind.prop,
+        .item => lay.canvas.kind.item,
+        .actor => lay.canvas.kind.actor,
+        .area => lay.canvas.kind.area,
     };
 }
 
@@ -103,12 +105,12 @@ pub fn draw(self: *Doc, r: *c.SDL_Renderer, font: *const Font, rect: c.SDL_FRect
         _ = c.SDL_RenderTexture(r, t, null, &.{ .x = a[0], .y = a[1], .w = self.bg_size[0] * self.zoom, .h = self.bg_size[1] * self.zoom });
     };
     if ((walk or self.preview != null) and !self.isBattle()) self.drawWalk(r, rect);
-    const cm_opt = self.grid_view orelse self.world.combat_map;
+    const cm_opt = self.grid_view orelse self.world.map.combat;
     if (cm_opt) |cm| if (!self.grid_hidden) self.drawGrid(r, font, rect, cm);
     for (self.objects.items, 0..) |o, i| {
         if (self.hiddenInView(o)) continue;
         const sel = selected != null and selected.? == i;
-        const col: [3]u8 = if (o.later != null) .{ 150, 150, 150 } else kindColor(o.kind);
+        const col: [3]u8 = if (o.later != null) lay.canvas.later else kindColor(o.kind);
         if (o.tile) |t| if (cm_opt) |cm| {
             self.fillTiles(r, rect, cm, t, o.size, .{ col[0], col[1], col[2], if (sel) 170 else if (o.later != null) 60 else 90 });
             if (o.call) |ci| if (self.script.calls[ci].func == .enemy_appear) self.drawEntry(r, rect, cm, self.script.calls[ci], o.size, col);
@@ -126,20 +128,20 @@ pub fn draw(self: *Doc, r: *c.SDL_Renderer, font: *const Font, rect: c.SDL_FRect
         }
         const q = self.toScreen(rect, o.pos);
         const s: f32 = if (sel) 6 else 4;
-        _ = c.SDL_SetRenderDrawColor(r, 0, 0, 0, 200);
+        ink(r, lay.canvas.marker_edge);
         _ = c.SDL_RenderFillRect(r, &.{ .x = q[0] - s - 1, .y = q[1] - s - 1, .w = 2 * s + 2, .h = 2 * s + 2 });
         _ = c.SDL_SetRenderDrawColor(r, col[0], col[1], col[2], 255);
         if (o.kind == .prop) {
             // Props: a hollow marker (not on the grid, no footprint).
             _ = c.SDL_RenderRect(r, &.{ .x = q[0] - s, .y = q[1] - s, .w = 2 * s, .h = 2 * s });
         } else _ = c.SDL_RenderFillRect(r, &.{ .x = q[0] - s, .y = q[1] - s, .w = 2 * s, .h = 2 * s });
-        const label_w = font.measure(o.name, 0, 13)[0];
-        _ = c.SDL_SetRenderDrawColor(r, 0, 0, 0, 150);
+        const label_w = font.measure(o.name, 0, lay.Type.body.pt())[0];
+        ink(r, lay.canvas.label_bg);
         // Battles: the label under the marker, so facing arrows (mostly right) stay clear.
         const lp: [2]f32 = if (self.isBattle()) .{ q[0] - label_w / 2 - 3, q[1] + 9 } else .{ q[0] + 8, q[1] - 9 };
         _ = c.SDL_RenderFillRect(r, &.{ .x = lp[0], .y = lp[1], .w = label_w + 6, .h = 18 });
-        const fg: [4]u8 = if (self.isBattle() and (o.call == null or o.later != null)) .{ 160, 160, 160, 255 } else .{ 255, 255, 255, 255 };
-        font.draw(r, o.name, if (sel) 1 else 0, 13, lp[0] + 3, lp[1], fg);
+        const fg: [4]u8 = if (self.isBattle() and (o.call == null or o.later != null)) lay.canvas.inactive else lay.canvas.white;
+        font.draw(r, o.name, if (sel) 1 else 0, lay.Type.body.pt(), lp[0] + 3, lp[1], fg);
         // Over the label: which way it faces (from its tile block's centre).
         if (cm_opt) |cm| if (self.facing(i)) |deg| {
             const half = @as(f32, @floatFromInt(o.size)) / 2;
@@ -153,12 +155,12 @@ pub fn draw(self: *Doc, r: *c.SDL_Renderer, font: *const Font, rect: c.SDL_FRect
     };
     if (self.preview) |p| if (p.bg) |b| {
         const q = self.toScreen(rect, b);
-        if (p.ok) _ = c.SDL_SetRenderDrawColor(r, 80, 255, 120, 255) else _ = c.SDL_SetRenderDrawColor(r, 255, 60, 60, 255);
+        ink(r, if (p.ok) lay.canvas.ok else lay.canvas.bad);
         _ = c.SDL_RenderFillRect(r, &.{ .x = q[0] - 6, .y = q[1] - 6, .w = 12, .h = 12 });
     };
     if (self.preview) |p| if (p.bg == null) if (cm_opt) |cm| {
         const o = self.objects.items[p.obj];
-        const col: [4]u8 = if (p.ok) .{ 80, 255, 120, 150 } else .{ 255, 60, 60, 150 };
+        const col: [4]u8 = lay.canvas.alpha(if (p.ok) lay.canvas.ok else lay.canvas.bad, 150);
         const at = if (o.grid != null) self.gridPos(cm, p.grid) else blk: {
             self.fillTiles(r, rect, cm, p.tile, o.size, col);
             break :blk self.tilePos(cm, p.tile, o.size);
@@ -171,14 +173,14 @@ pub fn draw(self: *Doc, r: *c.SDL_Renderer, font: *const Font, rect: c.SDL_FRect
 
 /// Walkable cells (8×8 background pixels): green, the second floor's (`.wm2`) blue.
 pub fn drawWalk(self: *Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect) void {
-    const m = self.world.walk_map orelse return;
+    const m = self.world.map.walk orelse return;
     if (self.walk_tex == null) {
-        var img = og.formats.image.Image.init(self.gpa, m.width, m.height) catch return;
+        var img = og.image.Image.init(self.gpa, m.width, m.height) catch return;
         defer img.deinit(self.gpa);
         for (0..m.height) |y| for (0..m.width) |x| {
             const px = img.pixels[(y * m.width + x) * 4 ..][0..4];
-            if (m.at(x, y).walkable()) px.* = .{ 60, 230, 110, 90 } else if (self.world.walk_map2) |m2| {
-                if (x < m2.width and y < m2.height and m2.at(x, y).walkable()) px.* = .{ 70, 140, 255, 90 };
+            if (m.at(x, y).walkable()) px.* = lay.canvas.walk else if (self.world.map.walk2) |m2| {
+                if (x < m2.width and y < m2.height and m2.at(x, y).walkable()) px.* = lay.canvas.walk2;
             }
         };
         const t = c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_STATIC, @intCast(m.width), @intCast(m.height)) orelse return;
@@ -187,7 +189,7 @@ pub fn drawWalk(self: *Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect) void {
         _ = c.SDL_SetTextureScaleMode(t, c.SDL_SCALEMODE_NEAREST);
         self.walk_tex = t;
     }
-    const k: f32 = lf.WalkMap.cell_size;
+    const k: f32 = core_map.WalkMap.cell_size;
     const a = self.toScreen(rect, .{ 0, 0 });
     _ = c.SDL_RenderTexture(r, self.walk_tex.?, null, &.{ .x = a[0], .y = a[1], .w = @as(f32, @floatFromInt(m.width)) * k * self.zoom, .h = @as(f32, @floatFromInt(m.height)) * k * self.zoom });
 }
@@ -227,7 +229,7 @@ pub fn drawTurn(self: *Doc, r: *c.SDL_Renderer, p: [2]f32, clockwise: bool) void
 /// Which way the object at grid point `g` faces at `deg`: a thin shaft and the
 /// arrowhead, in its kind's colour `col`, about a tile out (the actor angle,
 /// world (cos, sin); the model turns its front along it).
-pub fn drawFacing(self: *Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect, cm: lf.CombatMap, g: [2]f32, deg: f32, col: [3]u8) void {
+pub fn drawFacing(self: *Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect, cm: core_map.CombatMap, g: [2]f32, deg: f32, col: [3]u8) void {
     const p0 = cm.toWorld(g[0], g[1]);
     const one = cm.toWorld(g[0] + 1, g[1]);
     const len = @sqrt((one[0] - p0[0]) * (one[0] - p0[0]) + (one[1] - p0[1]) * (one[1] - p0[1]));
@@ -246,7 +248,7 @@ pub fn drawFacing(self: *Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect, cm: lf.Comb
 }
 
 /// AIEnemyAppear: a line from the tile it walks in from to the one it stops on.
-pub fn drawEntry(self: *const Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect, cm: lf.CombatMap, call: placement.Call, size: u32, col: [3]u8) void {
+pub fn drawEntry(self: *const Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect, cm: core_map.CombatMap, call: placement.Call, size: u32, col: [3]u8) void {
     var p: [2][2]f32 = undefined;
     for (0..2) |k| {
         const t: [2]i32 = .{ @intFromFloat(call.arg(self.text(), 2 * k).?), @intFromFloat(call.arg(self.text(), 2 * k + 1).?) };
@@ -258,7 +260,7 @@ pub fn drawEntry(self: *const Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect, cm: lf
     _ = c.SDL_RenderRect(r, &.{ .x = p[0][0] - 4, .y = p[0][1] - 4, .w = 8, .h = 8 });
 }
 
-pub fn corner(self: *const Doc, rect: c.SDL_FRect, cm: lf.CombatMap, gx: f32, gy: f32) c.SDL_FPoint {
+pub fn corner(self: *const Doc, rect: c.SDL_FRect, cm: core_map.CombatMap, gx: f32, gy: f32) c.SDL_FPoint {
     const q = self.world.cam.project(cm.toWorld(gx, gy));
     const s = self.toScreen(rect, .{ q.x, q.y });
     return .{ .x = s[0], .y = s[1] };
@@ -272,23 +274,23 @@ pub fn quad(r: *c.SDL_Renderer, p: [4]c.SDL_FPoint, rgba: [4]u8) void {
     _ = c.SDL_RenderGeometry(r, null, &v, 4, &idx, 6);
 }
 
-pub fn fillTiles(self: *const Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect, cm: lf.CombatMap, t: [2]i32, size: u32, rgba: [4]u8) void {
+pub fn fillTiles(self: *const Doc, r: *c.SDL_Renderer, rect: c.SDL_FRect, cm: core_map.CombatMap, t: [2]i32, size: u32, rgba: [4]u8) void {
     const x0: f32 = @floatFromInt(t[0]);
     const y0: f32 = @floatFromInt(t[1]);
     const n: f32 = @floatFromInt(size);
     quad(r, .{ self.corner(rect, cm, x0, y0), self.corner(rect, cm, x0 + n, y0), self.corner(rect, cm, x0 + n, y0 + n), self.corner(rect, cm, x0, y0 + n) }, rgba);
 }
 
-pub fn drawGridOnly(self: *const Doc, r: *c.SDL_Renderer, font: *const Font, rect: c.SDL_FRect, cm: lf.CombatMap) void {
+pub fn drawGridOnly(self: *const Doc, r: *c.SDL_Renderer, font: *const Font, rect: c.SDL_FRect, cm: core_map.CombatMap) void {
     self.drawGrid(r, font, rect, cm);
 }
 
-pub fn drawGrid(self: *const Doc, r: *c.SDL_Renderer, font: *const Font, rect: c.SDL_FRect, cm: lf.CombatMap) void {
+pub fn drawGrid(self: *const Doc, r: *c.SDL_Renderer, font: *const Font, rect: c.SDL_FRect, cm: core_map.CombatMap) void {
     for (0..cm.height) |y| for (0..cm.width) |x| {
         const blocked = cm.blocked[y * cm.width + x];
-        self.fillTiles(r, rect, cm, .{ @intCast(x), @intCast(y) }, 1, if (blocked) .{ 255, 60, 60, 45 } else .{ 60, 255, 120, 30 });
+        self.fillTiles(r, rect, cm, .{ @intCast(x), @intCast(y) }, 1, if (blocked) lay.canvas.tile_blocked else lay.canvas.tile_free);
     };
-    _ = c.SDL_SetRenderDrawColor(r, 255, 255, 255, 50);
+    ink(r, lay.canvas.grid);
     for (0..cm.width + 1) |x| {
         const a = self.corner(rect, cm, @floatFromInt(x), 0);
         const b = self.corner(rect, cm, @floatFromInt(x), @floatFromInt(cm.height));
@@ -303,16 +305,16 @@ pub fn drawGrid(self: *const Doc, r: *c.SDL_Renderer, font: *const Font, rect: c
     // side may be off screen.
     const w: f32 = @floatFromInt(cm.width);
     const h: f32 = @floatFromInt(cm.height);
-    for (0..cm.width) |x| for ([_]f32{ -0.5, h + 0.5 }) |gy| self.gridNumber(r, font, rect, cm, x, .{ @as(f32, @floatFromInt(x)) + 0.5, gy }, .{ 255, 215, 90, 255 });
-    for (0..cm.height) |y| for ([_]f32{ -0.5, w + 0.5 }) |gx| self.gridNumber(r, font, rect, cm, y, .{ gx, @as(f32, @floatFromInt(y)) + 0.5 }, .{ 110, 220, 255, 255 });
+    for (0..cm.width) |x| for ([_]f32{ -0.5, h + 0.5 }) |gy| self.gridNumber(r, font, rect, cm, x, .{ @as(f32, @floatFromInt(x)) + 0.5, gy }, lay.canvas.grid_x);
+    for (0..cm.height) |y| for ([_]f32{ -0.5, w + 0.5 }) |gx| self.gridNumber(r, font, rect, cm, y, .{ gx, @as(f32, @floatFromInt(y)) + 0.5 }, lay.canvas.grid_y);
 }
 
-pub fn gridNumber(self: *const Doc, r: *c.SDL_Renderer, font: *const Font, rect: c.SDL_FRect, cm: lf.CombatMap, n: usize, g: [2]f32, col: [4]u8) void {
+pub fn gridNumber(self: *const Doc, r: *c.SDL_Renderer, font: *const Font, rect: c.SDL_FRect, cm: core_map.CombatMap, n: usize, g: [2]f32, col: [4]u8) void {
     var buf: [8]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return;
     const p = self.corner(rect, cm, g[0], g[1]);
-    const sz = font.measure(s, 0, 12);
-    _ = c.SDL_SetRenderDrawColor(r, 0, 0, 0, 150);
+    const sz = font.measure(s, 0, lay.Type.caption.pt());
+    ink(r, lay.canvas.label_bg);
     _ = c.SDL_RenderFillRect(r, &.{ .x = p.x - sz[0] / 2 - 3, .y = p.y - 9, .w = sz[0] + 6, .h = 18 });
-    font.draw(r, s, 0, 12, p.x - sz[0] / 2, p.y - 9, col);
+    font.draw(r, s, 0, lay.Type.caption.pt(), p.x - sz[0] / 2, p.y - 9, col);
 }

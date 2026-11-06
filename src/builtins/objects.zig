@@ -23,9 +23,22 @@ pub fn biStricmp(_: *anyopaque, _: *Runtime, _: *Object, args: []const Value) an
     return .{ .int = @as(i32, @intCast(a.len)) - @as(i32, @intCast(b.len)) };
 }
 
+/// EqualsIgnoreCase(a, b) (OpenGorky): 1 if the strings are equal, case aside (ASCII, as
+/// `s_stricmp`), else 0.
+pub fn biEqualsIgnoreCase(_: *anyopaque, _: *Runtime, _: *Object, args: []const Value) anyerror!Value {
+    return .{ .int = @intFromBool(std.ascii.eqlIgnoreCase(args_mod.argString(args, 0), args_mod.argString(args, 1))) };
+}
+
 pub fn biPrint(_: *anyopaque, _: *Runtime, self: *Object, args: []const Value) anyerror!Value {
     for (args) |a| std.log.info("{s}: print {f}", .{ self.name, a });
     return .zero;
+}
+
+/// str(x) (OpenGorky, not in the exe): any value as text, as a `string` variable takes it
+/// (`Value.toString`: 2.5 → "2.500000", a ref → its name), except nil → "nil".
+pub fn biStr(_: *anyopaque, rt: *Runtime, _: *Object, args: []const Value) anyerror!Value {
+    const v = if (args.len > 0) args[0] else Value.nil;
+    return .{ .string = if (v == .nil) "nil" else try v.toString(rt.strings()) };
 }
 
 pub fn biGetName(_: *anyopaque, _: *Runtime, self: *Object, _: []const Value) anyerror!Value {
@@ -116,9 +129,23 @@ pub fn biIsObject(_: *anyopaque, rt: *Runtime, _: *Object, args: []const Value) 
     return .{ .int = @intFromBool(rt.findObject(args_mod.argString(args, 0)) != null) };
 }
 
-/// GetNameID(object) (0x4c12b0): nameID of any object (heroes: 20 Sullivan,
+/// OpenGorky: IsHere(x): `x` refers to an object of this location (a deleted one too), not
+/// to one of another (`Runtime.farRef`) nor is no reference.
+pub fn biIsHere(_: *anyopaque, _: *Runtime, _: *Object, args: []const Value) anyerror!Value {
+    return .{ .int = @intFromBool(args.len > 0 and args[0] == .ref and args[0].ref.far.len == 0) };
+}
+
+/// GetNameID(object) (0x4c12b0): classic_id of any object (heroes: 20 Sullivan,
 /// 21 Ovitz, 22 Trantigne, 24 Lucy); −1 if there is no object.
 pub fn biGetNameID(ctx: *anyopaque, rt: *Runtime, self: *Object, args: []const Value) anyerror!Value {
     const o = args_mod.objectArg(ctx, rt, self, args) orelse return .{ .int = -1 };
-    return .{ .int = fields.nameId(o) };
+    return .{ .int = fields.classicId(o) };
+}
+
+/// GetClass(obj) (OpenGorky, not in the exe): the object's entity class, as rules key it
+/// ("cw_riffle", "ft_hornet"; an OpenGorky project's its archetype's path,
+/// "weapons::riffle"; rules.classOf); "" without the object.
+pub fn biGetClass(ctx: *anyopaque, rt: *Runtime, self: *Object, args: []const Value) anyerror!Value {
+    const o = args_mod.objectArg(ctx, rt, self, args) orelse return .{ .string = "" };
+    return .{ .string = @import("../rules.zig").classOf(o.class) };
 }

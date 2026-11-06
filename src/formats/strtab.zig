@@ -1,5 +1,5 @@
 //! UI texts from `common/lang.dat`:
-//! - `string.tab`: `number=text` lines (hero and item names by `nameID`, battle
+//! - `string.tab`: `number=text` lines (hero and item names by `classic_id`, battle
 //! labels: 516 "Counter attack", 524 "Level up", 578 "exp"), `//` comments;
 //! - `items.inf`: item descriptions, `ITEM_EXAMINE: number` then indented text lines
 //! up to an empty line; `#` comments.

@@ -127,7 +127,7 @@ pub fn tick(a: *Actor, o: *Object, model: ?*const model_cache.Model, scale_px: f
 
 /// Turn `angle` toward `want` by rotSpeed; return the remaining difference (rad).
 fn turnTowards(o: *Object, want: f32) f32 {
-    var rs = fields.getF(o, "rotSpeed");
+    var rs = fields.getF(o, "turn_speed");
     if (rs <= 0) rs = 0.1;
     const cur = fields.angle(o);
     const diff = std.math.atan2(@sin(want - cur), @cos(want - cur));
@@ -243,9 +243,9 @@ test "battle walk turns in place before stepping onto the next cell" {
     const gpa = std.testing.allocator;
     var o: Object = .{ .name = "t", .class = undefined };
     defer o.vars.deinit(gpa);
-    inline for (.{ "x", "y", "z", "angle", "rotspeed" }) |n|
+    inline for (.{ "x", "y", "z", "angle", "turn_speed" }) |n|
         try o.declare(gpa, n, .{ .type = .float, .value = .{ .float = 0 } });
-    fields.setF(&o, "rotSpeed", 0.1);
+    fields.setF(&o, "turn_speed", 0.1);
     var a: Actor = .{};
     defer a.path.deinit(gpa);
     var prng: Rand = .{};
@@ -272,14 +272,14 @@ test "a one-shot ending behind queued commands leaves the idle to the queue (0x4
     const gpa = std.testing.allocator;
     var o: Object = .{ .name = "t", .class = undefined };
     defer o.vars.deinit(gpa);
-    inline for (.{ "x", "y", "z", "angle", "rotspeed" }) |n|
+    inline for (.{ "x", "y", "z", "angle", "turn_speed" }) |n|
         try o.declare(gpa, n, .{ .type = .float, .value = .{ .float = 0 } });
-    var items = [_]@import("../formats.zig").anim.Animation{
+    var items = [_]@import("../core.zig").model.Animation{
         .{ .name = "dead_B", .first = 0, .last = 0, .speed = 1, .sounds = &.{} },
         .{ .name = "g_idle", .first = 1, .last = 9, .speed = 1, .sounds = &.{} },
     };
     var m: model_cache.Model = undefined;
-    m.anims = .{ .arena = undefined, .items = &items };
+    m.anims = .{ .items = &items };
     var a: Actor = .{};
     defer a.queue.deinit(gpa);
     var prng: Rand = .{};

@@ -30,7 +30,7 @@ pub fn drawFighterInfo(self: *LevelView, r: *c.SDL_Renderer, g: *@import("../gui
     // Obstacles have no info window (+0x7c = 0); invisible fighters aren't hovered.
     if (!f.alive() or info.len() < 12 or f.side == .neutral) return;
     if (world_mod.actorOf(f.obj).alpha == 0) return;
-    const id = og.fields.nameId(f.obj);
+    const id = og.fields.classicId(f.obj);
     const name = self.world.stringOr(id, f.obj.name);
     const name_w: f32 = if (g.font) |f2| @floatFromInt(f2.measure(name)) else 70;
     const wdt = @max(70, name_w);
@@ -46,12 +46,12 @@ pub fn drawFighterInfo(self: *LevelView, r: *c.SDL_Renderer, g: *@import("../gui
     try info.drawClipped(r, 1, x + 1, y + 12, @trunc(k * 60)); // _ftol (0x455e41)
     try gui_panel.label(g, r, g.font, x, y + 20, name, .{ 255, 255, 255 }, false);
     const cy0 = y + 35;
-    if (f.side != .hero) if (self.world.immunity.armorClass(id)) |cls| if (self.world.immunity.isKnown(id, .armor)) {
+    if (f.side != .hero) if (self.world.immunity.armorClass(og.rules.who(f.obj))) |cls| if (self.world.immunity.isKnown(og.rules.who(f.obj), .armor)) {
         try info.draw(r, 9 + @as(usize, @intCast(std.math.clamp(cls, 0, 2))), x, cy0);
     };
     var slot: usize = 1;
     for (1..8) |code| {
-        if (!self.world.immunity.immune(id, @fromBackingInt(@intCast(code))) or !self.world.immunity.isKnown(id, @fromBackingInt(@intCast(code)))) continue;
+        if (!self.world.immunity.immune(og.rules.who(f.obj), @fromBackingInt(@intCast(code))) or !self.world.immunity.isKnown(og.rules.who(f.obj), @fromBackingInt(@intCast(code)))) continue;
         const cx = x + 17 * og.num.toF32(slot % 3);
         const cy = cy0 + 17 * og.num.toF32(slot / 3);
         try info.draw(r, code + 1, cx, cy);
@@ -80,11 +80,11 @@ pub fn drawBattleHud(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32, gui: 
         var st_buf: [96]u8 = undefined;
         var st_len: usize = 0;
         const parts = [_]struct { on: bool, id: i32, fb: []const u8 }{
-            .{ .on = f.asleep > 0, .id = 526, .fb = "tranquilized" },
-            .{ .on = f.gassed > 0, .id = 527, .fb = "poisoned" },
-            .{ .on = f.bitten, .id = 528, .fb = "poisoned" },
-            .{ .on = f.soaked > 0, .id = 529, .fb = "flammable" },
-            .{ .on = f.enraged(), .id = 530, .fb = "enraged" },
+            .{ .on = f.asleep > 0, .id = og.core.ui_text.id(.state_tranquilized), .fb = "tranquilized" },
+            .{ .on = f.gassed > 0, .id = og.core.ui_text.id(.state_gassed), .fb = "poisoned" },
+            .{ .on = f.bitten, .id = og.core.ui_text.id(.state_bitten), .fb = "poisoned" },
+            .{ .on = f.soaked > 0, .id = og.core.ui_text.id(.state_flammable), .fb = "flammable" },
+            .{ .on = f.enraged(), .id = og.core.ui_text.id(.state_enraged), .fb = "enraged" },
         };
         for (parts) |pt| if (pt.on) {
             const t = self.world.stringOr(pt.id, pt.fb);
@@ -97,7 +97,7 @@ pub fn drawBattleHud(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32, gui: 
             // (+0x64…+0x70) at its top + fighter_stunned_level (0x4dcaa0).
             const sb = world_mod.actorOf(f.obj).screen_box orelse .{ head.x, head.y, head.x, head.y };
             const sx = (sb[0] + sb[2]) / 2 - scroll[0];
-            const sy = sb[1] + og.num.toF32(og.formats.adjust.getInt("fighter_stunned_level", 8)) - scroll[1];
+            const sy = sb[1] + og.num.toF32(og.rules.adjust.int("fighter_stunned_level")) - scroll[1];
             if (gui) |g| {
                 try gui_battle.msgTextBlend(g, r, st_buf[0..st_len], sx, sy, 0.5, gfx.rgb(200, 60, 20), 1, gfx.blendAdd());
             } else {

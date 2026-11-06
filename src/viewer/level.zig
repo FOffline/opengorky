@@ -8,9 +8,8 @@ const og = @import("opengorky");
 const c = @import("sdl");
 const gfx = @import("media/gfx.zig");
 const archive = og.formats.archive;
-const level = og.formats.level;
-const lf = og.formats.level_files;
-const Image = og.formats.image.Image;
+const core_map = og.core.map;
+const Image = og.image.Image;
 const world_mod = og.state.world;
 const World = world_mod.World;
 const Scene = og.audio.scene.Scene;
@@ -26,6 +25,27 @@ pub var grid_mode: u8 = 0;
 pub var grid_wave: i32 = 0;
 
 /// Object z-frames: file bytes and parse (frames reference the bytes).
+/// The drawn bone matrices of an actor's player or an extra body's, two buffers like the
+/// player's +0x10/+0x14: each drawn pose goes into `bufs[drawn]` (+0x4); a `play`
+/// mid-transition (the core's `from_drawn`) starts the next one from it (`from`, +0x8 =
+/// +0x4, 0x44f9e2), and the draws after it write the other buffer (0x44fe00). Drawing
+/// state only: the core keeps the flag, the viewer the matrices (`LevelView.poses`, level/place.zig).
+const Poses = struct {
+    bufs: [2]std.ArrayList([12]f32) = .{ .empty, .empty },
+    drawn: u1 = 0,
+    from: ?u1 = null,
+    /// The core's `plays` as last seen; another: a `play` since the last draw.
+    plays: u32 = 0,
+    /// The extra body's mesh (duped per RegisterExtraBody): another, a new player.
+    mesh: ?[*]const u8 = null,
+
+    pub fn deinit(self: *Poses, gpa: Allocator) void {
+        for (&self.bufs) |*b| b.deinit(gpa);
+    }
+};
+
+/// A `Poses` owner: an actor (`slot` = actor_slot) or its extra body `slot` (0..3).
+pub const PoseKey = struct { o: *og.script.object.Object, slot: u8 };
 const Spz = struct {
     bytes: []u8,
     sprite: og.formats.sprite.Sprite,
@@ -59,7 +79,7 @@ pub const Debug = struct {
     pub const scale_step = 0.05;
 };
 
-/// Area action menu (0x4574a3: items from funcID, funcID1, …) at the click point.
+/// Area action menu (0x4574a3: items from action, action1, …) at the click point.
 pub const ActionMenu = struct {
     pub const Item = World.AreaAction;
     const item_w: f32 = 70;
@@ -86,9 +106,15 @@ pub const LevelView = struct {
     action_menu: ?ActionMenu = null,
     io: Io,
     renderer: *c.SDL_Renderer,
-    level: level.Level,
+    /// What the location is drawn with (the world source's record) and its arena.
+    backdrop: og.core.map.Backdrop,
+    backdrop_arena: std.heap.ArenaAllocator,
     world: *World,
-    sprites: archive.Archive,
+    /// GUI modes of this location (use/give item, push, aim): the input layer's, kept with
+    /// the view (cached with it, as the world).
+    mode: og.input.mouse.Mouse = .{},
+    /// The location's sprites (`levels/<level>/sprites/…`) and background.
+    assets: og.loaders.assets.Stack,
     background: gfx.Frames = .{},
     /// Sprite frames by name (lowercase), loaded on first draw.
     sprite_cache: std.StringHashMapUnmanaged(gfx.Frames) = .empty,
@@ -115,6 +141,8 @@ pub const LevelView = struct {
     dialog_page_key: usize = 0,
     /// Actor models (host cache).
     models: ?*model_cache.Cache = null,
+    /// Their textures and the models' archive pictures (host cache, renderer side).
+    textures: ?*og.render.textures.Textures = null,
     /// Effect drawing (shared by levels, set by the host).
     fx_view: ?*EffectsView = null,
     /// Click marker (0x451630, `kwadrat`): point, start tick, whether walking succeeded.
@@ -123,7 +151,7 @@ pub const LevelView = struct {
     show_grid: bool = false,
     /// Tab battle grid edges (0x495530) for the current `.cm` and the last wave step
     /// tick (0x495f80).
-    grid_edges: []lf.CombatMap.GridEdge = &.{},
+    grid_edges: []core_map.CombatMap.GridEdge = &.{},
     grid_edges_of: ?[*]const bool = null,
     grid_tick: u64 = 0,
     /// Actor shadows (adjust.kdt disable_shadows = 0).
@@ -132,6 +160,8 @@ pub const LevelView = struct {
     ice: [4]?Image = .{ null, null, null, null },
     ice_loaded: bool = false,
     ice_level: std.AutoHashMapUnmanaged(*og.script.object.Object, f32) = .empty,
+    /// The drawn poses of actors and their extra bodies (transitions' start poses).
+    poses: std.AutoHashMapUnmanaged(PoseKey, Poses) = .empty,
     ice_tick: u64 = 0,
     /// Effect frames on link points (flashes, "nitro") for the model layer, drawn
     /// there with depth testing (actors_view.attachedEffects).
@@ -181,6 +211,7 @@ pub const LevelView = struct {
     ss: u32 = 1,
     /// Actor layer width in screen pixels (wider than 640 with `scaling = adaptive`).
     layer_w: u32 = 640,
+    layer_h: u32 = 480,
     layer_tex: ?*c.SDL_Texture = null,
     /// Where `layer_tex` may be non-empty (uploaded by previous frames).
     /// Layer parts uploaded last time (they must be erased there too).
@@ -195,6 +226,9 @@ pub const LevelView = struct {
     glow_tex: ?*c.SDL_Texture = null,
     /// Screen-blended batch billboards over the frame (Layer.screen).
     screen_tex: ?*c.SDL_Texture = null,
+    /// Where `glow_tex` / `screen_tex` may be non-empty (their last upload).
+    glow_rect: Canvas.Rect = .empty,
+    screen_rect: Canvas.Rect = .empty,
     /// Current texture on a shocked fighter (gfx_3d\textures\current.3df).
     current_tex: ?Image = null,
     current_loaded: bool = false,
@@ -212,6 +246,11 @@ pub const LevelView = struct {
         if (self.subtitle_tex) |t| c.SDL_DestroyTexture(t);
         for (&self.ice) |*im| if (im.*) |*x| x.deinit(self.gpa);
         self.ice_level.deinit(self.gpa);
+        {
+            var it = self.poses.valueIterator();
+            while (it.next()) |p| p.deinit(self.gpa);
+            self.poses.deinit(self.gpa);
+        }
         {
             var it = self.effect_frames.iterator();
             while (it.next()) |e| {
@@ -245,8 +284,8 @@ pub const LevelView = struct {
         self.spz_cache.deinit(self.gpa);
         for (self.walk_textures) |t| if (t) |tex| c.SDL_DestroyTexture(tex);
         self.background.deinit(self.gpa);
-        self.sprites.close(self.io, self.gpa);
-        self.level.deinit();
+        self.assets.deinit();
+        self.backdrop_arena.deinit();
     }
 
     pub fn size(self: LevelView) [2]u32 {
@@ -304,11 +343,12 @@ pub const LevelView = struct {
     }
 
     /// Background click: the selected hero walks there; in battle — a cell action.
-    /// A marker at the click point and the `setway` / `setway-wrong` sound.
+    /// A marker at the click point and UiSounds `walk_ok` / `walk_bad` (the exe's setway, setway-wrong).
     pub fn clickMarker(self: *LevelView, bg: [2]f32) void {
         const w = self.world;
         self.marker = .{ .pos = floor_mod.groundAt(w, bg), .start = w.ticks, .ok = w.walk_ok };
-        w.out.sound(w.gpa, if (w.walk_ok) "setway" else "setway-wrong", null);
+        const ss = og.core.modules.ui().sounds;
+        w.out.sound(w.gpa, if (w.walk_ok) ss.walk_ok else ss.walk_bad, null);
     }
 
     /// Stops the level sound (when moving to the cache).
@@ -345,17 +385,16 @@ pub const LevelView = struct {
         ui_modal: bool,
     };
 
-    /// Z-frames `<name>.spz` from the level's sprite.dat.
+    /// Z-frames `<name>.spz` of the level's sprites.
     pub fn spzFrames(self: *LevelView, name: []const u8) ?*Spz {
         var buf: [archive.name_size]u8 = undefined;
         if (name.len == 0 or name.len + 4 > buf.len or std.mem.eql(u8, name, "(null)")) return null;
         const key = std.ascii.lowerString(&buf, name);
         if (self.spz_cache.getPtr(key)) |z| return if (z.*) |*x| x else null;
-        var name_buf: [archive.name_size]u8 = undefined;
-        const file = std.fmt.bufPrint(&name_buf, "{s}.spz", .{name}) catch return null;
+        var name_buf: [og.loaders.assets.max_path]u8 = undefined;
+        const file = og.loaders.assets.levelSprite(&name_buf, self.world.level_name, name, "spz") orelse return null;
         const spz: ?Spz = blk: {
-            const e = self.sprites.find(file) orelse break :blk null;
-            const bytes = self.sprites.readAlloc(self.io, self.gpa, e) catch break :blk null;
+            const bytes = self.assets.read(self.gpa, file) catch break :blk null;
             const spr = og.formats.sprite.parse(self.gpa, bytes) catch {
                 self.gpa.free(bytes);
                 break :blk null;
@@ -376,10 +415,10 @@ pub const LevelView = struct {
         if (name.len == 0 or name.len + 4 > buf.len) return null;
         const key = std.ascii.lowerString(&buf, name);
         if (self.sprite_cache.getPtr(key)) |f| return f;
-        var name_buf: [archive.name_size]u8 = undefined;
-        const file = std.fmt.bufPrint(&name_buf, "{s}.spr", .{name}) catch return null;
-        const frames = loadEntry(self.io, self.gpa, self.renderer, self.sprites, file) catch |err| blk: {
-            std.log.warn("sprite {s}: {t}", .{ file, err });
+        var name_buf: [og.loaders.assets.max_path]u8 = undefined;
+        const file = og.loaders.assets.levelSprite(&name_buf, self.world.level_name, name, "spr") orelse return null;
+        const frames = loadEntry(self.gpa, self.renderer, &self.assets, file) catch |err| blk: {
+            std.log.warn("sprite {s}.spr: {t}", .{ name, err });
             break :blk gfx.Frames{};
         };
         const owned = self.gpa.dupe(u8, key) catch return null;
@@ -405,9 +444,8 @@ pub fn headAt(w: *World, p: [3]f32) [2]f32 {
     return .{ q.x, q.y };
 }
 
-pub fn loadEntry(io: Io, gpa: Allocator, r: *c.SDL_Renderer, arc: archive.Archive, name: []const u8) !gfx.Frames {
-    const entry = arc.find(name) orelse return error.NotFound;
-    const data = try arc.readAlloc(io, gpa, entry);
+pub fn loadEntry(gpa: Allocator, r: *c.SDL_Renderer, as: *og.loaders.assets.Stack, path: []const u8) !gfx.Frames {
+    const data = try as.read(gpa, path);
     defer gpa.free(data);
-    return gfx.loadFrames(gpa, r, name, data);
+    return gfx.loadFrames(gpa, r, path, data);
 }

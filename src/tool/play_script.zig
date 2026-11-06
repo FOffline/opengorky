@@ -30,7 +30,7 @@ const Idle = struct {
     }
 };
 
-fn areaCenter(area: og.formats.level_files.Area) [2]f32 {
+fn areaCenter(area: og.core.map.Area) [2]f32 {
     var c: [2]f32 = .{ 0, 0 };
     for (area.points) |p| c = .{ c[0] + p[0], c[1] + p[1] };
     const n: f32 = @floatFromInt(@max(1, area.points.len));
@@ -46,22 +46,31 @@ fn printMessage(w: *og.state.world.World, out: *Io.Writer) !void {
 }
 
 pub fn playScript(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, start: []const u8, cmds: []const []const u8) !void {
-    var dat = try common.openDat(io, game_dir, .{ .iterate = true });
+    var dat = try common.openDat(io, game_dir);
     defer dat.close(io);
-    var models = try og.actor.model_cache.Cache.open(io, gpa, dat);
+    var models = try og.compose.models.open(io, gpa, dat, null);
     defer models.deinit();
+    const opener: og.loaders.world.Opener = .{ .io = io, .dat = dat };
     var g: play.PlayGame = .{
         .io = io,
         .gpa = gpa,
         .dat = dat,
         .out = out,
-        .game = .{ .io = io, .gpa = gpa, .dat = dat, .models = &models },
+        .game = .{ .io = io, .gpa = gpa, .worlds = opener.factory(), .models = &models },
         .names = .init(gpa),
     };
     defer g.deinit();
-    g.game.loadDialogFont();
-    try g.game.setPrev(start);
-    _ = try g.game.open(start, .{}, null);
+    _ = og.loaders.loadDialogFont(io, dat);
+    // `new`: the game's new game (the campaign's start, rules campaign.ss).
+    if (std.mem.eql(u8, start, "new")) {
+        const w = try g.game.newGame();
+        try out.print("new game: {s}, selected {s}, party:", .{ w.level_name, w.selected_hero });
+        for (w.party().slice()) |h| try out.print(" {s}", .{h.name});
+        try out.print(", intro {s}\n", .{og.rules.campaign().intro});
+    } else {
+        try g.game.setPrev(start);
+        _ = try g.game.open(start, .{}, null);
+    }
     for (cmds) |cmd| {
         if (g.lost) break;
         if (g.want_saveload) try g.saveLoad();
@@ -115,7 +124,7 @@ fn runCommand(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8) !boo
     }
     if (std.mem.startsWith(u8, cmd, "tap:")) {
         // tap:X,Y — a background click without waiting (the selected hero starts moving).
-        _ = try actions_mod.click(w, try common.parseXY(cmd[4..]));
+        _ = try actions_mod.actAt(w, try common.parseXY(cmd[4..]), 0, &g.mouseOf(w).use);
         return true;
     }
     if (std.mem.startsWith(u8, cmd, "esc:")) {
@@ -140,7 +149,7 @@ fn runCommand(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8) !boo
         var i: usize = 0;
         while (i < w.rt.objects.items.len) : (i += 1) {
             const o = w.rt.objects.items[i];
-            if (o.host == null or !og.state.world.isGroundItem(o) or o.getInt("funcID") <= 0) continue;
+            if (o.host == null or !og.state.world.isGroundItem(o) or o.getInt("action") <= 0) continue;
             for (0..2) |_| try og.inventory.box.itemOperation(w, o, hero);
             if (w.act.exploring) |ex| {
                 try og.inventory.box.takeAllFromBox(w, ex.box, hero);
@@ -159,7 +168,7 @@ fn runCommand(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8) !boo
         // loadsave:FILE — load a save (its current level).
         const data = try Io.Dir.cwd().readFileAlloc(io, cmd[9..], gpa, .unlimited);
         defer gpa.free(data);
-        const nw = try g.game.load(try og.save.Save.parse(gpa, data));
+        const nw = try g.game.load(try og.compose.save.parse(gpa, data));
         try out.print("  loaded {s}, hero {s}\n", .{ nw.level_name, nw.selected_hero });
         return true;
     }
@@ -175,30 +184,31 @@ fn runCommand(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8) !boo
     }
     if (std.mem.eql(u8, cmd, "saveload")) {
         // Save the current level and load it into a fresh world (as the viewer does).
-        var sv: og.save.Save = .init(gpa);
+        var sv: og.world.saved.Save = .init(gpa);
         defer sv.deinit();
         sv.current = w.level_name;
         try sv.addWorld(w);
         var text: Io.Writer.Allocating = .init(gpa);
         defer text.deinit();
-        try sv.write(&text.writer);
-        var back = try og.save.Save.parse(gpa, text.written());
+        try og.compose.save.write(&sv, &text.writer);
+        var back = try og.compose.save.parse(gpa, text.written());
         defer back.deinit();
         const hero = try g.names.allocator().dupe(u8, w.selected_hero);
         const name = try g.names.allocator().dupe(u8, w.level_name);
         _ = try g.game.open(name, .{ .hero = hero }, back.find(name).?);
+        g.mouse_of = null;
         try out.print("  loaded {s}\n", .{name});
         return true;
     }
     if (std.mem.startsWith(u8, cmd, "savefile:")) {
         // Write the game to a save file (for viewer --load-slot and loadsave:):
         // the current level and the remembered ones, as the viewer does.
-        var sv: og.save.Save = .init(gpa);
+        var sv: og.world.saved.Save = .init(gpa);
         defer sv.deinit();
         try g.game.snapshot(&sv);
         var text: Io.Writer.Allocating = .init(gpa);
         defer text.deinit();
-        try sv.write(&text.writer);
+        try og.compose.save.write(&sv, &text.writer);
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = cmd[9..], .data = text.written() });
         try out.print("  saved {s}\n", .{cmd[9..]});
         return true;
@@ -206,8 +216,8 @@ fn runCommand(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8) !boo
     if (std.mem.startsWith(u8, cmd, "pclick:")) {
         const t = try common.parseXY(cmd[7..]);
         const tc = og.world.nav.cellOf(t);
-        try out.print("  target cell {d},{d} kind {d}\n", .{ tc[0], tc[1], og.world.nav.kindAt(w.walk_map.?, tc[0], tc[1]) });
-        const ok = try actions_mod.clickPlay(w, t, false);
+        try out.print("  target cell {d},{d} kind {d}\n", .{ tc[0], tc[1], og.world.nav.kindAt(w.map.walk.?, tc[0], tc[1]) });
+        const ok = try actions_mod.playAt(w, t, false, &g.mouseOf(w).use);
         try out.print("  pclick {d:.0},{d:.0}: {} walk_ok {}\n", .{ t[0], t[1], ok, w.walk_ok });
         return true;
     }
@@ -217,7 +227,7 @@ fn runCommand(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8) !boo
         const line = line_buf[0..@min(line_buf.len, cmd.len - 4)];
         @memcpy(line, cmd[4..][0..line.len]);
         std.mem.replaceScalar(u8, line, '+', ' ');
-        _ = try og.console.run(w, line, out);
+        _ = try og.console.run(w, g.mouseOf(w), line, out);
         return true;
     }
     if (std.mem.eql(u8, cmd, "refill")) {
@@ -255,7 +265,7 @@ fn runCommand(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8) !boo
         return true;
     }
     if (std.mem.startsWith(u8, cmd, "op:")) {
-        // op:AREA:N — area action N (1 is funcID1: the elevator "down" button).
+        // op:AREA:N — area action N (1 is action1: the elevator "down" button).
         const spec = cmd[3..];
         const sep = std.mem.lastIndexOfScalar(u8, spec, ':') orelse return false;
         const area = og.world.areas.findArea(w, spec[0..sep]) orelse {
@@ -263,7 +273,7 @@ fn runCommand(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8) !boo
             return false;
         };
         const n = try std.fmt.parseInt(u8, spec[sep + 1 ..], 10);
-        if (!try actions_mod.clickAction(w, areaCenter(area), n)) try out.print("  no action {d}\n", .{n});
+        if (!try actions_mod.actAt(w, areaCenter(area), n, &g.mouseOf(w).use)) try out.print("  no action {d}\n", .{n});
         try g.runUntil(3000, Idle.f);
         return true;
     }
@@ -274,9 +284,9 @@ fn runCommand(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8) !boo
         if (std.mem.startsWith(u8, cmd, "use:")) {
             // use:ITEM:AREA — "Use … on …".
             const sep = std.mem.indexOfScalar(u8, arg, ':') orelse return false;
-            w.mouse.use = w.rt.findObject(arg[0..sep]);
-            use_item = w.mouse.use;
-            if (w.mouse.use == null) try out.print("  no item {s}\n", .{arg[0..sep]});
+            g.mouseOf(w).use = w.rt.findObject(arg[0..sep]);
+            use_item = g.mouseOf(w).use;
+            if (use_item == null) try out.print("  no item {s}\n", .{arg[0..sep]});
             arg = arg[sep + 1 ..];
         }
         if (std.mem.startsWith(u8, cmd, "click:")) {
@@ -287,7 +297,7 @@ fn runCommand(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8) !boo
                 if (w.rt.findObject(arg)) |o| if (og.state.world.isGroundItem(o) or og.state.world.World.nativeOf(o).hero) {
                     target = w.screenPos(o);
                     try out.print("  item {s} at {d:.0},{d:.0}\n", .{ o.name, target[0], target[1] });
-                    _ = try actions_mod.click(w, target);
+                    _ = try actions_mod.actAt(w, target, 0, &g.mouseOf(w).use);
                     try printMessage(w, out);
                     try g.runUntil(3000, Idle.f);
                     return false;
@@ -297,12 +307,13 @@ fn runCommand(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8) !boo
             };
             target = areaCenter(area);
         }
-        const level_before = w.level_name;
+        // A copy: a battle reloaded on the way (`battlereload`) frees `w`.
+        const level_before = try g.names.allocator().dupe(u8, w.level_name);
         const battles_before = g.battles;
         if (og.world.areas.activeAreaAt(w, target)) |ao| {
-            try out.print("  area {s}: funcID {d}, isLevelSwitch {d}\n", .{ ao.name, ao.getInt("funcID"), ao.getInt("isLevelSwitch") });
+            try out.print("  area {s}: action {d}, isLevelSwitch {d}\n", .{ ao.name, ao.getInt("action"), ao.getInt("isLevelSwitch") });
         } else try out.print("  no active area at point\n", .{});
-        if (!try actions_mod.click(w, target)) try out.print("  click rejected (scene)\n", .{});
+        if (!try actions_mod.actAt(w, target, 0, &g.mouseOf(w).use)) try out.print("  click rejected (scene)\n", .{});
         if (w.selectedHero()) |h| {
             const hp = w.screenPos(h);
             try out.print("  goal {d:.0},{d:.0} from {d:.0},{d:.0}: path points {d}, floor {d}\n", .{ target[0], target[1], hp[0], hp[1], og.state.world.actorOf(h).path.items.len, og.state.world.actorOf(h).map });
@@ -318,12 +329,12 @@ fn runCommand(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8) !boo
                 const again_item = g.cur().rt.findObject(it.name) orelse break;
                 // The item is already used up (the battle started UseItem itself) — do not repeat.
                 if (og.state.world.World.nativeOf(again_item).deleted) break;
-                // Or used up by the script (nameID −1: not pickable, 0x450fa0) — a retry
+                // Or used up by the script (classic_id −1: not pickable, 0x450fa0) — a retry
                 // would only leave the use mode on.
                 if (og.world.areas.activeAreaAt(g.cur(), target) == null and og.world.areas.itemAt(g.cur(), target) == null) break;
-                g.cur().mouse.use = again_item;
+                g.mouseOf(g.cur()).use = again_item;
             }
-            if (!try actions_mod.click(g.cur(), target)) break;
+            if (!try actions_mod.actAt(g.cur(), target, 0, &g.mouseOf(g.cur()).use)) break;
             try g.runUntil(3000, Idle.f);
             if (g.battles == bb) break;
         }

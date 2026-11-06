@@ -42,7 +42,7 @@ fn showWorld(self: *Viewer, restored: bool) !void {
         self.level = kv.value;
         self.level.?.resumeSound();
     };
-    if (self.level == null) self.level = try level_compose.load(self.io, self.gpa, self.renderer, self.dat, w, self.sound, self.models);
+    if (self.level == null) self.level = try level_compose.load(self.io, self.gpa, self.renderer, self.dat, w, self.sound, self.models, self.textures);
     // Level archive, for the title and the [ ] keys.
     var buf: [256]u8 = undefined;
     const arc_name = try std.fmt.bufPrint(&buf, "{s}/sprite.dat", .{w.level_name});
@@ -52,12 +52,11 @@ fn showWorld(self: *Viewer, restored: bool) !void {
     afterLoad(self);
 }
 
-/// Level loaded or taken from the cache (0x41fb09): strings, font, hero follow,
+/// Level loaded or taken from the cache (0x41fb09): font, hero follow,
 /// zoom 1 without transition, dolly reset; the camera where it was left,
 /// otherwise on the hero.
 fn afterLoad(self: *Viewer) void {
     const l = &self.level.?;
-    if (self.inventory) |inv| l.world.strings = &inv.strings;
     l.world.examine_menus = self.inventory != null;
     l.font = self.font;
     l.follow = true;
@@ -97,10 +96,10 @@ pub fn menuAction(self: *Viewer, action: @import("../menu/items.zig").Action) !v
         .none => {},
         .new_game => {
             self.closeAll();
-            // Intro introkon (0x413386: x 0, y 60, doubled) before the port.
-            self.video_queue.append(self.gpa, .{ .name = "introkon.avi", .x = 0, .y = 60, .double = true }) catch {};
+            // The campaign's intro (the exe: introkon) before its location (game.newGame).
+            queueVideos(self, og.rules.campaign().intro);
             self.nextVideo();
-            _ = try self.game.open("01_port", .{ .hero = "Sullivan" }, null);
+            _ = try self.game.newGame();
             try showWorld(self, false);
             m.open = false;
         },
@@ -118,7 +117,7 @@ pub fn menuAction(self: *Viewer, action: @import("../menu/items.zig").Action) !v
         .save => |k| {
             try saves_ui.saveGame(self, k, menu_slots.editName(m));
             m.editing = null;
-            m.sound = "keyaccept";
+            m.sound = og.core.modules.ui().sounds.key_accept;
             m.open = false;
         },
         // "keyaccept" picked the slot (0x41566a).
@@ -130,12 +129,25 @@ pub fn menuAction(self: *Viewer, action: @import("../menu/items.zig").Action) !v
     }
 }
 
+/// Videos of a campaign list ("a.avi b.mp4") queued, at the exe's places for its own
+/// (core module "interface" `videos`): introkon (0x413386: x 0, y 60, doubled), those
+/// before the menu (0x40fd06).
+pub fn queueVideos(self: *Viewer, list: []const u8) void {
+    var it = std.mem.tokenizeAny(u8, list, " ,");
+    while (it.next()) |name| {
+        const r: og.outbox.VideoRequest = for (og.core.modules.ui().videos) |e| {
+            if (std.ascii.eqlIgnoreCase(e.name, name)) break .{ .name = e.name, .x = e.x, .y = e.y, .double = e.double };
+        } else .{ .name = name, .x = 0, .y = 0, .double = false };
+        self.video_queue.append(self.gpa, r) catch {};
+    }
+}
+
 /// Game over choice: YES — retry the battle, NO — main menu.
 pub fn gameOverChoose(v: *Viewer, yes: bool) !void {
     const g = v.gui orelse return;
     gui_battle.clearGameOver(g);
     if (v.level) |*l| l.world.flow.defeat_ticks = null;
-    v.uiSound("click");
+    v.uiSound(og.core.modules.ui().sounds.click);
     try menuAction(v, if (yes) .retry_battle else .main_menu);
 }
 
@@ -146,7 +158,7 @@ pub fn loadGame(self: *Viewer, slot: usize) !void {
     const path = saves_ui.slotPath(self, &buf, slot) orelse return;
     const data = try Io.Dir.cwd().readFileAlloc(self.io, path, self.gpa, .limited(64 << 20));
     defer self.gpa.free(data);
-    const sv = try og.save.Save.parse(self.gpa, data);
+    const sv = try og.compose.save.parse(self.gpa, data);
     self.closeAll();
     // The save goes to the game (game.load) even if a level fails to load.
     _ = try self.game.load(sv);

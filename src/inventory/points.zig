@@ -21,6 +21,6 @@ pub fn applyLevelPoints(hero: *Object, pts: [7]i32) void {
     hero.setInt("max_hp", fields.maxHp(hero) + pts[1]);
     fields.setF(hero, "luck", f(hero, "luck") + num.toF32(pts[3]));
     fields.setF(hero, "accuracy", f(hero, "accuracy") + num.toF32(pts[4]));
-    fields.setF(hero, "counterAttack", f(hero, "counterAttack") + num.toF32(pts[5]));
+    fields.setF(hero, "counter_attack", f(hero, "counter_attack") + num.toF32(pts[5]));
     hero.setInt("max_rage", hero.getInt("max_rage") + pts[6]);
 }

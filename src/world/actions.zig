@@ -1,11 +1,13 @@
-//! Player actions on areas and items: field clicks, active areas, examine, operations and
-//! the arrived hero's action.
+//! Player actions on areas and items: actions at a background point, active areas, examine,
+//! operations and the arrived hero's action.
 
 const std = @import("std");
 const state_groups = @import("../state.zig").groups;
 const fields = @import("../fields.zig");
 const object = @import("../script.zig").object;
 const inventory = @import("../inventory.zig");
+const rules = @import("../rules.zig");
+const hooks = @import("../state.zig").hooks;
 const Object = object.Object;
 const Value = @import("../script.zig").value.Value;
 const world = @import("../state.zig").world;
@@ -34,7 +36,6 @@ pub fn accepts(self: *World, target: *Object, item: *Object) bool {
 
 /// Actions of the area under a point (menu): operation ids and names.
 pub fn actionsAt(self: *World, bg: [2]f32, out: *[max_actions]AreaAction) usize {
-    if (self.mouse.use != null) return 0;
     const o = areas.activeAreaAt(self, bg) orelse return 0;
     var n: usize = 0;
     for (0..max_actions) |k| {
@@ -47,17 +48,19 @@ pub fn actionsAt(self: *World, bg: [2]f32, out: *[max_actions]AreaAction) usize 
 }
 
 /// Every object gets the examine menu except exits and non-empty item boxes (Explore with
-/// cnt_itm > 0 opens the box window at once, 0x457340).
+/// cnt_itm > 0 opens the box window at once, 0x457340; rules Action `auto_open`).
 fn wantsExamine(self: *World, o: *Object) bool {
     _ = self;
     if (o.getInt("isLevelSwitch") > 0) return false;
-    if (o.getInt("funcID") == 7 and o.getInt("cnt_itm") > 0) return false;
+    if (inventory.box.opensItself(o)) return false;
     return true;
 }
 
-/// Examine menu rows: actions, "Use …", then Cancel (or a lone Ok).
+/// Examine menu rows: actions, "Use …" (not those its Accepts refused as the menu
+/// opened), then Cancel (or a lone Ok).
 pub fn examineEntries(self: *World, o: *Object, out: []ExamineEntry) []ExamineEntry {
     var n: usize = 0;
+    const refused: u16 = if (self.act.examining) |ex| (if (ex.obj == o) ex.refused else 0) else 0;
     for (0..5) |k| {
         const id = areas.actionId(o, @intCast(k));
         if (state_groups.operationName(id) == null or n + 1 >= out.len) continue;
@@ -72,11 +75,31 @@ pub fn examineEntries(self: *World, o: *Object, out: []ExamineEntry) []ExamineEn
         const it = self.rt.findObject(v.value.string) orelse continue;
         if (World.nativeOf(it).deleted or fields.owner(it).len == 0) continue;
         if (inventory.item.typeOf(it) == .ammo and fields.counter(it) <= 0) continue;
+        if (refused & (@as(u16, 1) << @intCast(k)) != 0) continue;
         out[n] = .{ .use = it };
         n += 1;
     }
     out[n] = .cancel;
     return out[0 .. n + 1];
+}
+
+/// OpenGorky: the `use_item_N` items (bit N) the area's or item's Accepts(item, user)
+/// refuses `hero` (asked once, as its examine menu opens).
+fn refusedUses(self: *World, o: *Object, hero: *Object) !u16 {
+    if (!o.implementsC("Accepts")) return 0;
+    var out: u16 = 0;
+    var buf: [16]u8 = undefined;
+    for (0..9) |k| {
+        const name = std.fmt.bufPrint(&buf, "use_item_{d}", .{k}) catch break;
+        const v = o.getVarDyn(name) orelse continue;
+        if (v.value != .string) continue;
+        const it = self.rt.findObject(v.value.string) orelse continue;
+        var args = [_]Value{ it.ref(), hero.ref() };
+        if (try hooks.on(self, o, "Area.Accepts", &args)) |a| if (!a.truth()) {
+            out |= @as(u16, 1) << @intCast(k);
+        };
+    }
+    return out;
 }
 
 /// Examine menu choice (0x457730): hero action or UseItem.
@@ -88,14 +111,15 @@ pub fn examineChoose(self: *World, e: ExamineEntry) !void {
         .use => |item| {
             const args = [_]Value{ .{ .string = item.name }, .{ .string = ex.hero.name } };
             _ = try self.rt.callIfExists(ex.obj, "UseItem", &args);
+            try onUseItem(self, ex.obj, item, ex.hero);
         },
         .action => |a| {
             switch (World.nativeOf(ex.obj).kind) {
                 .item, .weapon => try inventory.box.itemOperation(self, ex.obj, ex.hero),
                 else => try areaOperation(self, ex.obj, ex.hero, a.k),
             }
-            // An opened, non-empty box (funcID 7) shows its window on its own after 90 ticks.
-            if (self.act.exploring == null and ex.obj.getInt("funcID") == 7 and ex.obj.getInt("cnt_itm") > 0)
+            // An opened, non-empty box (action 7) shows its window on its own after 90 ticks.
+            if (self.act.exploring == null and inventory.box.opensItself(ex.obj))
                 // The exe waits 60 + 30 ticks; we open once the lid animation ends (at
                 // least 8 ticks).
                 self.act.pending_explore = .{ .box = ex.obj, .hero = ex.hero, .ticks = 8 };
@@ -105,15 +129,24 @@ pub fn examineChoose(self: *World, e: ExamineEntry) !void {
 
 fn areaOperation(self: *World, area: *Object, hero: *Object, action: u8) !void {
     const id = areas.actionId(area, action);
-    if (area.getInt("isLevelSwitch") > 0 and id != 1) {
+    if (area.getInt("isLevelSwitch") > 0 and !rules.actionFlag(id, .on_exit)) {
         _ = try self.rt.callIfExists(area, "LevelSwitch", &.{});
+        _ = try hooks.on(self, area, "Area.OnExit", &.{});
         return;
     }
     // Explore on a non-empty area (the chief's safe after its code): the box window, as
     // for item boxes (0x457340); the scripts have no Explore() of their own.
-    if (id == 7 and area.getInt("cnt_itm") > 0) return inventory.box.exploreBox(self, area, hero);
+    if (area.getInt("cnt_itm") > 0 and rules.actionFlag(id, .auto_open)) return inventory.box.exploreBox(self, area, hero);
     const name = state_groups.operationName(id) orelse return;
+    var on_action = [_]Value{ .{ .string = name }, hero.ref() };
+    if (try hooks.on(self, area, "Area.OnAction", &on_action)) |v| if (v.truth()) return;
     _ = try self.rt.callIfExists(area, name, &.{.{ .string = hero.name }});
+}
+
+/// OnUseItem(item, user) of the area, item or actor `target` (after its UseItem).
+fn onUseItem(self: *World, target: *Object, item: *Object, hero: *Object) !void {
+    var args = [_]Value{ item.ref(), hero.ref() };
+    _ = try hooks.on(self, target, "Area.OnUseItem", &args);
 }
 
 pub fn closeExamine(self: *World) void {
@@ -129,9 +162,11 @@ pub fn enterSafeCode(self: *World, code: i32) !void {
     const area = self.act.safe_box orelse return;
     self.act.safe_box = null;
     _ = try self.rt.callIfExists(area, "CheckCode", &.{.{ .int = code }});
-    // The right code opens the door (funcID 7): the contents show once it has swung, as
+    var args = [_]Value{.{ .int = code }};
+    _ = try hooks.on(self, area, "Area.OnCode", &args);
+    // The right code opens the door (action 7): the contents show once it has swung, as
     // after opening a box.
-    if (area.getInt("funcID") == 7 and area.getInt("cnt_itm") > 0) if (self.selectedHero()) |hero| {
+    if (inventory.box.opensItself(area)) if (self.selectedHero()) |hero| {
         self.act.pending_explore = .{ .box = area, .hero = hero, .ticks = 8 };
     };
 }
@@ -146,46 +181,50 @@ pub fn runInteraction(self: *World) !void {
     if (self.scene.runner != null) return;
     self.scene.last_action_hero = it.hero.name;
     if (it.use) |item| {
+        if (try hooks.itemUse(self, it.hero, item, it.area)) return;
         const args = [_]Value{ .{ .string = item.name }, .{ .string = it.hero.name } };
         _ = try self.rt.callIfExists(it.area, "UseItem", &args);
+        try onUseItem(self, it.area, item, it.hero);
     } else if (it.mode == .level_switch) {
         _ = try self.rt.callIfExists(it.area, "LevelSwitch", &.{});
+        _ = try hooks.on(self, it.area, "Area.OnExit", &.{});
     } else if (it.mode == .examine or (self.examine_menus and it.action == 0 and wantsExamine(self, it.area))) {
-        self.act.examining = .{ .obj = it.area, .hero = it.hero };
+        self.act.examining = .{ .obj = it.area, .hero = it.hero, .refused = try refusedUses(self, it.area, it.hero) };
     } else switch (World.nativeOf(it.area).kind) {
         .item, .weapon => try inventory.box.itemOperation(self, it.area, it.hero),
         else => try areaOperation(self, it.area, it.hero, it.action),
     }
 }
 
-/// Player click (0x451430 left, 0x4514c0 right). Left: another hero — select; item — walk
-/// there; area with WalkPath — follow it; exit — walk there and LevelSwitch; other area —
-/// walk there; elsewhere — walk. Right: item or area — walk there and examine; elsewhere —
-/// nothing. The whole party walks (0x427780). False while a scene has control.
-pub fn clickPlay(self: *World, bg: [2]f32, right: bool) !bool {
-    const hero = clickHero(self) orelse return false;
+/// The player's action at background point `bg` (0x451430, 0x4514c0 to examine). Act: another
+/// hero — select; item — walk there; area with WalkPath — follow it; exit — walk there and
+/// LevelSwitch; other area — walk there; elsewhere — walk. Examine: item or area — walk there
+/// and examine; elsewhere — nothing. The whole party walks (0x427780). `use` holds the item of
+/// "Use … on …" (`actAt`). False while a scene has control.
+pub fn playAt(self: *World, bg: [2]f32, examine: bool, use: ?*?*Object) !bool {
+    const hero = actingHero(self) orelse return false;
     // On a ladder: finish climbing first.
     if (world.actorOf(hero).onPortal()) return true;
     // "Use … on …": walk there and UseItem.
-    if (self.mouse.use != null) return clickAction(self, bg, 0);
-    if (!right) if (walk.heroAt(self, bg)) |other| if (other != hero and self.playerCanSelect(other)) {
+    if (use) |u| if (u.* != null) return actAt(self, bg, 0, use);
+    if (!examine) if (walk.heroAt(self, bg)) |other| if (other != hero and self.playerCanSelect(other)) {
         self.selected_hero = other.name;
-        self.out.sound(self.gpa, "selecthero", null);
+        self.out.sound(self.gpa, @import("../core.zig").modules.ui().sounds.select_hero, null);
         return true;
     };
     self.act.interaction = null;
     if (areas.itemAt(self, bg)) |item| {
         if (!try walk.partyWalk(self, hero, walk.itemGoal(self, item))) return true;
-        if (right) self.act.interaction = .{ .hero = hero, .area = item, .mode = .examine };
+        if (examine) self.act.interaction = .{ .hero = hero, .area = item, .mode = .examine };
         return true;
     }
     if (areas.activeAreaAt(self, bg)) |o| {
         const area = areas.findArea(self, o.getString("areaName")).?;
-        const func = o.getInt("funcID");
+        const func = o.getInt("action");
         const ls = o.getInt("isLevelSwitch");
-        if (right) {
+        if (examine) {
             if (!try walk.partyWalk(self, hero, area.control)) return true;
-            const no_examine = o.getInt("noExamine") == 1 or (func == -1 and ls > 0);
+            const no_examine = o.getInt("examine_hidden") == 1 or (func == -1 and ls > 0);
             if (!no_examine) self.act.interaction = .{ .hero = hero, .area = o, .mode = .examine };
             return true;
         }
@@ -194,7 +233,7 @@ pub fn clickPlay(self: *World, bg: [2]f32, right: bool) !bool {
             try walk.walkPath(self, hero, wp);
             return true;
         }
-        if (func == 2 and ls == 0) {
+        if (rules.actionFlag(func, .walk_click) and ls == 0) {
             _ = try walk.partyWalk(self, hero, bg);
             return true;
         }
@@ -202,41 +241,39 @@ pub fn clickPlay(self: *World, bg: [2]f32, right: bool) !bool {
         if (func != 1 and ls > 0) self.act.interaction = .{ .hero = hero, .area = o, .mode = .level_switch };
         return true;
     }
-    if (right) return false;
+    if (examine) return false;
     _ = try walk.partyWalk(self, hero, bg);
     return true;
 }
 
-/// Common start of a field click: no scene in control, a placed selected hero.
-fn clickHero(self: *World) ?*Object {
+/// Common start of a player action: no scene in control, a placed selected hero.
+fn actingHero(self: *World) ?*Object {
     if (walk.playerLocked(self)) return null;
     const hero = self.selectedHero() orelse return null;
     if (!world.actorOf(hero).placed) return null;
     return hero;
 }
 
-pub fn click(self: *World, bg: [2]f32) !bool {
-    return clickAction(self, bg, 0);
-}
-
-/// Click with an area action choice (0 main, 1 `funcID1`, …); false if the area lacks it.
-pub fn clickAction(self: *World, bg: [2]f32, action: u8) !bool {
+/// Action at background point `bg` with an area action choice (0 main, 1 `action1`, …); false
+/// if the area lacks it. `use`: the item of "Use … on …" (none: null or holding null), set to
+/// null once the item is used (a miss keeps it).
+pub fn actAt(self: *World, bg: [2]f32, action: u8, use_slot: ?*?*Object) !bool {
     if (action > 0) {
         const o = areas.activeAreaAt(self, bg) orelse return false;
         if (areas.actionId(o, action) <= 0) return false;
     }
-    const hero = clickHero(self) orelse return false;
-    // On a ladder: finish climbing first (as clickPlay); a new path would drop the
+    const hero = actingHero(self) orelse return false;
+    // On a ladder: finish climbing first (as playAt); a new path would drop the
     // transition and leave the hero on blocked cells.
     if (world.actorOf(hero).onPortal()) return true;
-    const use = self.mouse.use;
+    const use = if (use_slot) |u| u.* else null;
     // "Use X on …" (0x450b76…0x450cc4): the target is a ground item or the area under the
-    // cursor; `use_item_N` isn't checked (that's the examine menu, 0x45752c); a target without
+    // point; `use_item_N` isn't checked (that's the examine menu, 0x45752c); a target without
     // UseItem does nothing; a miss keeps the mode.
     if (use) |u| {
         if (areas.itemAt(self, bg)) |item| {
             // Item: no walking, the message goes straight to the hero's queue (esi = 1).
-            self.mouse.use = null;
+            use_slot.?.* = null;
             self.act.interaction = .{ .hero = hero, .area = item, .use = u };
             return true;
         }
@@ -244,7 +281,7 @@ pub fn clickAction(self: *World, bg: [2]f32, action: u8) !bool {
             // Area: walk to its control point (0x427210), then UseItem.
             const area = areas.findArea(self, o.getString("areaName")).?;
             if (!try walk.walkToReach(self, hero, area.control)) return true;
-            self.mouse.use = null;
+            use_slot.?.* = null;
             self.act.interaction = .{ .hero = hero, .area = o, .use = u, .action = action };
             return true;
         }
@@ -254,11 +291,12 @@ pub fn clickAction(self: *World, bg: [2]f32, action: u8) !bool {
         // closes either way (0x450cc6).
         if (walk.heroAt(self, bg)) |target| {
             if (inventory.item.typeOf(u) == .medicine) {
-                try inventory.medicine.healWith(self, hero, target, u);
+                if (try inventory.medicine.healWith(self, hero, target, u)) use_slot.?.* = null;
             } else {
-                self.mouse.use = null;
+                use_slot.?.* = null;
                 const args = [_]Value{ .{ .string = u.name }, .{ .string = hero.name } };
                 _ = try self.rt.callIfExists(target, "UseItem", &args);
+                try onUseItem(self, target, u, hero);
             }
             return true;
         }
@@ -272,7 +310,7 @@ pub fn clickAction(self: *World, bg: [2]f32, action: u8) !bool {
     }
     if (areas.activeAreaAt(self, bg)) |o| {
         const area = areas.findArea(self, o.getString("areaName")).?;
-        if (o.getInt("funcID") <= 0 and o.getInt("isLevelSwitch") <= 0) {
+        if (o.getInt("action") <= 0 and o.getInt("isLevelSwitch") <= 0) {
             try route.walkTo(self, hero, bg);
             return true;
         }

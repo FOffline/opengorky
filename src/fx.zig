@@ -6,3 +6,8 @@ pub const hits = @import("fx/hits.zig");
 pub const launch = @import("fx/launch.zig");
 pub const blood = @import("fx/blood.zig");
 pub const explosion = @import("fx/explosion.zig");
+
+test {
+    _ = hits;
+    _ = launch;
+}

@@ -1,11 +1,12 @@
 //! Pushing, barrels, time bombs, decoys.
 
-const adjust = @import("../formats.zig").adjust;
+const adjust = @import("../rules.zig").adjust;
 const std = @import("std");
 const state_object = @import("../state.zig").object;
 const fields = @import("../fields.zig");
 const world = @import("../state.zig").world;
 const Object = @import("../script.zig").object.Object;
+const hooks = @import("../state.zig").hooks;
 const battle = @import("../battle.zig").battle;
 const anim = @import("anim.zig");
 const Battle = battle.Battle;
@@ -15,6 +16,7 @@ const fx = @import("../fx.zig");
 const inventory = @import("../inventory.zig");
 const Tile = @import("../battle.zig").grid.Tile;
 const max_fighters = battle.max_fighters;
+const modules = @import("../core.zig").modules;
 
 /// Push an obstacle (0x47bb60): side neighbour (not diagonal) with `movable`; the
 /// tile behind it must be inside, open and free. Ends the hero's turn.
@@ -23,8 +25,8 @@ pub fn push(self: *Battle, w: *World, t: Tile) !bool {
     const me = self.selected orelse return false;
     const f = &self.fighters.items[me];
     if (f.acted or !f.alive() or f.disabled() or f.size != 1) return false;
-    // Push button (0x4b1907): not Medusa (119) and not a woman (`sex` 1, +0x24580).
-    if (fields.isMedusa(f.obj) or f.obj.getInt("sex") == 1) return false;
+    // Push button (0x4b1907): its CanPush (native NoPush: Medusa) and not a woman (`sex` 1, +0x24580).
+    if (!try @import("natives.zig").canPush(w, f.obj) or f.obj.getInt("gender") == 1) return false;
     const g = self.grid();
     const o = g.at(t);
     if (o == grid.Grid.none) return false;
@@ -45,20 +47,20 @@ pub fn push(self: *Battle, w: *World, t: Tile) !bool {
     g.remove(ob.tile, ob.size);
     f.acted = true;
     f.spendRage(); // 0x48f790
-    f.used = @floatFromInt(fields.walkRange(f.obj));
+    f.used = @floatFromInt(f.walkRange());
     @memset(self.reach_left, -1);
     self.target_len = 0;
-    self.pending = .{ .push = .{ .hero = me, .obstacle = o, .to = to, .sound = if (ob.explosive) "pull_barell" else "pull_wood_box", .sound_ticks = if (two) 110 else 47 } };
+    self.pending = .{ .push = .{ .hero = me, .obstacle = o, .to = to, .sound = if (ob.explosive) modules.ui().sounds.push_barrel else modules.ui().sounds.push_box, .sound_ticks = if (two) 110 else 47 } };
     // Successful push (0x452bc4): 0x455490(hero, 1), i.e. camera pan and
     // selecthero; fightlook is replaced right away by the push queue (push_start).
     w.out.pan_to = f.obj;
-    w.out.sound(w.gpa, "selecthero", null);
+    w.out.sound(w.gpa, modules.ui().sounds.select_hero, null);
     battle.note(self, "turn {d}: {s} pushes {s}", .{ self.turn, f.obj.name, ob.obj.name });
     return true;
 }
 
 /// Barrel death (0x490570, 0x491f60): off the grid, disappears at once,
-/// `killedEnemies` +1 (no exp); explosion and "granat" at the tile; ~15 ticks
+/// `enemies_killed` +1 (no exp); explosion and "granat" at the tile; ~15 ticks
 /// later its `explodeWeapon` (class 17) strikes the neighbours, chaining blasts.
 pub fn destroyBarrel(self: *Battle, w: *World, v: u16) !void {
     const t = &self.fighters.items[v];
@@ -67,21 +69,17 @@ pub fn destroyBarrel(self: *Battle, w: *World, v: u16) !void {
     self.grid().remove(t.tile, t.size);
     World.nativeOf(t.obj).deleted = true;
     t.obj.enabled = false;
-    if (w.level) |l| l.setInt("killedEnemies", l.getInt("killedEnemies") + 1);
-    const wpn = w.rt.findObject(t.obj.getString("explodeWeapon"));
+    if (w.level) |l| l.setInt("enemies_killed", l.getInt("enemies_killed") + 1);
+    const wpn = w.rt.findObject(t.obj.getString("blast_weapon"));
     // The visual blast comes now, from the weapon's +0xe4 (0x492067 → 0x4ceb40): explosion
-    // and "granat" at the tile + attack_grenade_exp (250)·aS, only for weapon nameID 1002
-    // (0x4ceb72; every barrel in the game). The damage 15 ticks later has no visual (the
-    // class-17 hit 0x4bb990 only calls the target's reaction).
-    const visual = if (wpn) |o| fields.nameId(o) == 1002 else false;
+    // and "granat" at the tile + attack_grenade_exp (250)·aS, by the weapon's classic_id
+    // (modules.blastShown: 0x4ceb72). The damage 15 ticks later has no visual (the
+    // class-17 hit 0x4bb990 only calls the target's reaction). OpenGorky: its `explodable`,
+    // else its weapon's (the converter writes the exe's rule there), else none.
+    const visual = fields.explodable(t.obj) orelse if (wpn) |o| fields.explodable(o) orelse
+        if (@import("../rules.zig").og) false else modules.blastShown(fields.classicId(o)) else false;
     battle.note(self, "  {s} explodes{s}", .{ t.obj.name, if (visual) " (explosion)" else "" });
-    if (visual) if (w.combat_map) |cm| {
-        const c = cm.tileCenter(t.tile, 1);
-        const p = [3]f32{ c[0], c[1], c[2] + adjust.getFloat("attack_grenade_exp", 250) * w.actorScale() };
-        fx.explosion.explosion(w, p);
-        const q = w.cam.project(p);
-        w.out.sound(w.gpa, "granat", .{ q.x, q.y });
-    };
+    if (visual) blastAt(w, t.tile);
     const weapon = wpn orelse return;
     const order = std.mem.indexOfScalar(*Object, w.rt.objects.items, weapon) orelse 0;
     var at: usize = 0;
@@ -89,9 +87,20 @@ pub fn destroyBarrel(self: *Battle, w: *World, v: u16) !void {
     try self.blasts.insert(self.gpa, at, .{ .barrel = v, .weapon = weapon, .tile = t.tile, .ticks = 15, .order = order, .credit = t.last_attacker });
 }
 
+/// A blast's visual at tile `t` (0x4ceb40): explosion and "granat" at its centre +
+/// attack_grenade_exp (250)·aS. Barrels and bombs.
+pub fn blastAt(w: *World, t: Tile) void {
+    const cm = w.map.combat orelse return;
+    const c = cm.tileCenter(t, 1);
+    const p = [3]f32{ c[0], c[1], c[2] + adjust.float("attack_grenade_exp") * w.actorScale() };
+    fx.explosion.explosion(w, p);
+    const q = w.cam.project(p);
+    w.out.sound(w.gpa, modules.ui().sounds.explosion, .{ q.x, q.y });
+}
+
 pub fn placeDecoy(self: *Battle, w: *World, t: Tile) !void {
     if (self.fighters.items.len == max_fighters) return;
-    const o = try spawnDecoy(w, w.combat_map.?.tileCenter(t, 1)) orelse return;
+    const o = try spawnDecoy(w, w.map.combat.?.tileCenter(t, 1)) orelse return;
     try self.decoys.append(w.gpa, .{ .obj = o, .tile = t, .fighter = try addDevice(self, o, t) });
     battle.note(self, "  decoy at {d},{d}", .{ t[0], t[1] });
 }
@@ -117,7 +126,7 @@ pub fn refreshDecoys(self: *Battle) void {
 /// Hero bomb (callback 37, 0x488128 → 0x4b9490 → 0x4bd8c0): fighter
 /// `TimeBomb<N>` on the aimed tile if it is open and free.
 pub fn placeTimeBomb(self: *Battle, w: *World, t: Tile) !void {
-    const cm = w.combat_map orelse return;
+    const cm = w.map.combat orelse return;
     if (!self.grid().open(t) or self.grid().at(t) != grid.Grid.none) return;
     if (self.fighters.items.len == max_fighters) return;
     const o = try spawnTimeBomb(w, cm.tileCenter(t, 1)) orelse return;
@@ -135,10 +144,11 @@ pub fn addDevice(self: *Battle, o: *Object, t: Tile) !u16 {
     return fi;
 }
 
-/// Hero bomb (0x4bd8c0): fighter `TimeBomb<N>` of class `ft_time_bomb.ss`,
-/// clock set to 2 enemy turns (0x4bdc93).
+/// Hero bomb (0x4bd8c0): its Device row's fighter (the exe's `TimeBomb<N>` of
+/// `ft_time_bomb.ss`), clock set to its timer (2 enemy turns, 0x4bdc93).
 fn spawnTimeBomb(self: *World, pos: [3]f32) !?*Object {
-    return placeDevice(self, "TimeBomb", "ft_time_bomb.ss", .{ .kind = .actor, .fight = .{ .bomb_timer = 2 } }, pos);
+    const d = modules.device(.time_bomb) orelse return null;
+    return placeDevice(self, d.prefix, d.archetype, .{ .kind = .actor, .fight = .{ .bomb_timer = d.timer } }, pos);
 }
 
 /// Device fighter `<prefix><N>` of class `class_file` at `pos`: init, post_init, idle.
@@ -146,10 +156,11 @@ fn placeDevice(self: *World, prefix: []const u8, class_file: []const u8, init: s
     self.bombs_placed += 1;
     var buf: [32]u8 = undefined;
     const name = try std.fmt.bufPrint(&buf, "{s}{d}", .{ prefix, self.bombs_placed });
-    const cls = self.rt.loadClass(class_file) catch return null;
-    const o = try self.addObject(name, cls, init);
+    const o = try deviceObject(self, name, class_file, init) orelse return null;
     _ = try self.rt.callIfExists(o, "init", &.{});
+    _ = try hooks.on(self, o, "Object.OnCreate", &.{});
     _ = try self.rt.callIfExists(o, "post_init", &.{});
+    _ = try hooks.on(self, o, "Actor.OnStart", &.{});
     fields.setPos(o, pos);
     const a = world.actorOf(o);
     a.placed = true;
@@ -157,20 +168,32 @@ fn placeDevice(self: *World, prefix: []const u8, class_file: []const u8, init: s
     return o;
 }
 
-/// Hero bomb blast weapon (0x4bdd7b): `TimeBombExplode<N>` of class
-/// `wp_timebomb_explode.s` (nameID 1002, class 9, damage 40).
+/// A device's object: of its class file, an OpenGorky project's of the archetype block named
+/// by it (inventory/create.zig objectOf). Null: none.
+fn deviceObject(self: *World, name: []const u8, class_file: []const u8, nat: state_object.Native) !?*Object {
+    if (self.block_item != null) return inventory.create.objectOf(self, name, class_file, nat);
+    const cls = self.rt.loadClass(class_file) catch return null;
+    return try self.addObject(name, cls, nat);
+}
+
+/// Hero bomb blast weapon (0x4bdd7b): its Device row's (the exe's `TimeBombExplode<N>` of
+/// `wp_timebomb_explode.s`: classic_id 1002, class 9, damage 40).
 pub fn spawnBombBlast(self: *World) !?*Object {
+    const d = modules.device(.blast) orelse return null;
     self.bombs_placed += 1;
     var buf: [32]u8 = undefined;
-    const name = try std.fmt.bufPrint(&buf, "TimeBombExplode{d}", .{self.bombs_placed});
-    const cls = self.rt.loadClass("wp_timebomb_explode.s") catch return null;
-    const o = try self.addObject(name, cls, .{ .kind = .weapon });
+    const name = try std.fmt.bufPrint(&buf, "{s}{d}", .{ d.prefix, self.bombs_placed });
+    const o = try deviceObject(self, name, d.archetype, .{ .kind = .weapon }) orelse return null;
     _ = try self.rt.callIfExists(o, "class_init", &.{});
+    _ = try hooks.on(self, o, "Item.OnClassInit", &.{});
     _ = try self.rt.callIfExists(o, "init", &.{});
+    _ = try hooks.on(self, o, "Object.OnCreate", &.{});
     return o;
 }
 
-/// Decoy (0x4bdb40): "fighter" `Distractor<N>` of class `ft_distractor.ss` at a point.
+/// Decoy (0x4bdb40): its Device row's "fighter" (the exe's `Distractor<N>` of
+/// `ft_distractor.ss`) at a point.
 fn spawnDecoy(self: *World, pos: [3]f32) !?*Object {
-    return placeDevice(self, "Distractor", "ft_distractor.ss", .{ .kind = .actor, .fight = .{ .decoy = true } }, pos);
+    const d = modules.device(.decoy) orelse return null;
+    return placeDevice(self, d.prefix, d.archetype, .{ .kind = .actor, .fight = .{ .decoy = true } }, pos);
 }

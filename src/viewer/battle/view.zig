@@ -4,23 +4,23 @@ const std = @import("std");
 const control_mod = og.combat.control;
 const level_view = @import("../level.zig");
 const LevelView = level_view.LevelView;
-const lf = og.formats.level_files;
+const core_map = og.core.map;
 const battle_mod = og.battle.battle;
 const c = @import("sdl");
 const og = @import("opengorky");
 const World = og.state.world.World;
 const gfx = @import("../media/gfx.zig");
 
-/// Grid floor point for cell highlights: in `04__city_hotelentrance` the highlight
-/// floor is 30 lower (0x454e6e: [0x651ca0] = −30, 0x47d0e0, 0x47cf70).
-pub fn gridPoint(self: *LevelView, cm: lf.CombatMap, gx: f32, gy: f32) [3]f32 {
+/// Grid floor point for cell highlights: the level's rules GridFloor `z` added (the exe:
+/// 30 lower in `04__city_hotelentrance`, 0x454e6e: [0x651ca0] = −30, 0x47d0e0, 0x47cf70).
+pub fn gridPoint(self: *LevelView, cm: core_map.CombatMap, gx: f32, gy: f32) [3]f32 {
     var p = cm.toWorld(gx, gy);
-    if (std.ascii.eqlIgnoreCase(self.world.level_name, "04__city_hotelentrance")) p[2] -= 30;
+    p[2] += og.core.modules.gridFloor(self.world.level_name);
     return p;
 }
 /// Battle grid cell under a background point (ray onto the grid floor).
 pub fn tileAt(self: *LevelView, bg: [2]f32) ?og.battle.grid.Tile {
-    const cm = self.world.combat_map orelse return null;
+    const cm = self.world.map.combat orelse return null;
     const h = switch (self.world.cam) {
         .persp => |pc| cm.center[2] - pc.zlevel / pc.scale,
         .ortho => cm.center[2],
@@ -41,7 +41,7 @@ pub fn tileAt(self: *LevelView, bg: [2]f32) ?og.battle.grid.Tile {
 /// (cftEffectRange 210,210,0), no moves.
 pub fn drawBattleTiles(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32, mouse_bg: [2]f32) !void {
     const b = &(self.world.battle orelse return);
-    const cm = self.world.combat_map orelse return;
+    const cm = self.world.map.combat orelse return;
     const grid = og.battle.grid;
     const ticks = self.world.ticks;
     // The exe doesn't fill fire and gas cells: fire is the "flame" (0x4a66a0), gas
@@ -55,7 +55,7 @@ pub fn drawBattleTiles(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32, mou
         if (o != grid.Grid.none) {
             const f = b.fighters.items[o];
             const nat = World.nativeOf(f.obj);
-            if (f.alive() and f.side != .neutral and !og.fields.isInvisibleMonster(f.obj) and nat.actor.alpha != 0) hv = o;
+            if (f.alive() and f.side != .neutral and !f.obj.implementsC("StartsUnseen") and nat.actor.alpha != 0) hv = o;
         }
     }
     if (hv != self.hover) {
@@ -69,9 +69,9 @@ pub fn drawBattleTiles(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32, mou
     const can_act = turn and me != null and me.?.alive() and (b.phase == .counter or (!me.?.acted and !me.?.disabled()));
     // Aim mode (0x452660): an attack started (0x47c120 → 0, a miss too) exits via
     // 0x452a00; refusals "Recharging"/"No ammo" (2) and "Out of range" (3) keep it.
-    if (!can_act) self.world.mouse.aim = false;
+    if (!can_act) self.mode.aim = false;
     // A counterattack is always aim mode (0x45bd70 → 0x4524d0).
-    if (b.phase == .counter and can_act) self.world.mouse.aim = true;
+    if (b.phase == .counter and can_act) self.mode.aim = true;
     // Hero facing choice (0x453380): arrows on neighbour cells.
     if (turn and b.facing_mode) try drawFacingArrows(self, r, cm, scroll, b);
     // Cross (0x4559a0): the hero's cell and its four side neighbours, walkable only,
@@ -82,23 +82,23 @@ pub fn drawBattleTiles(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32, mou
             const t: og.battle.grid.Tile = .{ f.tile[0] + d[0], f.tile[1] + d[1] };
             if (t[0] < 0 or t[1] < 0 or t[0] >= cm.width or t[1] >= cm.height) continue;
             if (cm.blocked[og.battle.grid.tileIndex(cm.width, t)]) continue;
-            try fillTile(self, r, cm, scroll, t, rgbA(gfx.adjRgb("cftTilePGCross", .{ 178, 178, 50 }), pulse));
+            try fillTile(self, r, cm, scroll, t, rgbA(gfx.adjRgb("cftTilePGCross"), pulse));
         }
     };
-    if (turn and !self.world.mouse.aim and !b.facing_mode and !self.cross_mode) {
+    if (turn and !self.mode.aim and !b.facing_mode and !self.cross_mode) {
         // Each reachable cell paints the fighter's whole footprint (size×size, 0x49ac20).
         var shown = false;
         if (self.hover) |k| if (self.hover_ticks > 15 and b.fighters.items[k].side == .enemy) {
             if (enemyReach(self, b, k)) |reach| {
-                try fillReach(self, r, cm, scroll, b, reach, b.fighters.items[k].size, rgbA(gfx.adjRgb("cftEnemyWalkRange", .{ 20, 140, 50 }), pulse));
+                try fillReach(self, r, cm, scroll, b, reach, b.fighters.items[k].size, rgbA(gfx.adjRgb("cftEnemyWalkRange"), pulse));
                 shown = true;
             }
         };
-        if (!shown) if (me) |f| try fillReach(self, r, cm, scroll, b, b.reach_left, f.size, rgbA(gfx.adjRgb("cftPlayerWalkRange", .{ 20, 140, 50 }), pulse));
+        if (!shown) if (me) |f| try fillReach(self, r, cm, scroll, b, b.reach_left, f.size, rgbA(gfx.adjRgb("cftPlayerWalkRange"), pulse));
     }
-    if (turn and self.world.mouse.aim) {
+    if (turn and self.mode.aim) {
         for (control_mod.targetList(b)) |aim| {
-            try fillTile(self, r, cm, scroll, aim.tile, rgbA(gfx.adjRgb("cftAttackRange", .{ 210, 76, 76 }), og.num.toF32(aim.pct) * 0.01 * pulse));
+            try fillTile(self, r, cm, scroll, aim.tile, rgbA(gfx.adjRgb("cftAttackRange"), og.num.toF32(aim.pct) * 0.01 * pulse));
         }
         if (cursor) |t| if (me) |f| if (f.weapon) |wpn| {
             for (control_mod.targetList(b)) |aim| if (aim.tile[0] == t[0] and aim.tile[1] == t[1]) {
@@ -114,9 +114,9 @@ pub fn drawBattleTiles(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32, mou
         const a = pulse + 0.1;
         const f = b.fighters.items[sh.who];
         switch (sh.stage) {
-            .walk => try fillReach(self, r, cm, scroll, b, b.ai_reach, f.size, rgbA(gfx.adjRgb("cftAiWalkRange", .{ 20, 140, 50 }), a)),
+            .walk => try fillReach(self, r, cm, scroll, b, b.ai_reach, f.size, rgbA(gfx.adjRgb("cftAiWalkRange"), a)),
             .area, .effect => {
-                for (og.combat.ai_turn.aiTargets(b)) |aim| try fillTile(self, r, cm, scroll, aim.tile, rgbA(gfx.adjRgb("cftAiAttackRange", .{ 210, 76, 76 }), a));
+                for (og.combat.ai_turn.aiTargets(b)) |aim| try fillTile(self, r, cm, scroll, aim.tile, rgbA(gfx.adjRgb("cftAiAttackRange"), a));
                 try fillFootprint(self, r, cm, scroll, f, a);
                 if (sh.stage == .effect) if (b.ai_plan.weapon) |wpn| try fillEffect(self, r, cm, scroll, b, wpn, b.ai_plan.aim, a);
             },
@@ -126,7 +126,7 @@ pub fn drawBattleTiles(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32, mou
     if (self.hover) |k| try fillFootprint(self, r, cm, scroll, b.fighters.items[k], pulse);
     // Frame of the cell under the cursor, on walkable `.cm` cells.
     if (cursor) |t| if (!cm.blocked[og.battle.grid.tileIndex(cm.width, t)]) {
-        try frameTile(self, r, cm, scroll, t, rgbA(gfx.adjRgb("cftFreeTileFrame", .{ 255, 128, 0 }), 1));
+        try frameTile(self, r, cm, scroll, t, rgbA(gfx.adjRgb("cftFreeTileFrame"), 1));
     };
     // Selected hero marker (0x47d9a0, 0x47de60): two "snakes" of sel.3df sparks
     // run around the hero's cell.
@@ -136,20 +136,20 @@ fn rgbA(rgb: [3]f32, a: f32) [4]f32 {
     return .{ rgb[0], rgb[1], rgb[2], a };
 }
 /// Fighter cells (size×size) in blue.
-fn fillFootprint(self: *LevelView, r: *c.SDL_Renderer, cm: lf.CombatMap, scroll: [2]f32, f: og.battle.fighter.Fighter, a: f32) !void {
+fn fillFootprint(self: *LevelView, r: *c.SDL_Renderer, cm: core_map.CombatMap, scroll: [2]f32, f: og.battle.fighter.Fighter, a: f32) !void {
     for (0..f.size) |dy| for (0..f.size) |dx| {
-        try fillTile(self, r, cm, scroll, .{ f.tile[0] + @as(i32, @intCast(dx)), f.tile[1] + @as(i32, @intCast(dy)) }, rgbA(gfx.adjRgb("cftFighterArea", .{ 50, 50, 178 }), a));
+        try fillTile(self, r, cm, scroll, .{ f.tile[0] + @as(i32, @intCast(dx)), f.tile[1] + @as(i32, @intCast(dy)) }, rgbA(gfx.adjRgb("cftFighterArea"), a));
     };
 }
 /// Hit cells of weapon `wpn` at aim `aim` in yellow.
-fn fillEffect(self: *LevelView, r: *c.SDL_Renderer, cm: lf.CombatMap, scroll: [2]f32, b: *battle_mod.Battle, wpn: *og.script.object.Object, aim: og.battle.grid.Target, a: f32) !void {
+fn fillEffect(self: *LevelView, r: *c.SDL_Renderer, cm: core_map.CombatMap, scroll: [2]f32, b: *battle_mod.Battle, wpn: *og.script.object.Object, aim: og.battle.grid.Target, a: f32) !void {
     const pat = og.battle.weapon_class.pattern(wpn) orelse return;
     var buf: [128]og.battle.grid.Tile = undefined;
-    for (og.battle.grid.effectTiles(b.grid(), pat, aim, &buf)) |et| try fillTile(self, r, cm, scroll, et, rgbA(gfx.adjRgb("cftEffectRange", .{ 210, 210, 0 }), a));
+    for (og.battle.grid.effectTiles(b.grid(), pat, aim, &buf)) |et| try fillTile(self, r, cm, scroll, et, rgbA(gfx.adjRgb("cftEffectRange"), a));
 }
 /// Reach fill: a size×size footprint at each cell with remaining ≥ 0, no cell
 /// filled twice.
-fn fillReach(self: *LevelView, r: *c.SDL_Renderer, cm: lf.CombatMap, scroll: [2]f32, b: *battle_mod.Battle, reach: []const f32, fsize: u32, rgba: [4]f32) !void {
+fn fillReach(self: *LevelView, r: *c.SDL_Renderer, cm: core_map.CombatMap, scroll: [2]f32, b: *battle_mod.Battle, reach: []const f32, fsize: u32, rgba: [4]f32) !void {
     const n = @as(usize, b.width) * b.height;
     const mask = try self.frame_arena.allocator().alloc(bool, n);
     @memset(mask, false);
@@ -166,7 +166,7 @@ fn fillReach(self: *LevelView, r: *c.SDL_Renderer, cm: lf.CombatMap, scroll: [2]
     };
 }
 /// Full move of enemy `k` (cached until the hover changes); an immobile one
-/// (moveLock, frozen, asleep) shows only its footprint.
+/// (moveLock, immobile, frozen, asleep) shows only its footprint.
 fn enemyReach(self: *LevelView, b: *battle_mod.Battle, k: u16) ?[]const f32 {
     const n = @as(usize, b.width) * b.height;
     if (self.enemy_reach.len != n) {
@@ -176,13 +176,13 @@ fn enemyReach(self: *LevelView, b: *battle_mod.Battle, k: u16) ?[]const f32 {
     }
     if (self.enemy_reach_for != k) {
         const f = b.fighters.items[k];
-        const stuck = og.fields.moveLock(f.obj) or f.disabled();
-        og.battle.grid.reachCost(b.grid(), self.enemy_reach, f.tile, f.size, k, if (stuck) 0 else @floatFromInt(og.fields.walkRange(f.obj)), og.battle.grid.diagonal_cost_ai);
+        const stuck = !f.canWalk();
+        og.battle.grid.reachCost(b.grid(), self.enemy_reach, f.tile, f.size, k, if (stuck) 0 else @floatFromInt(f.walkRange()), og.battle.grid.diagonal_cost_ai);
         self.enemy_reach_for = k;
     }
     return self.enemy_reach;
 }
-fn tileCorners(self: *LevelView, cm: lf.CombatMap, scroll: [2]f32, t: og.battle.grid.Tile) [4]c.SDL_FPoint {
+fn tileCorners(self: *LevelView, cm: core_map.CombatMap, scroll: [2]f32, t: og.battle.grid.Tile) [4]c.SDL_FPoint {
     var out: [4]c.SDL_FPoint = undefined;
     const corners = [4][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 } };
     for (corners, &out) |k, *o| {
@@ -197,7 +197,7 @@ fn tileCorners(self: *LevelView, cm: lf.CombatMap, scroll: [2]f32, t: og.battle.
 /// uses Direct3D lines; ours are antialiased, because the near-vertical edges of
 /// the trapezoid under the tilted camera otherwise step per pixel and the frame
 /// looks crooked after the 640×480 upscale.
-fn frameTile(self: *LevelView, r: *c.SDL_Renderer, cm: lf.CombatMap, scroll: [2]f32, t: og.battle.grid.Tile, rgba: [4]f32) !void {
+fn frameTile(self: *LevelView, r: *c.SDL_Renderer, cm: core_map.CombatMap, scroll: [2]f32, t: og.battle.grid.Tile, rgba: [4]f32) !void {
     const p = tileCorners(self, cm, scroll, t);
     for (0..4) |i| try smoothLine(r, p[i], p[(i + 1) % 4], rgba);
 }
@@ -208,7 +208,7 @@ fn frameTile(self: *LevelView, r: *c.SDL_Renderer, cm: lf.CombatMap, scroll: [2]
 /// 0.12·k(k − 1)/2 (the head is larger than the tail). Each is mesh kwadrat with
 /// sel.3df (0x4c7c30), scale aS·size, colour cftSelectedTileFX (130,55,20)/255,
 /// additive, no depth.
-fn selSnakes(self: *LevelView, cm: lf.CombatMap, scroll: [2]f32, t: og.battle.grid.Tile) !void {
+fn selSnakes(self: *LevelView, cm: core_map.CombatMap, scroll: [2]f32, t: og.battle.grid.Tile) !void {
     const v = self.fx_view orelse return;
     const fx: f32 = @floatFromInt(t[0]);
     const fy: f32 = @floatFromInt(t[1]);
@@ -220,7 +220,7 @@ fn selSnakes(self: *LevelView, cm: lf.CombatMap, scroll: [2]f32, t: og.battle.gr
     };
     const as = self.world.actorScale();
     const ticks: f32 = @floatFromInt(self.world.ticks);
-    const col = rgbA(gfx.adjRgb("cftSelectedTileFX", .{ 130, 55, 20 }), 1);
+    const col = rgbA(gfx.adjRgb("cftSelectedTileFX"), 1);
     for ([_]f32{ 0, 2 }) |start_edge| for (1..26) |k| {
         const kf: f32 = @floatFromInt(k);
         const p = (ticks + kf - 1) * 0.08 + start_edge;
@@ -231,23 +231,22 @@ fn selSnakes(self: *LevelView, cm: lf.CombatMap, scroll: [2]f32, t: og.battle.gr
         const pos = [3]f32{ a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac, a[2] + (b[2] - a[2]) * frac };
         const dot = 0.12 * kf * (kf - 1) / 2;
         if (dot <= 0) continue;
-        try v.drawMeshTexAdd(.{ .arena = self.frame_arena.allocator(), .cam = self.world.cam, .scroll = scroll }, "sel.3df", pos, .{ 0, 1, 0 }, as * dot, col);
+        try v.drawMeshTexAdd(.{ .arena = self.frame_arena.allocator(), .cam = self.world.cam, .scroll = scroll }, og.core.modules.ui().effects.select_marker, pos, .{ 0, 1, 0 }, as * dot, col);
     };
 }
 /// Facing arrows (0x453380, quad 0x453040): on each walkable cell beside the hero,
 /// a quad inset s = 0.15 + 0.1·(sin φ + 1)/2 from the cell edges (φ += 1 per
 /// frame), facingArrow texture pointing away from the hero, alpha blend.
-fn drawFacingArrows(self: *LevelView, r: *c.SDL_Renderer, cm: lf.CombatMap, scroll: [2]f32, b: *battle_mod.Battle) !void {
+fn drawFacingArrows(self: *LevelView, r: *c.SDL_Renderer, cm: core_map.CombatMap, scroll: [2]f32, b: *battle_mod.Battle) !void {
     if (!self.arrow_loaded) {
         self.arrow_loaded = true;
-        if (self.models) |m| if (m.readFile("gfx_3d\\textures\\facingArrow.3df")) |bytes| {
-            if (og.formats.tex3df.decode(self.gpa, bytes)) |img_| {
-                var img = img_;
-                defer img.deinit(self.gpa);
-                self.arrow_tex = gfx.textureLinear(r, img) catch null;
-                if (self.arrow_tex) |tx| _ = c.SDL_SetTextureBlendMode(tx, c.SDL_BLENDMODE_BLEND);
-            } else |_| {}
-        } else |_| {};
+        var tb: [128]u8 = undefined;
+        if (self.textures) |m| if (m.texture(self.gpa, std.fmt.bufPrint(&tb, "textures/{s}", .{og.core.modules.ui().effects.facing_arrow}) catch "")) |img_| {
+            var img = img_;
+            defer img.deinit(self.gpa);
+            self.arrow_tex = gfx.textureLinear(r, img) catch null;
+            if (self.arrow_tex) |tx| _ = c.SDL_SetTextureBlendMode(tx, c.SDL_BLENDMODE_BLEND);
+        };
     }
     const tex = self.arrow_tex orelse return;
     var cells: [4]?og.battle.grid.Tile = undefined;
@@ -280,7 +279,7 @@ fn drawFacingArrows(self: *LevelView, r: *c.SDL_Renderer, cm: lf.CombatMap, scro
     }
 }
 /// Fills a whole cell (0x47d0e0).
-pub fn fillTile(self: *LevelView, r: *c.SDL_Renderer, cm: lf.CombatMap, scroll: [2]f32, t: og.battle.grid.Tile, rgba: [4]f32) !void {
+pub fn fillTile(self: *LevelView, r: *c.SDL_Renderer, cm: core_map.CombatMap, scroll: [2]f32, t: og.battle.grid.Tile, rgba: [4]f32) !void {
     var v: [4]c.SDL_Vertex = undefined;
     const corners = [4][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 } };
     for (corners, &v) |k, *vert| {

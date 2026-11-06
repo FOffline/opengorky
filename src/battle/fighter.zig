@@ -1,49 +1,31 @@
 //! A fighter in battle: side, tile, states (sleep, gas, fire, freeze, rage,
 //! Invisible's poison), kill count.
 
+const std = @import("std");
 const num = @import("../num.zig");
 const fields = @import("../fields.zig");
 const Object = @import("../script.zig").object.Object;
 const grid = @import("grid.zig");
 const Tile = grid.Tile;
 
-/// Fighter class (`classType`, factory 0x4bc6c0; move scoring +0xe0).
-/// Values outside the list are ordinary fighters.
+/// Fighter class (`classType`, factory 0x4bc6c0): a key of the rules rows (Abilities,
+/// AiProfile); the exe's by name are a Classic piece (rules/fighter_classes.zig), an
+/// OpenGorky project's its own names (rules.fighterClassId). The core knows one: `generic`,
+/// the port's fighter whose attacks, AI and resistances come from its fields (battle/generic.zig).
 pub const Class = enum(i32) {
-    garcia = 1,
-    hero = 2,
-    hero3 = 3,
-    hero4 = 4,
-    /// Monitors (0x4bcf70): invisible, a hit only deals damage, death ends the game.
-    monitor = 5,
-    smokerider = 6,
-    grandma = 7,
-    grandma_child = 8,
-    stinger = 9,
-    fatman = 10,
-    incubus = 11,
-    cripple = 12,
-    puppet = 13,
-    guard = 14,
-    judge = 15,
-    judge_child = 16,
-    schizo = 17,
-    messiah = 18,
-    /// Lamar as an ally (0x4bd050).
-    lamare = 19,
-    /// Port-only generic fighter (not in the exe): attacks, AI and resistances come
-    /// from `.ftr`/`.wpn` fields (battle/generic.zig).
     generic = 100,
     _,
 
     pub fn of(o: *Object) Class {
-        return @fromBackingInt(@intCast(o.getInt("classType")));
+        return @fromBackingInt(@intCast(o.getInt("battle_class")));
     }
 };
 
 /// Battle sides; `neutral` are obstacles (`.obs`, `.obs_i`): they occupy tiles and
-/// block shots, never move and don't count for victory (0x48e7f0).
-pub const Side = enum { hero, enemy, neutral };
+/// block shots, never move and don't count for victory (0x48e7f0). OpenGorky: `civilian`, a
+/// fighter of neither side (BattleSpawnCivilian): both sides' opponent, acting by AI on the
+/// enemies' turn, not counted for victory or defeat.
+pub const Side = enum { hero, enemy, neutral, civilian };
 
 pub const Fighter = struct {
     obj: *Object,
@@ -58,12 +40,13 @@ pub const Fighter = struct {
     /// Last attacker (+0x24aec): barrel blasts are on its behalf; the killer of
     /// Grandma's child becomes her target.
     last_attacker: ?u16 = null,
-    /// Grandma's target (+0x24af8): the killer of her child.
+    /// Grandma's target (+0x24af8): the killer of her child; OpenGorky: any fighter's by a
+    /// script's FighterSetTarget (combat/ai.zig weighs it as AITargetLock's).
     grandma_target: ?u16 = null,
     /// Second activation this turn (+0x24908: Incubus and Cripple act twice).
     second: bool = false,
-    /// Schizo weapon pair counter (+0x24af4).
-    schizo_turn: u8 = 0,
+    /// Weapon pair counter (Schizo +0x24af4; core module Fighters `pairs`).
+    pair_turn: u8 = 0,
     /// Walked this turn (0x2460c); turn budget is `walk_range − used`.
     used: f32 = 0,
     acted: bool = false,
@@ -91,6 +74,12 @@ pub const Fighter = struct {
     /// cured (medicine 0x48ff50 only removes gas), reset only with the fighter
     /// (0x48e695, 0x48f6a5). Popup string.tab 528 "poisoned" (0x4dc92a).
     bitten: bool = false,
+    /// A scripted ability's CanWalk said false at this turn's start (OpenGorky,
+    /// combat/events.zig turnStart).
+    stuck: bool = false,
+    /// A scripted WalkRange's answer at this turn's start (OpenGorky, combat/events.zig
+    /// turnStart); null: its `walk_range`.
+    walk_range: ?i32 = null,
     /// Defending (+0x248f0, 0x48f7e0): damage ×0.5 until its next turn.
     defending: bool = false,
     /// Attracted by a decoy (+0x24904): set at the side's turn start; while a decoy
@@ -99,18 +88,19 @@ pub const Fighter = struct {
     /// Exp for the current strike (+0x245d4).
     pending_exp: i32 = 0,
     /// For the after-battle report (0x451d70): exp this battle (+0x2490c) and kills
-    /// by kind (+0x24910: monster nameID and count).
+    /// by kind (+0x24910: monster classic_id and count).
     exp_gained: i32 = 0,
-    kills: [10]struct { id: i32, n: i32 } = undefined,
+    /// By kind: classic_id and (OpenGorky) class (rules.Who: the report's KillIcon by class).
+    kills: [10]struct { id: i32, class: []const u8 = "", n: i32 } = undefined,
     kills_n: u8 = 0,
 
-    pub fn addKill(self: *Fighter, id: i32) void {
-        for (self.kills[0..self.kills_n]) |*k| if (k.id == id) {
+    pub fn addKill(self: *Fighter, who: @import("../rules.zig").Who) void {
+        for (self.kills[0..self.kills_n]) |*k| if (k.id == who.id and std.ascii.eqlIgnoreCase(k.class, who.class)) {
             k.n += 1;
             return;
         };
         if (self.kills_n == self.kills.len) return;
-        self.kills[self.kills_n] = .{ .id = id, .n = 1 };
+        self.kills[self.kills_n] = .{ .id = who.id, .class = who.class, .n = 1 };
         self.kills_n += 1;
     }
 
@@ -135,14 +125,32 @@ pub const Fighter = struct {
     /// A hero the player controls: not an extra with `avoidEnumerate` (the singer
     /// on the barge), who can't be selected (0x45acb0) but fights on the hero side.
     pub fn controllable(self: Fighter) bool {
-        return self.side == .hero and self.obj.getInt("avoidEnumerate") == 0;
+        return self.side == .hero and self.obj.getInt("outside_party") == 0;
+    }
+
+    /// Acts on side `s`'s turn: its own; a civilian with the enemies (combat/ai_turn.zig).
+    pub fn actsOn(self: Fighter, s: Side) bool {
+        return self.side == s or (s == .enemy and self.side == .civilian);
     }
 
     pub fn hp(self: Fighter) i32 {
         return fields.hp(self.obj);
     }
 
+    /// May walk this turn (0x48f960): no `moveLock`, not Immobile (a native, core/natives.zig),
+    /// not `stuck` (a scripted CanWalk), not asleep or frozen.
+    pub fn canWalk(self: Fighter) bool {
+        return !fields.moveLock(self.obj) and !self.obj.implementsC("Immobile") and !self.stuck and !self.disabled();
+    }
+
+    /// Its walk range this turn: a scripted WalkRange's, else `walk_range`.
+    pub fn walkRange(self: Fighter) i32 {
+        return self.walk_range orelse fields.walkRange(self.obj);
+    }
+
     pub fn budget(self: Fighter) f32 {
-        return num.toF32(fields.walkRange(self.obj)) - self.used;
+        // A hero's walk bonus (HealBonus walk; OpenGorky, 0 in the exe's rules).
+        const more = if (self.side == .hero) @import("../core.zig").entity.heroOf(@import("../rules.zig").who(self.obj)).walk_bonus else 0;
+        return num.toF32(self.walkRange() + more) - self.used;
     }
 };

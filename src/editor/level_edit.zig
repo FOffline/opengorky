@@ -1,12 +1,15 @@
 //! Objects of a level added, removed, turned and moved (level.Doc): enemies, own heroes,
 //! obstacles, props, boxes, party heroes, 3D model actors — each one Store edit.
+//! Below, the App's side (App methods): the open level's object added, removed, copied,
+//! pasted and duplicated, picked and told in the status bar.
 
 const std = @import("std");
+const baseName = @import("doctab.zig").baseName;
 const og = @import("opengorky");
+const classic_names = og.script.classic.names;
 const placement = @import("placement.zig");
-const vars = @import("vars.zig");
+const model = @import("model.zig");
 const store_mod = @import("store.zig");
-const Store = store_mod.Store;
 const common_archive = store_mod.common_archive;
 const box_mod = @import("box.zig");
 const trigger = @import("trigger.zig");
@@ -20,12 +23,16 @@ const Template = level.Template;
 const Prop = level.Prop;
 const Obstacle = level.Obstacle;
 const templates = @import("level_templates.zig");
+const tx = @import("text.zig");
+const app_mod = @import("app.zig");
+const App = app_mod.App;
+const Clip = app_mod.Clip;
 
 /// Copies template `t` into this battle as a new enemy (its `.ftr` and weapons
 /// under a new name), centred on grid point `at` or on the first free tile;
 /// returns its object index.
 pub fn addEnemy(self: *Doc, t: Template, at: ?[2]f32) !usize {
-    if (self.world.combat_map == null) return error.NotBattle;
+    if (self.world.map.combat == null) return error.NotBattle;
     if (self.script.restore_close == null) return error.NoRestore;
     var fighters: usize = 0;
     for (self.objects.items) |o| fighters += @intFromBool(o.tile != null);
@@ -40,12 +47,12 @@ pub fn addEnemy(self: *Doc, t: Template, at: ?[2]f32) !usize {
     const st = self.store;
     if (t.weapon) |wp| {
         var eb: [128]u8 = undefined;
-        _ = try st.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}.ftr", .{name}), try crlf(self.gpa, templates.built_fighter, .{t.class}), name, true);
-        // The exe strikes by the weapon's nameID per monster (0x4896b0): the
+        _ = try st.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}.ftr", .{name}), try crlf(self.gpa, templates.built_fighter, .{t.class}), name);
+        // The exe strikes by the weapon's classic_id per monster (0x4896b0): the
         // shoggoth's branch (0x489fe2) wants its own tail, 1015, and with another
         // returns queuing nothing — the battle waits for the strike forever.
-        const own = if (builtWeaponId(t.class)) |id| try std.fmt.bufPrint(&path_buf, "  nameID = {d};\n", .{id}) else "";
-        _ = try st.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}_sa.wpn", .{name}), try crlf(self.gpa, templates.built_weapon, .{ wp, own, name }), name, true);
+        const own = if (builtWeaponId(t.class)) |id| try std.fmt.bufPrint(&path_buf, "  classic_id = {d};\n", .{id}) else "";
+        _ = try st.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}_sa.wpn", .{name}), try crlf(self.gpa, templates.built_weapon, .{ wp, own, name }), name);
         return self.placeNew(st.files.items.len - 2, at);
     }
     const ar_path = try std.fmt.bufPrint(&path_buf, "{s}/other.dat", .{t.level});
@@ -85,15 +92,15 @@ pub fn addEnemy(self: *Doc, t: Template, at: ?[2]f32) !usize {
             try std.fmt.bufPrint(&entry_buf, "{s}{s}", .{ name, e.name[t.fighter.len..] })
         else
             try std.fmt.bufPrint(&entry_buf, "{s}_{s}", .{ name, e.name });
-        // A class with a weapon nameID the exe wants (the shoggoth's), copied from
+        // A class with a weapon classic_id the exe wants (the shoggoth's), copied from
         // a fighter made before it was set.
-        if (!is_ftr) if (builtWeaponId(t.class)) |id| if (vars.get(t_new, "nameID") == null) {
+        if (!is_ftr) if (builtWeaponId(t.class)) |id| if (model.get(t_new, "classic_id") == null) {
             var ib: [16]u8 = undefined;
-            const out = try vars.set(self.gpa, t_new, "nameID", try std.fmt.bufPrint(&ib, "{d}", .{id}), "#include wp_");
+            const out = try model.setIn(self.gpa, t_new, "classic_id", try std.fmt.bufPrint(&ib, "{d}", .{id}), "#include wp_");
             self.gpa.free(t_new);
             t_new = out;
         };
-        const i = try st.add(self.level_archive, entry, t_new, name, true);
+        const i = try st.add(self.level_archive, entry, t_new, name);
         if (is_ftr) ftr = i;
     }
     return self.placeNew(ftr orelse return error.NotFound, at);
@@ -102,13 +109,13 @@ pub fn addEnemy(self: *Doc, t: Template, at: ?[2]f32) !usize {
 /// Places the fighter whose `.ftr` is Store file `fi` (just added) at `at` or the
 /// first free tile, by PlaceActor in restore().
 pub fn placeNew(self: *Doc, fi: usize, at: ?[2]f32) !usize {
-    const cm = self.world.combat_map.?;
+    const cm = self.world.map.combat.?;
     const close = self.script.restore_close.?;
     const st = self.store;
     const owner = st.files.items[fi].owner.?;
     const size: u32 = if (try self.classOf(fi, "#include ft_")) |ci| blk: {
         // As the battle sizes fighters by charSize (roster.zig).
-        const cs = vars.get(st.text(ci), "charSize") orelse 1;
+        const cs = model.get(st.text(ci), "footprint_tiles") orelse 1;
         break :blk if (cs >= 9) 3 else if (cs >= 4) 2 else 1;
     } else 1;
 
@@ -147,7 +154,7 @@ pub fn placeNew(self: *Doc, fi: usize, at: ?[2]f32) !usize {
 /// restore(), as the battles place Sullivan and BT; the exe skips it while that hero
 /// isn't in the party. Returns its object index.
 pub fn addOwn(self: *Doc, hero: []const u8, g: [2]f32) !usize {
-    if (self.world.combat_map == null) return error.NotBattle;
+    if (self.world.map.combat == null) return error.NotBattle;
     if (self.script.restore_close == null) return error.NoRestore;
     var fighters: usize = 0;
     for (self.objects.items) |o| fighters += @intFromBool(o.tile != null);
@@ -155,7 +162,7 @@ pub fn addOwn(self: *Doc, hero: []const u8, g: [2]f32) !usize {
     const name = hero;
     for (self.script.calls) |call| if (std.ascii.eqlIgnoreCase(call.name, name)) return error.HeroThere;
     // The PlaceActor line only: the object comes with the party.
-    const cm = self.world.combat_map.?;
+    const cm = self.world.map.combat.?;
     try self.objects.append(self.gpa, .{ .name = name, .kind = .hero, .pos = .{ 0, 0 }, .size = 1, .tile = .{ 0, 0 }, .added = true });
     const oi = self.objects.items.len - 1;
     const tile: [2]i32 = .{ @intFromFloat(@floor(g[0])), @intFromFloat(@floor(g[1])) };
@@ -181,7 +188,7 @@ pub fn addOwn(self: *Doc, hero: []const u8, g: [2]f32) !usize {
 /// weapon `<name>_explode.wpn`, wp_barrel_explode.ss) or an empty item box `.obs_i`
 /// (obs_i_itembox.ss), placed by PlaceActor in restore(); returns its object index.
 pub fn addObstacle(self: *Doc, what: Obstacle, g: [2]f32) !usize {
-    const cm = self.world.combat_map orelse return error.NotBattle;
+    const cm = self.world.map.combat orelse return error.NotBattle;
     const close = self.script.restore_close orelse return error.NoRestore;
     var fighters: usize = 0;
     for (self.objects.items) |o| fighters += @intFromBool(o.tile != null);
@@ -200,14 +207,14 @@ pub fn addObstacle(self: *Doc, what: Obstacle, g: [2]f32) !usize {
     var eb: [128]u8 = undefined;
     const st = self.store;
     switch (what) {
-        .box => _ = try st.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}.obs_i", .{name}), try crlf(self.gpa, templates.item_box, .{}), name, true),
+        .box => _ = try st.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}.obs_i", .{name}), try crlf(self.gpa, templates.item_box, .{}), name),
         .barrel => {
             var wb: [128]u8 = undefined;
             const blast = try std.fmt.bufPrint(&wb, "\n    explodeWeapon = \"{s}_explode\";", .{name});
-            _ = try st.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}.obs", .{name}), try crlf(self.gpa, templates.obstacle, .{ "obs_barrel.ss", blast }), name, true);
-            _ = try st.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}_explode.wpn", .{name}), try crlf(self.gpa, templates.barrel_blast, .{name}), name, true);
+            _ = try st.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}.obs", .{name}), try crlf(self.gpa, templates.obstacle, .{ "obs_barrel.ss", blast }), name);
+            _ = try st.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}_explode.wpn", .{name}), try crlf(self.gpa, templates.barrel_blast, .{name}), name);
         },
-        .wcrate, .mcrate => _ = try st.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}.obs", .{name}), try crlf(self.gpa, templates.obstacle, .{ if (what == .wcrate) "obs_crate_wod.ss" else "obs_crate_met.ss", "" }), name, true),
+        .wcrate, .mcrate => _ = try st.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}.obs", .{name}), try crlf(self.gpa, templates.obstacle, .{ if (what == .wcrate) "obs_crate_wod.ss" else "obs_crate_met.ss", "" }), name),
     }
     self.objects.items[oi].name = st.files.items[st.files.items.len - 1].owner.?;
     const ins = placement.insertPoint(self.text(), close);
@@ -222,7 +229,7 @@ pub fn addObstacle(self: *Doc, what: Obstacle, g: [2]f32) !usize {
 /// one-line `.act` (`#include obs_a_pipe.s`) placed by PlaceCombatActor(name, x, y, 0)
 /// in restore(); it takes no tile. Returns its object index.
 pub fn addProp(self: *Doc, what: Prop, g: [2]f32) !usize {
-    const cm = self.world.combat_map orelse return error.NotBattle;
+    const cm = self.world.map.combat orelse return error.NotBattle;
     const close = self.script.restore_close orelse return error.NoRestore;
     const at: [2]f32 = .{ @round(g[0] * 2) / 2, @round(g[1] * 2) / 2 };
     if (!self.gridOpen(at)) return error.TileNotFree;
@@ -232,7 +239,7 @@ pub fn addProp(self: *Doc, what: Prop, g: [2]f32) !usize {
         if (!self.nameTaken(s)) break s;
     } else return error.NoFreeName;
     var eb: [128]u8 = undefined;
-    const f = try self.store.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}.act", .{name}), try crlf(self.gpa, "#include obs_a_{s}.s\n", .{@tagName(what)}), name, true);
+    const f = try self.store.add(self.level_archive, try std.fmt.bufPrint(&eb, "{s}.act", .{name}), try crlf(self.gpa, "#include obs_a_{s}.s\n", .{@tagName(what)}), name);
     const owner = self.store.files.items[f].owner.?;
     const ins = placement.insertPoint(self.text(), close);
     const line = try std.fmt.allocPrint(self.gpa, "    PlaceCombatActor(\"{s}\", {d:.1}, {d:.1}, 0);{s}", .{ name, at[0], at[1], placement.newline(self.text()) });
@@ -265,16 +272,15 @@ pub fn facing(self: *const Doc, i: usize) ?f32 {
 pub fn rotate(self: *Doc, i: usize, delta: f32) !void {
     const call = self.script.calls[self.objects.items[i].call orelse return];
     const a = (self.facing(i) orelse return) + delta;
+    const v: i32 = switch (call.func) {
+        .place_combat => @intFromFloat(@round(a - 360 * @round(a / 360))),
+        else => @mod(@as(i32, @intFromFloat(@round(a / 45))), 8),
+    };
+    if (call.func == .place_combat or call.n_args > 2) return self.setArgs(call, &.{.{ 2, .{ .int = v } }});
+    // No direction yet: a new argument (text; the exporter adds no arguments).
     var buf: [24]u8 = undefined;
-    var edits = [_]placement.Edit{switch (call.func) {
-        .place_combat => .{ .span = call.args[2], .text = try std.fmt.bufPrint(&buf, "{d}", .{@as(i32, @intFromFloat(@round(a - 360 * @round(a / 360))))}) },
-        else => blk: {
-            const dir = @mod(@as(i32, @intFromFloat(@round(a / 45))), 8);
-            if (call.n_args > 2) break :blk .{ .span = call.args[2], .text = try std.fmt.bufPrint(&buf, "{d}", .{dir}) };
-            const end = call.args[1].end;
-            break :blk .{ .span = .{ .start = end, .end = end }, .text = try std.fmt.bufPrint(&buf, ",{d}", .{dir}) };
-        },
-    }};
+    const end = call.args[1].end;
+    var edits = [_]placement.Edit{.{ .span = .{ .start = end, .end = end }, .text = try std.fmt.bufPrint(&buf, ",{d}", .{v}) }};
     try self.edit(&edits);
 }
 
@@ -294,7 +300,7 @@ pub fn canWalkIn(self: *const Doc, i: usize) ?bool {
 }
 
 pub fn toggleWalkIn(self: *Doc, i: usize) !void {
-    const cm = self.world.combat_map orelse return error.NotBattle;
+    const cm = self.world.map.combat orelse return error.NotBattle;
     const walks = self.canWalkIn(i) orelse return error.NotEnemy;
     const o = self.objects.items[i];
     const call = self.script.calls[o.call.?];
@@ -429,7 +435,7 @@ pub fn addBox(self: *Doc, bg: [2]f32) !usize {
 pub fn addHero(self: *Doc, src_archive: []const u8, src_entry: []const u8, bg: [2]f32) ![]const u8 {
     if (self.isBattle()) return error.NotLocation;
     if (!self.walkableAt(bg)) return error.NotWalkable;
-    const file = src_entry[if (std.mem.lastIndexOfScalar(u8, src_entry, '\\')) |k| k + 1 else 0..];
+    const file = baseName(src_entry);
     const stem = file[0 .. file.len - 4];
     var arena: std.heap.ArenaAllocator = .init(self.gpa);
     defer arena.deinit();
@@ -446,7 +452,8 @@ pub fn addHero(self: *Doc, src_archive: []const u8, src_entry: []const u8, bg: [
     var first = true;
     while (lines.next()) |l| {
         const t = std.mem.trim(u8, l, " \t\r");
-        if (std.mem.startsWith(u8, t, "moveLock") or std.mem.startsWith(u8, t, "attackLock")) continue;
+        // The .hro is the exe's text: its spelling (classic/names.zig).
+        if (std.mem.startsWith(u8, t, classic_names.anyOld("move_locked").?) or std.mem.startsWith(u8, t, classic_names.anyOld("attack_locked").?)) continue;
         if (!first) try hro.append(self.gpa, '\n');
         first = false;
         try hro.appendSlice(self.gpa, l);
@@ -474,11 +481,11 @@ pub fn addHero(self: *Doc, src_archive: []const u8, src_entry: []const u8, bg: [
         try files.append(a, .{ .archive = self.level_archive, .entry = try a.dupe(u8, e.name), .text = try self.gpa.dupe(u8, t) });
     }
     // Hidden until a scene: first in the level's post_init().
-    const lev = self.text();
-    const pb = box_mod.funcBody(lev, "post_init") orelse return error.NoPostInit;
-    const at = std.mem.indexOfScalarPos(u8, lev, pb.start, '\n').? + 1;
-    const new_lev = try std.fmt.allocPrint(self.gpa, "{s}  DisableObject(\"{s}\");   // hero added in the editor: hidden until a scene shows it\r\n{s}", .{ lev[0..at], stem, lev[at..] });
+    const new_lev = try trigger.hideHero(self.gpa, self.text(), stem);
     errdefer self.gpa.free(new_lev);
+    // The hero's files and its placing in the level script: one undo step.
+    self.store.group();
+    defer self.store.endGroup("+ {s}", .{src_entry});
     _ = try self.store.addNew(files.items);
     files.clearRetainingCapacity();
     try self.store.replace(self.lev, new_lev);
@@ -537,6 +544,8 @@ pub fn removeHero(self: *Doc, name: []const u8) !void {
             return err;
         };
     }
+    self.store.group();
+    defer self.store.endGroup("− {s}", .{name});
     try self.store.delete(gone.items);
     while (edits.pop()) |e| self.store.replace(e.f, e.text) catch |err| {
         self.gpa.free(e.text);
@@ -612,8 +621,8 @@ pub fn moveItem(self: *Doc, i: usize, bg: [2]f32) !void {
         .{ "x", try std.fmt.bufPrint(&vb[0], "{d:.6}", .{p[0]}) },
         .{ "y", try std.fmt.bufPrint(&vb[1], "{d:.6}", .{p[1]}) },
         .{ "z", try std.fmt.bufPrint(&vb[2], "{d:.6}", .{p[2]}) },
-        .{ "walk_x", try std.fmt.bufPrint(&vb[3], "{d:.0}", .{w[0]}) },
-        .{ "walk_y", try std.fmt.bufPrint(&vb[4], "{d:.0}", .{w[1]}) },
+        .{ "approach_x", try std.fmt.bufPrint(&vb[3], "{d:.0}", .{w[0]}) },
+        .{ "approach_y", try std.fmt.bufPrint(&vb[4], "{d:.0}", .{w[1]}) },
     };
     for (vals) |kv| {
         const next = try setVarLine(self.gpa, t, kv[0], kv[1]);
@@ -634,7 +643,7 @@ pub fn actFile(self: *Doc, name: []const u8) ?usize {
 /// without PlaceActor): moved by dragging. One placed at an area moves with it.
 pub fn actorMovable(self: *Doc, name: []const u8) bool {
     const f = self.actFile(name) orelse return false;
-    return vars.get(self.store.text(f), "x") != null;
+    return model.ownNum(self.app(), f, "x") != null;
 }
 
 /// Location actor `i` onto the floor under `bg` (x, y, z in its init(); one step).
@@ -642,15 +651,10 @@ pub fn moveActor(self: *Doc, i: usize, bg: [2]f32) !void {
     const o = &self.objects.items[i];
     const f = self.actFile(o.name) orelse return error.NoPosition;
     const p = og.world.floor.groundAt(self.world, bg);
-    var t = try self.gpa.dupe(u8, self.store.text(f));
-    errdefer self.gpa.free(t);
     var vb: [3][32]u8 = undefined;
-    for ([_][]const u8{ "x", "y", "z" }, 0..) |k, j| {
-        const next = try vars.set(self.gpa, t, k, try std.fmt.bufPrint(&vb[j], "{d:.1}", .{p[j]}), "{");
-        self.gpa.free(t);
-        t = next;
-    }
-    try self.store.replace(f, t);
+    var pairs: [3][2][]const u8 = undefined;
+    for ([_][]const u8{ "x", "y", "z" }, &pairs, 0..) |k, *kv, j| kv.* = .{ k, try std.fmt.bufPrint(&vb[j], "{d:.1}", .{p[j]}) };
+    try model.setEach(self.app(), f, &pairs, "{");
     o.pos = bg;
 }
 
@@ -677,4 +681,166 @@ pub fn addActor(self: *Doc, mesh: []const u8, bg: [2]f32) ![]const u8 {
     const n = owned[0 .. owned.len - ".act".len];
     try self.objects.append(self.gpa, .{ .name = n, .kind = .actor, .pos = bg, .added = true, .file = f });
     return n;
+}
+
+pub fn removeSelected(self: *App) void {
+    const d = self.doc orelse return;
+    const i = self.selected orelse return;
+    if (d.objects.items[i].call == null or d.objects.items[i].later != null) return;
+    const name = d.objects.items[i].name;
+    d.remove(i) catch |err| return if (err == error.Referenced) self.setStatus(tx.st_referenced, .{ name, d.refFile() }) else self.setStatus(tx.st_remove_failed, .{err});
+    self.selected = null;
+    self.setStatus(tx.st_removed, .{name});
+}
+
+pub fn appAddEnemy(self: *App, t: level.Template, at: ?[2]f32) void {
+    const d = self.doc orelse return;
+    const i = d.addEnemy(t, at) catch |err| return switch (err) {
+        error.NoFreeTile, error.TileNotFree => self.setStatus(tx.st_no_tile, .{}),
+        error.TooManyFighters => self.setStatus(tx.st_too_many, .{og.battle.battle.max_fighters}),
+        else => self.setStatus(tx.st_add_failed, .{ t.class, err }),
+    };
+    self.selected = i;
+    const o = d.objects.items[i];
+    self.setStatus(tx.st_added, .{ o.name, t.class, t.level, o.tile.?[0], o.tile.?[1] });
+}
+
+pub fn appAddObstacle(self: *App, what: level.Obstacle, g: [2]f32) void {
+    const d = self.doc orelse return;
+    const i = d.addObstacle(what, g) catch |err| return switch (err) {
+        error.TileNotFree => self.setStatus(tx.st_no_tile, .{}),
+        error.TooManyFighters => self.setStatus(tx.st_too_many, .{og.battle.battle.max_fighters}),
+        else => self.setStatus(tx.st_add_failed, .{ @tagName(what), err }),
+    };
+    self.selected = i;
+    const o = d.objects.items[i];
+    // A new item box opens for filling, as on locations.
+    if (what == .box) if (d.boxFile(o.name)) |f| {
+        self.box = .{ .file = f, .name = o.name };
+        return self.setStatus(tx.st_box_added, .{o.name});
+    };
+    self.setStatus(tx.st_placed, .{o.name});
+}
+
+pub fn appAddProp(self: *App, what: level.Prop, g: [2]f32) void {
+    const d = self.doc orelse return;
+    const i = d.addProp(what, g) catch |err| return switch (err) {
+        error.TileNotFree => self.setStatus(tx.st_no_tile, .{}),
+        else => self.setStatus(tx.st_add_failed, .{ @tagName(what), err }),
+    };
+    self.selected = i;
+    self.setStatus(tx.st_placed, .{d.objects.items[i].name});
+}
+
+/// What object `i` of the open level copies as; null (and a status) if it cannot.
+pub fn clipOf(self: *App, i: usize) ?Clip {
+    const d = self.doc orelse return null;
+    const o = d.objects.items[i];
+    if (d.boxFile(o.name)) |f| {
+        const t = self.gpa.dupe(u8, self.store.text(f)) catch return null;
+        return .{ .what = .box, .box_text = t, .box_battle = d.isBattle() };
+    }
+    if (d.isBattle() and o.kind == .enemy) {
+        const en = d.enemy(o.name) catch return null;
+        const ci = en.class orelse return null;
+        const entry = self.store.files.items[ci].entry;
+        const base = baseName(entry);
+        const cls = if (std.ascii.startsWithIgnoreCase(base, "ft_")) base[3..] else base;
+        const stem = cls[0 .. std.mem.lastIndexOfScalar(u8, cls, '.') orelse cls.len];
+        var cl: Clip = .{ .what = .enemy };
+        cl.class_len = @min(stem.len, cl.class_buf.len);
+        @memcpy(cl.class_buf[0..cl.class_len], stem[0..cl.class_len]);
+        return cl;
+    }
+    if (d.isBattle()) {
+        var eb: [128]u8 = undefined;
+        const act = if (std.fmt.bufPrint(&eb, "{s}.act", .{o.name})) |e| (if (self.store.file(d.level_archive, e)) |f| self.store.text(f) else |_| "") else |_| "";
+        inline for (comptime std.enums.values(level.Prop)) |pv| if (std.ascii.findIgnoreCase(o.name, "_a_" ++ @tagName(pv)) != null or std.ascii.findIgnoreCase(act, "obs_a_" ++ @tagName(pv)) != null) return .{ .what = .prop, .prop = pv };
+        inline for (.{ "wcrate", "mcrate", "barrel" }) |tag| if (std.ascii.findIgnoreCase(o.name, tag) != null) return .{ .what = .obstacle, .obstacle = @field(level.Obstacle, tag) };
+    }
+    self.setStatus(tx.st_cant_copy, .{o.name});
+    return null;
+}
+
+pub fn setClip(self: *App, cl: ?Clip) void {
+    if (self.clip) |old| if (old.box_text) |t| self.gpa.free(t);
+    self.clip = cl;
+}
+
+/// Object `i` copied.
+pub fn copyObject(self: *App, i: usize) void {
+    const cl = self.clipOf(i) orelse return;
+    self.setClip(cl);
+    self.setStatus(tx.st_obj_copied, .{self.doc.?.objects.items[i].name});
+}
+
+/// The copied object put at background point `bg` (battles: the grid point `g` there,
+/// or the first free tile for an enemy without one).
+pub fn paste(self: *App, bg: [2]f32, g: ?[2]f32) void {
+    const d = self.doc orelse return;
+    const cl = self.clip orelse return;
+    switch (cl.what) {
+        .box => {
+            if (cl.box_battle != d.isBattle()) return self.setStatus(tx.st_paste_kind, .{});
+            if (d.isBattle()) self.addObstacle(.box, g orelse return self.setStatus(tx.st_no_tile, .{})) else self.addBox(bg);
+            // The new box takes the copied contents (its script names no box).
+            const b = self.box orelse return;
+            const t = self.gpa.dupe(u8, cl.box_text.?) catch return;
+            self.store.replace(b.file, t) catch self.gpa.free(t);
+            self.box = null;
+        },
+        .enemy => {
+            if (!d.isBattle()) return self.setStatus(tx.st_paste_kind, .{});
+            for (self.allTemplates(self.frame.allocator())) |t| if (std.ascii.eqlIgnoreCase(t.class, cl.class())) return self.addEnemy(t, g);
+            self.setStatus(tx.st_cant_copy, .{cl.class()});
+        },
+        .obstacle => if (d.isBattle()) self.addObstacle(cl.obstacle, g orelse return self.setStatus(tx.st_no_tile, .{})) else self.setStatus(tx.st_paste_kind, .{}),
+        .prop => if (d.isBattle()) self.addProp(cl.prop, g orelse return self.setStatus(tx.st_no_tile, .{})) else self.setStatus(tx.st_paste_kind, .{}),
+    }
+}
+
+/// Object `i` copied and put beside it (the clipboard keeps what it had).
+pub fn duplicate(self: *App, i: usize) void {
+    const d = self.doc orelse return;
+    const cl = self.clipOf(i) orelse return;
+    const keep = self.clip;
+    self.clip = cl;
+    defer {
+        if (cl.box_text) |t| self.gpa.free(t);
+        self.clip = keep;
+    }
+    const o = d.objects.items[i];
+    const g: ?[2]f32 = if (o.grid) |gp| .{ gp[0] + 1, gp[1] } else if (o.tile) |t| .{ @as(f32, @floatFromInt(t[0] + @as(i32, @intCast(o.size)))) + 0.5, @as(f32, @floatFromInt(t[1])) + 0.5 } else null;
+    const before = d.objects.items.len;
+    self.paste(.{ o.pos[0] + 24, o.pos[1] }, g);
+    // An enemy with no free tile beside it: the first free one.
+    if (cl.what == .enemy and d.objects.items.len == before) self.paste(o.pos, null);
+}
+
+/// A 3D model standing on the location at `bg` (its own .act), picked.
+pub fn appAddActor(self: *App, mesh: []const u8, bg: [2]f32) void {
+    const d = self.doc orelse return;
+    const name = d.addActor(mesh, bg) catch |err| return if (err == error.NotWalkable) self.setStatus(tx.st_not_walkable, .{}) else self.setStatus(tx.st_add_failed, .{ mesh, err });
+    self.selected = d.objects.items.len - 1;
+    self.setStatus(tx.st_actor_added, .{name});
+}
+
+/// A new box at background point `bg`, its contents window open.
+pub fn appAddBox(self: *App, bg: [2]f32) void {
+    const d = self.doc orelse return;
+    const i = d.addBox(bg) catch |err| return if (err == error.NotWalkable) self.setStatus(tx.st_not_walkable, .{}) else self.setStatus(tx.st_add_failed, .{ "box", err });
+    self.selected = i;
+    const o = d.objects.items[i];
+    self.box = .{ .file = o.file.?, .name = o.name };
+    self.setStatus(tx.st_box_added, .{o.name});
+}
+
+/// Deletes box `i` of the level (its script and position file; Ctrl+Z brings it back).
+pub fn appDeleteBox(self: *App, i: usize) void {
+    const d = self.doc orelse return;
+    const name = d.objects.items[i].name;
+    const actor = d.objects.items[i].kind == .actor;
+    d.deleteBox(i) catch |err| return self.setStatus(tx.st_remove_failed, .{err});
+    self.selected = null;
+    if (actor) self.setStatus(tx.st_actor_deleted, .{name}) else self.setStatus(tx.st_box_deleted, .{name});
 }

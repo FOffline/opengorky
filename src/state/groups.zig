@@ -2,9 +2,8 @@
 //! debug state, plus load steps and walk-area records.
 
 const std = @import("std");
-const Io = std.Io;
+const rules = @import("../rules.zig");
 const Allocator = std.mem.Allocator;
-const archive = @import("../formats.zig").archive;
 const model_cache = @import("../actor.zig").model_cache;
 const Object = @import("../script.zig").object.Object;
 const Value = @import("../script.zig").value.Value;
@@ -12,8 +11,8 @@ const Value = @import("../script.zig").value.Value;
 /// Fighter shadow record (0x42af20: name, x, y, z, angle, floor +0x3190).
 pub const Shadow = struct { name: []const u8, pos: [3]f32, angle: f32, map: u1 };
 
-/// What happens when the hero arrives: operate (tools' old path), examine menu (right
-/// click), LevelSwitch (exit).
+/// What happens when the hero arrives: operate (left click: an item's or area's operation),
+/// examine menu (right click), LevelSwitch (exit).
 const InteractMode = enum { operate, examine, level_switch };
 
 pub const LoadStep = struct {
@@ -23,22 +22,18 @@ pub const LoadStep = struct {
 
 pub const WalkArea = struct { name: []const u8, allow: bool, floor: i32 };
 
-/// Game resources the world reads: archives, models, frame counts, foreign script sources.
+/// Game resources the world reads: its source, models, frame counts, foreign script sources.
 pub const Res = struct {
-    other: archive.Archive,
-    sprites: archive.Archive,
-    common: archive.Archive,
+    /// Where its scripts, variables and frame counts come from (composition: loaders/world.zig).
+    source: @import("../core.zig").source.Source = .{},
     /// Frame count by sprite name (lowercase).
     frame_counts: std.StringHashMapUnmanaged(u32) = .empty,
     /// Actor models (animation lengths, root motion); optional.
     models: ?*model_cache.Cache = null,
-    lang: archive.Archive,
-    /// Game `dat` dir: other locations' archives (item classes from saves).
-    dat: Io.Dir,
+    /// Where its scenes and dialogs come from (composition: loaders/world.zig).
+    scenes: @import("../core.zig").scene.Source = .{},
     /// Script sources brought from other locations (heroes' item classes).
     extra_sources: std.StringHashMapUnmanaged([]const u8) = .empty,
-    /// Dialog font (`02_dialog`, owned by game.Game) for subtitle pages; null — one page.
-    dialog_font: ?*const @import("../formats.zig").font.Font = null,
 };
 
 /// Level-transition requests and LEVEL_Load replay; executed by the host (game.zig).
@@ -70,11 +65,12 @@ pub const Act = struct {
     safe_box: ?*Object = null,
     /// Hero walking to an active area to use it (LevelSwitch etc.).
     interaction: ?struct { hero: *Object, area: *Object, use: ?*Object = null, action: u8 = 0, mode: InteractMode = .operate } = null,
-    /// Open examine menu: object and the hero who reached it.
-    examining: ?struct { obj: *Object, hero: *Object } = null,
+    /// Open examine menu: object and the hero who reached it; `refused`: its `use_item_N`
+    /// (bit N) its Accepts said no to as it opened (OpenGorky, world/actions.zig).
+    examining: ?struct { obj: *Object, hero: *Object, refused: u16 = 0 } = null,
     /// Open box window (Explore).
     exploring: ?struct { box: *Object, hero: *Object } = null,
-    /// Open the box window after `ticks` (0x45b04f: after an action that set funcID 7 with
+    /// Open the box window after `ticks` (0x45b04f: after an action that set action 7 with
     /// cnt_itm > 0; from the examine menu after 60 + 30 ticks).
     pending_explore: ?struct { box: *Object, hero: *Object, ticks: u32 } = null,
 };
@@ -89,11 +85,9 @@ pub const Debug = struct {
     items: u32 = 0,
 };
 
-/// Action function name for `funcID`: string.tab 1–18 without spaces.
+/// Action function name for `action`: string.tab 1–18 without spaces.
 pub fn operationName(id: i32) ?[]const u8 {
-    const names = [_][]const u8{ "", "Open", "Close", "Take", "Use", "Cancel", "Ok", "Explore", "TakeAll", "TakeSelected", "TurnOn", "TurnOff", "SwitchOn", "SwitchOff", "PullOn", "PullOff", "Up", "Down", "Heal" };
-    if (id <= 0 or id >= names.len) return null;
-    return names[@intCast(id)];
+    return if (rules.action(id)) |a| a.name else null;
 }
 
 pub fn freeLoadSteps(gpa: Allocator, steps: []const LoadStep) void {

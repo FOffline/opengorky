@@ -13,6 +13,9 @@ pub const Fight = struct {
     decoy: bool = false,
     /// AIEnemyAppear: the fighter walks from `from` (may be off-grid) to `to`.
     appear: ?struct { from: [2]i32, to: [2]i32 } = null,
+    /// OpenGorky: BattleSpawnHero put it on the heroes' side, BattleSpawnCivilian on neither
+    /// (combat/debug.zig spawnFile); `.enemy`: as its data says.
+    spawned: enum { enemy, hero, civilian } = .enemy,
     /// AITargetLock: name of the only target (aiMode 1).
     target_lock: []const u8 = "",
     /// AIGuardPoint: tile to guard (aiMode 3).

@@ -1,12 +1,10 @@
 //! Field effects: projectiles, beams, flashes, fire, gas, explosions, trails — attached to model points and drawn.
 
-const std = @import("std");
 const billboards = @import("billboards.zig");
 const place = @import("place.zig");
 const level_view = @import("../level.zig");
 const LevelView = level_view.LevelView;
 const og = @import("opengorky");
-const World = og.state.world.World;
 const EffectsView = @import("effects_view.zig").EffectsView;
 
 /// World position of actor link point `link` (current frame), if it has a model.
@@ -35,12 +33,55 @@ fn ionAxis(self: *LevelView, o: *og.script.object.Object, link: []const u8) ?[2]
     if (l < 1e-6) return null;
     return .{ p0, .{ dx / l, dy / l, 0 } };
 }
-/// Batch billboards drawn on screen (off combat levels: the flush turns the z-test off).
+/// Batch billboards and the other effect draws (og.effects.batch) on screen (off combat
+/// levels: the flush turns the z-test off).
 const ViewSink = struct {
     v: *EffectsView,
     ctx: @import("effects_view.zig").Frame,
     pub fn put(s: ViewSink, b: billboards.Billboard) !void {
-        try s.v.billboard(s.ctx, b.name, b.frame, b.pos, b.half, b.alpha, b.rgb, null);
+        try s.v.billboard(s.ctx, b.name, b.frame, b.pos, b.half, sdlAlpha(b.alpha, b.program, b.k), b.rgb, sdlBlend(b));
+    }
+    pub fn ribbon(s: ViewSink, q: og.effects.batch.RibbonQuad) !void {
+        const side = if (q.facing) |at| blk: {
+            const r0 = EffectsView.screenRight(s.ctx.cam, at);
+            break :blk [3]f32{ r0[0] * q.half, r0[1] * q.half, 0 };
+        } else q.side;
+        const k = sdlAlpha(q.alpha, q.program, q.k);
+        try s.v.ribbon(s.ctx, q.name, q.frame, q.a, q.b, side, q.uv[0], q.uv[1], .{ q.rgb[0] * k, q.rgb[1] * k, q.rgb[2] * k });
+    }
+    pub fn mesh(s: ViewSink, m: og.effects.batch.MeshAt) !void {
+        try s.v.drawMeshAdd(s.ctx, m.name, m.pos, m.dir, m.scale, m.stretch, m.k);
+    }
+    /// A flame particle: a screen quad around the projected point.
+    pub fn particle(s: ViewSink, b: billboards.Billboard) !void {
+        const q = s.ctx.cam.project(b.pos);
+        try s.v.screenQuad(b.name, b.frame, .{ q.x - s.ctx.scroll[0] - b.half, q.y - s.ctx.scroll[1] - b.half, 2 * b.half, 2 * b.half }, sdlAlpha(b.alpha, b.program, b.k), b.rgb, sdlBlend(b));
+    }
+};
+
+/// The `.dsc` blend a billboard overrides (null: its own): a material's, else additive.
+fn sdlBlend(b: billboards.Billboard) ?og.effects.dsc.Blend {
+    if (b.blend) |m| return switch (m) {
+        .add => .add,
+        .alpha => .alpha,
+        .screen => .screen,
+    };
+    return if (b.add) .add else null;
+}
+
+/// A material's program on the SDL pass (no CPU program there): a dissolve fades by k.
+fn sdlAlpha(a: f32, p: og.effects.batch.Program, k: f32) f32 {
+    return if (p == .dissolve) a * (1 - k) else a;
+}
+
+/// Model points of the level's actors (current frame).
+const ViewLinks = struct {
+    self: *LevelView,
+    pub fn point(l: ViewLinks, o: *og.script.object.Object, name: []const u8) ?[3]f32 {
+        return linkWorld(l.self, o, name);
+    }
+    pub fn axis(l: ViewLinks, o: *og.script.object.Object, name: []const u8) ?[2][3]f32 {
+        return ionAxis(l.self, o, name);
     }
 };
 
@@ -65,7 +106,7 @@ pub fn drawEffects(self: *LevelView, scroll: [2]f32) !void {
             const a = og.state.world.actorOf(f.obj);
             const box = a.screen_box orelse continue;
             const h = box[3] - box[1];
-            const k = og.num.toF32(a.alpha) / 255 * og.formats.adjust.getFloat("fighter_fire_intensity", 1);
+            const k = og.num.toF32(a.alpha) / 255 * og.rules.adjust.float("fighter_fire_intensity");
             try v.screenQuad("flame", @intCast((ticks + i * 5) % 15), .{ box[0] - scroll[0], box[1] - @trunc(h / 8) - scroll[1], box[2] - box[0], h }, k, .{ 1, 1, 1 }, .add);
         }
     }
@@ -76,165 +117,28 @@ pub fn drawEffects(self: *LevelView, scroll: [2]f32) !void {
     // Morph (0x4260a0): mesh "nowy" ×(3, 3, 4)·aS additive at brightness 0.5·p.
     {
         // Glow ×(morf_scale, morf_scale, morf_scale_z)·aS at morf_a·p (0x426140, 0x426179).
-        const adj = og.formats.adjust;
-        const ms = adj.getFloat("morf_scale", 3);
-        const mz = adj.getFloat("morf_scale_z", 4);
-        const ma = adj.getFloat("morf_a", 0.5);
+        const adj = og.rules.adjust;
+        const ms = adj.float("morf_scale");
+        const mz = adj.float("morf_scale_z");
+        const ma = adj.float("morf_a");
         for (e.morphs.items) |mo| try v.drawMeshAdd(ctx, "nowy", mo.pos, .{ 0, 1, 0 }, as * ms, mz / ms, ma * mo.p);
     }
     if (!combat) try billboards.morphSparks(self, view);
     // Schizo gas cloud (0x4a95d0): "gas2" in a circle, fades over 30 ticks.
-    for (e.clouds.items) |cl| {
-        const a: f32 = if (cl.fading > 0) og.num.toF32(cl.fading) / 30 else @min(1, og.num.toF32(cl.ticks) / 15);
-        try v.billboard(ctx, cl.effect, cl.ticks / 2, cl.pos, as * cl.size, a, .{ 1, 1, 1 }, null);
-    }
+    try og.effects.batch.clouds(e.clouds.items, as, view);
     if (!combat) {
         try billboards.bitmaps(self, view);
         try billboards.blood(self, view);
     }
-    // Beams (texture frame (T>>1)%n, lightning T%n), additive.
-    for (e.beams.items) |bm| try drawBeam(self, v, ctx, bm, ticks, as);
-    // Blaster stream (0x4a3000): point i moved along v by (n − i)·60·aS; a segment
-    // draws until its point reaches the target; half-width 80·aS, the texture
-    // shifts by 0.08 per segment, the last 6 segments narrow.
-    for (e.streams.items) |st| {
-        if (st.n < 2) continue;
-        const frame: u32 = @intCast((ticks / 2) % 4096);
-        var acc: f32 = 0;
-        var i: u32 = 0;
-        while (i + 1 < st.n) : (i += 1) {
-            const d0 = st.dist(i);
-            if (d0 >= st.len) continue;
-            const d1 = @min(st.dist(i + 1), st.len);
-            const a = [3]f32{ st.pts[i][0] + st.v[0] * d0, st.pts[i][1] + st.v[1] * d0, st.pts[i][2] + st.v[2] * d0 };
-            const b2 = [3]f32{ st.pts[i + 1][0] + st.v[0] * d1, st.pts[i + 1][1] + st.v[1] * d1, st.pts[i + 1][2] + st.v[2] * d1 };
-            const tail = st.n - 1 - i;
-            const taper: f32 = if (tail <= 6) @max(0.1, 1 - 0.15 * og.num.toF32(6 - tail + 1)) else 1;
-            try v.ribbon(ctx, "blaster", frame, a, b2, sideOf(a, b2, as * 80 * taper), acc, acc + 0.08, 1);
-            acc = @mod(acc + 0.08, 1);
-        }
-    }
-    // Satellite energy beam (0x4a7350): mesh "beam", Rz(phase), scale 8·aS,
-    // colour = brightness, additive.
-    for (e.spins.items) |sp| {
-        if (sp.k <= 0) continue;
-        try v.drawMeshAdd(ctx, sp.mesh, sp.pos, .{ @cos(sp.phase), @sin(sp.phase), 0 }, as * 8, 1, sp.k);
-    }
+    try og.effects.batch.beams(e.beams.items, ticks, as, ViewLinks{ .self = self }, view);
+    try og.effects.batch.streams(e.streams.items, ticks, as, view);
+    try og.effects.batch.spins(e.spins.items, as, view);
     // Projectiles: mesh or plane; a rocket is "Rocket1" with exhaust "Rocket" behind
     // (220·aS); molotov flame.
     if (!combat) try billboards.trails(self, view);
     for (e.projectiles.items) |pr| try drawProjectile(v, ctx, pr, ticks, as);
     if (!combat) try billboards.projectilePlanes(self, view);
-    // Flamethrower (0x4a0270): a particle is an additive screen quad with half-size
-    // min(age·attack_flame_scale 1.6 + attack_flame_add 8, attack_flame_range 160);
-    // colour from attack_flame_col2 (60,60,255) when new to attack_flame_col
-    // (255,160,0) when old (t = remaining life / 16); random flame2 frame, ±5·aS
-    // jitter on x, y.
-    const flame = flameLook();
-    for (e.flames.items, 0..) |fl, fi| for (fl.parts.items, 0..) |p, i| {
-        const h = std.hash.Murmur2_32.hashUint64(ticks *% 2654435761 +% i *% 40503 +% fi);
-        const jx = (og.num.toF32(h % 10) - 5) * as;
-        const jy = (og.num.toF32((h / 10) % 10) - 5) * as;
-        const q = cam.project(.{ p.pos[0] + jx, p.pos[1] + jy, p.pos[2] });
-        const t = 1 - og.num.toF32(p.age) / og.num.toF32(fl.life);
-        const half = @min(og.num.toF32(p.age) * flame.scale + flame.add, flame.range);
-        var rgb: [3]f32 = undefined;
-        for (&rgb, flame.old, flame.new) |*c, o, n| c.* = (o + (n - o) * t) / 255;
-        const fr: u32 = @intCast((h / 100) % 15);
-        try v.screenQuad("flame2", fr, .{ q.x - scroll[0] - half, q.y - scroll[1] - half, 2 * half, 2 * half }, 1, rgb, .add);
-    };
-}
-
-/// Flamethrower particle look from adjust.kdt (attack_flame_*): growth, colours old/new.
-fn flameLook() struct { scale: f32, add: f32, range: f32, old: [3]f32, new: [3]f32 } {
-    const adj = og.formats.adjust;
-    const old = adj.getRgb("attack_flame_col", .{ 255, 160, 0 });
-    const new = adj.getRgb("attack_flame_col2", .{ 60, 60, 255 });
-    var o: [3]f32 = undefined;
-    var n: [3]f32 = undefined;
-    for (&o, &n, old, new) |*a, *b, x, y| {
-        a.* = @floatFromInt(x);
-        b.* = @floatFromInt(y);
-    }
-    return .{ .scale = adj.getFloat("attack_flame_scale", 1.6), .add = @floatFromInt(adj.getInt("attack_flame_add", 8)), .range = @floatFromInt(adj.getInt("attack_flame_range", 160)), .old = o, .new = n };
-}
-
-/// One beam: billboard chain, ion rifle, guard laser, Medusa current or lightning.
-fn drawBeam(self: *LevelView, v: *EffectsView, ctx: @import("effects_view.zig").Frame, bm: og.effects.beam.Beam, ticks: u64, as: f32) !void {
-    const cam = ctx.cam;
-    const frame: u32 = @intCast((ticks / bm.div) % 4096);
-    const half = as * bm.size;
-    switch (bm.kind) {
-        // Planes along the segment at half-size steps.
-        .billboards => {
-            const d = og.vec.sub(bm.to, bm.from);
-            const len = og.vec.len(d);
-            const n: usize = @intFromFloat(@min(200, @max(1, len / @max(1, half))));
-            for (0..n + 1) |k| {
-                const t = og.num.toF32(k) / og.num.toF32(n);
-                const p = [3]f32{ bm.from[0] + d[0] * t, bm.from[1] + d[1] * t, bm.from[2] + d[2] * t };
-                try v.billboard(ctx, bm.effect, frame, p, half, 1, .{ 1, 1, 1 }, .add);
-            }
-        },
-        // Ion (0x4a18d0): the beam goes both ways from the shooter, like the hit
-        // area (class 6 sets: a line of −40…40 cells, 0x4b8192). Forward: 25
-        // segments of 220·aS (0x50aac0) starting 155·aS ahead of the actor
-        // (attack_ion_vs −155, loop 0x4a2172); backward: 25 more with a reversed
-        // step (0x4a233d) from the end of the first, shifted back by attack_ion_vk
-        // 5922·aS (0x4a235b), i.e. from 267·aS behind the actor (loop 0x4a2490).
-        // The exe recomputes start and direction each frame (0x4a1919): the
-        // actor's two_hands point and the same point with x + 1 in bone axes
-        // (0x429ca0); the height is the one stored at the shot (+0x2ec); the barrel
-        // axis turns by −0.09 (0.4 for Slavsky, 0x4a19c3/0x4a19e4). So the beam
-        // leaves the muzzle and behind the stock and sways with the rifle's recoil.
-        .ion => {
-            var o = bm.from;
-            var d = bm.dir;
-            if (bm.actor) |a| if (ionAxis(self, a, bm.link)) |ax| {
-                o = .{ ax[0][0], ax[0][1], bm.from[2] };
-                const tc = @cos(bm.turn);
-                const ts = @sin(bm.turn);
-                d = .{ ax[1][0] * tc - ax[1][1] * ts, ax[1][0] * ts + ax[1][1] * tc, 0 };
-            };
-            const side = [3]f32{ -d[1] * half, d[0] * half, 0 };
-            // The second run starts where the first ends (25·220) less attack_ion_vk.
-            const vs = og.formats.adjust.getFloat("attack_ion_vs", -155);
-            const vk = og.formats.adjust.getFloat("attack_ion_vk", 5922);
-            for ([_]f32{ -vs, -vs + 25 * 220 - vk }, [_]f32{ 220, -220 }) |start, step| {
-                var p = [3]f32{ o[0] + d[0] * start * as, o[1] + d[1] * start * as, o[2] };
-                for (0..25) |_| {
-                    const q = [3]f32{ p[0] + d[0] * step * as, p[1] + d[1] * step * as, p[2] };
-                    try v.ribbon(ctx, bm.effect, frame, p, q, side, 0, 1, 1);
-                    p = q;
-                }
-            }
-        },
-        // Guard laser (0x4a4f80): from the eye (recomputed each frame) to the target.
-        .laser => {
-            const a = linkWorld(self, bm.actor orelse return, bm.link) orelse return;
-            try v.ribbon(ctx, bm.effect, frame, a, bm.to, sideOf(a, bm.to, half), 0, 1, 1);
-        },
-        // Medusa current (0x4a3c30): current1→current3, current2→current4.
-        .current => {
-            const o = bm.actor orelse return;
-            for ([_][2][]const u8{ .{ "current1", "current3" }, .{ "current2", "current4" } }) |pair| {
-                const a = linkWorld(self, o, pair[0]) orelse continue;
-                const b2 = linkWorld(self, o, pair[1]) orelse continue;
-                try v.ribbon(ctx, bm.effect, frame, a, b2, sideOf(a, b2, half), 0, 1, 1);
-            }
-        },
-        // Lightning (0x4a7ac0): 4 parts of 1400·aS upward from the target, facing the camera.
-        .lightning => {
-            const r0 = EffectsView.screenRight(cam, bm.to);
-            const side = [3]f32{ r0[0] * half, r0[1] * half, 0 };
-            for (0..4) |k| {
-                const z0 = og.num.toF32(k) * 1400 * as;
-                const a = [3]f32{ bm.to[0], bm.to[1], bm.to[2] + z0 };
-                const b2 = [3]f32{ bm.to[0], bm.to[1], bm.to[2] + z0 + 1400 * as };
-                try v.ribbon(ctx, bm.effect, frame, a, b2, side, 0, 1, 1);
-            }
-        },
-    }
+    try og.effects.batch.flames(e.flames.items, ticks, as, view);
 }
 
 /// One projectile: mesh or plane, Cutter Pill bullet, rocket with exhaust, molotov flame.
@@ -270,13 +174,4 @@ fn drawProjectile(v: *EffectsView, ctx: @import("effects_view.zig").Frame, pr: o
         const q = cam.project(at);
         try v.screenQuad("flame", @intCast((ticks / 2) % 15), .{ q.x - scroll[0] - 5, q.y - scroll[1] - 6, 10, 14 }, 1, .{ 1, 1, 1 }, null);
     }
-}
-
-/// Offset across ribbon A→B (0x4a3c30): the direction rotated 90° in XY, ·`half`;
-/// for a vertical ribbon — right along X.
-fn sideOf(a: [3]f32, b: [3]f32, half: f32) [3]f32 {
-    const d = og.vec.sub(b, a);
-    const l = og.vec.len2(d);
-    if (l < 1e-4) return .{ half, 0, 0 };
-    return .{ -d[1] / l * half, d[0] / l * half, 0 };
 }

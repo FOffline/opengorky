@@ -1,102 +1,43 @@
-//! Attack tables: heroes by weapon nameID (branches 0x48bda2), monsters by
-//! fighter nameID (0x4896b0, table 0x48d618). Delays named in comments are read from
-//! adjust.kdt (the exe's globals), the shipped values as the fallback.
+//! Attack tables: heroes by weapon classic_id (branches 0x48bda2), monsters by
+//! fighter classic_id (0x4896b0, table 0x48d618). The rows are the Rules' built-ins
+//! (src/rules.zig: attacks.ss); waits named after adjust.kdt globals are read from it
+//! (the exe's), the shipped values as the fallback.
 
-const adjust = @import("../formats.zig").adjust;
+const rules = @import("../rules.zig");
+const entity = @import("../core.zig").entity;
+const Object = @import("../script.zig").object.Object;
+const Class = @import("fighter.zig").Class;
 
-/// Ticks from adjust.kdt `name` (exe value `d`).
-fn ticks(name: []const u8, d: i32) u32 {
-    return @intCast(@max(0, adjust.getInt(name, d)));
+/// Hero-table strike (0x48bda2): every classic_id without MonsterAttack rows. The exe
+/// (0x4896b0): classic_id − 0x64 ≤ 0x27 takes its own branch from table 0x48d618, even
+/// for a party hero, Medusa; 103, 104, 111, 112, 134 lead to 0x48bda2 there.
+/// The fighter's record says (Enemy.own_attacks: by classic_id, whatever the side).
+fn heroTable(who: rules.Who) bool {
+    return !entity.enemyOf(who).own_attacks;
 }
 
-/// A signed shift from adjust.kdt (wdelay_*).
-const sh = adjust.getInt;
-
-/// Hero-table strike (0x48bda2): nameIDs outside 100…139 (0x4896b0: nameID − 0x64
-/// ≤ 0x27 takes its own branch from table 0x48d618, even for a party hero, Medusa)
-/// and 103, 104, 111, 112, 134, whose 0x48d618 cells lead to 0x48bda2.
-pub fn heroTable(name_id: i32) bool {
-    return switch (name_id) {
-        103, 104, 111, 112, 134 => true,
-        100...102, 105...110, 113...133, 135...139 => false,
-        else => true,
-    };
-}
-
-/// Hero attack (0x48bda2): animation and hit wait by weapon nameID (the exe ignores
-/// `useAnim`). McFadden (24) and Hutchens (29) have waits shifted by wdelay_*
-/// (0x4896f4…0x48973c): `+` for bayonet knife, pistol (49), shocker (52), shotgun,
-/// rifle (98) and grenades, `−` for fist and bat; other weapons have no shift
-/// (revolver 50, shocker 55, default rifle).
-/// `until_end`: the hit comes after the animation ends (0x428800 queues it, the
-/// callback follows), then animation `then`.
-/// `after`: wait after the hit until the attack ends (0x428c00 before 0x425630):
-/// pistol, rifle and shotgun flash attack_rifle_flash_timeout (5), chaingun
-/// attack_chaingun_flash_timeout (80), nitrogen gun attack_nitro_timeout (80).
-/// `pre`: beam tick before the hit. For the ion rifle and blaster the callback sets
-/// the beam (0x1a → 0x4a2680, 0x1c → 0x4a37c0) and damage comes later: ion when
-/// less than 5 ticks of the beam's life (attack_ion_life 27) remain (0x4a1840),
-/// blaster with the next callback 5 after attack_blaster_delay2 (14).
+/// A resolved hero strike (`HeroAttack` rows). `extra` only for the WdelayHero
+/// fighters; `then` after `until_end`.
 pub const HeroAttack = struct { anim: []const u8, wait: u32, extra: i32 = 0, until_end: bool = false, then: ?[]const u8 = null, after: u32 = 0, pre: ?u32 = null };
 
-pub fn heroAttack(attacker_id: i32, weapon_id: i32) HeroAttack {
-    const mh = attacker_id == 24 or attacker_id == 29;
-    return switch (weapon_id) {
-        // Fists: attack_fist_hit_delay (50) − wdelay_fist (12), callback 5.
-        48, 70 => .{ .anim = "attack_boxing", .wait = ticks("attack_fist_hit_delay", 50), .extra = if (mh) -sh("wdelay_fist", 12) else 0 },
-        // Bayonet: attack_bayonet_hit_delay (22) + wdelay_bayonet (10); dagger 28.
-        43 => .{ .anim = "attack_butcher", .wait = ticks("attack_bayonet_hit_delay", 22), .extra = if (mh) sh("wdelay_bayonet", 10) else 0 },
-        54 => .{ .anim = "attack_butcher", .wait = 28 },
-        42, 47 => .{ .anim = "attack_axe", .wait = 30 },
-        // Bat: attack_baseball_hit_delay (65) − wdelay_baseball (10) (0x48c416).
-        44, 76 => .{ .anim = "attack_baseball", .wait = ticks("attack_baseball_hit_delay", 65), .extra = if (mh) -sh("wdelay_baseball", 10) else 0 },
-        // Shocker 52: + wdelay_shocker (30); 55 has no shift (0x48c287).
-        52 => .{ .anim = "attack_shocker", .wait = 20, .extra = if (mh) sh("wdelay_shocker", 30) else 0 },
-        55 => .{ .anim = "attack_shocker", .wait = 20 },
-        80 => .{ .anim = "attack_syringe", .wait = 30 },
-        40 => .{ .anim = "attack_knife", .wait = 25 },
-        41 => .{ .anim = "attack_stone", .wait = 32 },
-        // Grenades: attack_grenade_start_delay (37) + wdelay_grenade (36) (0x48c359,
-        // 0x48c398, 0x48cdb1).
-        33, 35, 1027 => .{ .anim = "attack_grenade", .wait = ticks("attack_grenade_start_delay", 37), .extra = if (mh) sh("wdelay_grenade", 36) else 0 },
-        // Molotov, vodka, petrol: "molotov" (75) only for Hutchens, "stone" for others.
-        86, 1030, 1032 => if (attacker_id == 29) .{ .anim = "attack_molotov", .wait = 75 } else .{ .anim = "attack_stone", .wait = 32 },
-        // Time bomb (0x48c507) and decoy (0x48d261): McFadden and Hutchens use
-        // attack_timebomb and 50 ticks (0x48c5c9, 0x48d31f), others pickup_start to the
-        // end, callback (37 / 5), pickup_end.
-        34, 1031 => if (mh) .{ .anim = "attack_timebomb", .wait = 50 } else .{ .anim = "pickup_start", .wait = 0, .until_end = true, .then = "pickup_end" },
-        45 => .{ .anim = "attack_gun", .wait = ticks("attack_dartgun_delay", 40) },
-        46 => .{ .anim = "attack_gun", .wait = 35 },
-        // Pistol: attack_dartgun_delay (40) + wdelay_pistol (3); the revolver (50) has
-        // no shift (0x48c0be). After the shot, a 5-tick flash.
-        49 => .{ .anim = "attack_gun", .wait = ticks("attack_dartgun_delay", 40), .extra = if (mh) sh("wdelay_pistol", 3) else 0, .after = ticks("attack_rifle_flash_timeout", 5) },
-        50 => .{ .anim = "attack_gun", .wait = ticks("attack_dartgun_delay", 40), .after = ticks("attack_rifle_flash_timeout", 5) },
-        98 => .{ .anim = "attack_sniper", .wait = 59, .extra = if (mh) 35 else 0, .after = ticks("attack_rifle_flash_timeout", 5) },
-        1023 => .{ .anim = "attack_rifle", .wait = 40, .extra = if (mh) 15 else 0, .after = ticks("attack_rifle_flash_timeout", 5) },
-        1022 => .{ .anim = "attack_chaingun", .wait = 40, .after = ticks("attack_chaingun_flash_timeout", 80) },
-        1024 => .{ .anim = "attack_bazooka", .wait = 47 },
-        1028 => .{ .anim = "attack_bazooka", .wait = 50 },
-        1026 => .{ .anim = "attack_flame", .wait = 20 },
-        1025 => .{ .anim = "attack_flame", .wait = 34, .after = ticks("attack_nitro_timeout", 80) },
-        // Ion: beam at tick 35, damage 23 later (27 − 4), end attack_ion_life + 10 (37)
-        // after the beam (0x48d078).
-        1029 => .{ .anim = "attack_ionrifle", .wait = 35 + ticks("attack_ion_life", 27) - 4, .pre = 35, .after = 14 },
-        // Blaster (0x48d0a5): stream at tick 45 (delay1), damage after delay2 (14), end
-        // after delay3 (100).
-        1037 => .{ .anim = "attack_blaster", .wait = 45 + ticks("attack_blaster_delay2", 14), .pre = 45, .after = 100 },
-        // Satellite: the exe passes "ude_radio" (a typo, no such animation).
-        1038, 1039 => .{ .anim = "ude_radio", .wait = 0 },
-        1040 => .{ .anim = "use_radio", .wait = 0 },
-        // Everything else (0x48d57c): attack_rifle, attack_rifle_hit_delay (59), no shift.
-        else => .{ .anim = "attack_rifle", .wait = ticks("attack_rifle_hit_delay", 59) },
+pub fn heroAttack(attacker: rules.Who, weapon: rules.Who) HeroAttack {
+    const r = rules.heroAttack(weapon, attacker);
+    return .{
+        .anim = r.anim,
+        .wait = r.wait.ticks(),
+        .extra = if (entity.heroOf(attacker).wdelay) r.extra.int() else 0,
+        .until_end = r.until_end,
+        .then = if (r.then.len > 0) r.then else null,
+        .after = r.after.ticks(),
+        .pre = if (r.pre) |p| p.ticks() else null,
     };
 }
 
 pub const Lift = struct { link: []const u8 = "hand", z: f32 = -400, bind_at: u32, release_after: u32 };
 
-/// Monster strike (0x4896b0, table 0x48d618): logical animation, ticks until the
-/// hit, wait after it, victim lift. Only for nameIDs where `heroTable` is false.
-/// The exe branches pick the strike by weapon nameID (+0x58), not by longAttack:
+/// A resolved monster strike (`MonsterAttack` rows): logical animation, ticks until
+/// the hit, wait after it, victim lift.
+/// The exe branches pick the strike by weapon classic_id (+0x58), not by longAttack:
 /// Fatman, Stinger, Puppet and Messiah don't set it in data.
 /// A branch queues the fighter's animation (0x428980), waits (0x428c00) and hit
 /// callbacks (0x428b90 → 0x4863c0), ending with 0x425630 (attack over).
@@ -106,152 +47,123 @@ pub const Lift = struct { link: []const u8 = "hand", z: f32 = -400, bind_at: u32
 /// `react`: that many ticks later the target's reaction repeats without damage
 /// (code 7: +0xf0 with flag 0 → 0x490e80 without 0x490f10: hit and blood, 0x491920 and 0x491510).
 /// `pre`: flash tick before the hit (0x427ce0 on the "chaingun" point before the callback).
-pub const MonsterAttack = struct { anim: []const u8, wait: u32, after: u32 = 0, lift: ?Lift = null, second: u32 = 0, react: u32 = 0, pre: ?u32 = null, vanish: u32 = 0 };
+/// `gas`: gas on the aimed tile and around it (Schizo); `linked`: the second linked
+/// actor's animation (Smoke Rider).
+pub const MonsterAttack = struct { anim: []const u8, wait: u32, after: u32 = 0, lift: ?Lift = null, second: u32 = 0, react: u32 = 0, pre: ?u32 = null, vanish: u32 = 0, gas: bool = false, linked: []const u8 = "" };
 
-pub fn monsterAttack(id: i32, wpn_id: i32) MonsterAttack {
-    const S = "short_attack";
-    const L = "long_attack";
-    const sf = ticks("sf_delay", 30);
-    const flash = ticks("attack_rifle_flash_timeout", 5);
-    return switch (id) {
-        // Jet Elmer (0x48a05d): with rockets (57) long_attack, first rocket after
-        // attack_jetelmer_delay1 (43), the second delay2 (28) later, then 30 ticks;
-        // 56 short_attack (0x48a152): hit (code 5) after attack_jetelmer_delay (36), a
-        // second hit after ftol(attack_jetelmer_scr) (12.0), tail 0x48b864 (30).
-        100 => if (wpn_id == 57) .{ .anim = L, .wait = ticks("attack_jetelmer_delay1", 43), .second = 28, .after = 30 } else .{ .anim = S, .wait = ticks("attack_jetelmer_delay", 36), .second = ticks("attack_jetelmer_scr", 12), .after = 30 },
-        // Garcia (0x4897fc): 67 long_attack, chaingun flash and light at
-        // garcia_attack_long_delay1 (41), hit delay2 (10) later, then delay3 (20) and
-        // sf_delay (30); 66 short_attack, hit after short_delay + delay2 (25 + 20),
-        // reaction without damage (code 7) delay3 (20) later, sf_delay (30).
-        101 => if (wpn_id == 67) .{ .anim = L, .wait = ticks("garcia_attack_long_delay1", 41) + 10, .after = 20 + sf, .pre = ticks("garcia_attack_long_delay1", 41) } else .{ .anim = S, .wait = 45, .react = 20, .after = sf },
-        // Sphinx (0x489a2e, weapon 73): hit after sphinx_attack_short_delay (28),
-        // reaction without damage (code 7) delay2 (20) later, then sf_delay (30).
-        102 => .{ .anim = S, .wait = ticks("sphinx_attack_short_delay", 28), .react = 20, .after = sf },
-        // Cutter Pill (0x489afd): weapon 88 lifts on the claw ("hand"), hit at tick 52
-        // (short_delay1 + delay2: 37 + 15), then delay3 (50), release, and 80 more
-        // (0x489d40); 89 long_attack, bullet (code 13) after long_start_delay 35.
-        105 => if (wpn_id == 88) .{ .anim = S, .wait = 37 + 15, .after = 50 + 80, .lift = .{ .bind_at = 37, .release_after = 50 } } else .{ .anim = L, .wait = 35 },
-        // RC-28 (0x489d5d, weapon 92): rc28_attack_short_delay (25), then sf_delay (30).
-        106 => .{ .anim = S, .wait = ticks("rc28_attack_short_delay", 25), .after = sf },
-        // Fang (0x489dd5): 91 long_attack, rocket (code 16) after long_delay1 + delay2
-        // (22 + 35), then 30; 90 short_attack after short_delay (28).
-        107 => if (wpn_id == 91) .{ .anim = L, .wait = 22 + 35, .after = 30 } else .{ .anim = S, .wait = 28 },
-        // Hound (0x48b46e), Siner (0x48a372): hit after their own delay, then 30
-        // (common tail 0x48b864).
-        108 => .{ .anim = S, .wait = 23, .after = 30 },
-        109 => .{ .anim = S, .wait = 40, .after = 30 },
-        // Smoke Rider (0x489e9d): 1003 (smokeridergun) long_attack, rocket (code 19)
-        // after attack_smokerider_shot_delay (51), then 30; 1004 ladder_start, callback 21
-        // (0x487698) after attack_smokerider_shot2_delay (0): the gunner's long_attack
-        // (combat/anim.zig), and after attack_smokerider_shot3_delay (20) a rocket of the
-        // second kind (code 20, smokerider_attack2_rocket1_*).
-        110 => if (wpn_id == 1003) .{ .anim = L, .wait = ticks("attack_smokerider_shot_delay", 51), .after = 30 } else .{ .anim = "ladder_start", .wait = ticks("attack_smokerider_shot2_delay", 0) + ticks("attack_smokerider_shot3_delay", 20), .after = 30 },
-        // Grandma (0x489f71): by weapon, not longAttack: 1006 (grandma_mad_gun, poison
-        // spit "atak", code 22) long_attack, 1005 (grandma_std) short_attack; both after
-        // attack_grandma_delay (70), then 30.
-        113 => .{ .anim = if (wpn_id == 1006) L else S, .wait = ticks("attack_grandma_delay", 70), .after = 30 },
-        // Grandma's grandson (0x489f55): long_attack, attack_grandson_delay (30), then 30.
-        114 => .{ .anim = L, .wait = ticks("attack_grandson_delay", 30), .after = 30 },
-        // Judge (0x48bc72) and his child (0x48bd0a): judge_delay/delay2 (42/30),
-        // judgechild_delay/delay2 (30/40).
-        115 => .{ .anim = S, .wait = 42, .after = 30 },
-        116 => .{ .anim = S, .wait = 30, .after = 40 },
-        // Shoggoth (0x489fe2, weapon 1015): tail after attack_shogoth_tail_delay (30).
-        117 => .{ .anim = S, .wait = ticks("attack_shogoth_tail_delay", 30) },
-        // Headnail (0x48a72b): two saw strikes, left after delay1+2+3 (30+5+8), right
-        // delay4+5 (5+32) later, then delay6 (5); each with sparks and damage.
-        118 => .{ .anim = S, .wait = ticks("attack_headnail_delay1", 30) + 5 + 8, .second = ticks("attack_headnail_delay4", 5) + 32, .after = 5 },
-        // Medusa (0x48a465): 1021 short_attack, hit after attack_medusa_s_delay 47, the
-        // mouth beam lasts attack_medusa_s_timeout 72; otherwise long_attack, current
-        // (callback 0x1f → 0x4a44e0) after attack_medusa_l_delay 32, then delay2 30 and
-        // 20 more ticks.
-        119 => if (wpn_id == 1021) .{ .anim = S, .wait = ticks("attack_medusa_s_delay", 47), .after = ticks("attack_medusa_s_timeout", 72) } else .{ .anim = L, .wait = ticks("attack_medusa_l_delay", 32), .after = 50 },
-        // Invisible (0x48a2a6, any weapon): short_attack ("atak", 76 frames, hit sounds
-        // at 32–34), visible at once (+0x311c = 255) and fading in (command 0x2d, state
-        // 6 "o", in_fadein); hit after attack_invisible_delay (40); 40 later it vanishes
-        // (0x2d, "i", in_fadeout), 80 more and done (0x2e, +0x311c = 0).
-        120 => .{ .anim = S, .wait = ticks("attack_invisible_delay", 40), .vanish = 40, .after = 80 },
-        // Pain God (0x48a20e): stream (code 30) after paingod_delay (20), then delay2 (30).
-        121 => .{ .anim = L, .wait = 20, .after = 30 },
-        // Harvester (0x48a390): attack_harvester_delay (32), then 30.
-        122 => .{ .anim = S, .wait = ticks("attack_harvester_delay", 32), .after = 30 },
-        // Sister of Mercy (0x48ae0c): brain (code 32) after sister_delay (83), delay2 (30).
-        123 => .{ .anim = S, .wait = 83, .after = 30 },
-        // Fatman (0x48aea4): fatmanshort (1075) long_attack "atak1", hit at tick 40
-        // (attack_fatman_s_delay), then 30; fatmanlong (1076) short_attack "atak2",
-        // flash and shot (code 50) at 68 (attack_fatman_l_delay), flash
-        // attack_rifle_flash_timeout (5), then 30 (tail 0x48b5e3).
-        124 => if (wpn_id == 1075) .{ .anim = L, .wait = ticks("attack_fatman_s_delay", 40), .after = 30 } else .{ .anim = S, .wait = ticks("attack_fatman_l_delay", 68), .after = flash + 30 },
-        // Cripple (0x48b12c): flash on "chaingun1" and shot (code 11) after
-        // cripple_delay1 (50), 5-tick flash, then delay2 (40).
-        125 => .{ .anim = L, .wait = 50, .after = 5 + 40 },
-        // Reverend Insect (0x48ab82): "nitro" stream after attack_revinsect_delay (45),
-        // hit delay2 (20) later, then delay3 (64).
-        126 => .{ .anim = L, .wait = ticks("attack_revinsect_delay", 45) + 20, .after = 64, .pre = ticks("attack_revinsect_delay", 45) },
-        // Stinger (0x48b6be): 1071 short_attack, stream (code 43) after stinger_s_delay
-        // (50), then s_delay2 (30); otherwise long_attack, ball (code 44) after l_delay
-        // (4), then l_delay2 (80).
-        127 => if (wpn_id == 1071) .{ .anim = S, .wait = 50, .after = 30 } else .{ .anim = L, .wait = 4, .after = 80 },
-        // Hornet (0x48b256): lift at hornet_delay1 (40), hit delay2 (5) later, release
-        // delay3 (30) later, 30 more.
-        128 => .{ .anim = L, .wait = 40 + 5, .after = 30 + 30, .lift = .{ .bind_at = 40, .release_after = 30 } },
-        // Lilith and child (0x48b3ff), Needle (0x48a3ae): own delay, then 30.
-        129, 135 => .{ .anim = S, .wait = 41, .after = 30 },
-        130 => .{ .anim = S, .wait = 43, .after = 30 },
-        // Guard (0x48afae): 1062 short_attack, hit after attack_guard_1_delay (45);
-        // otherwise attack_3 after guard_3_delay (40); both tail 0x48b81a → 0x48b864
-        // (code 5, then 30). 1063 long_attack: after guard_2_delay (43) eye beams
-        // (code 0x23 → 0x488025, "oko1"/"oko2", no damage), 5 later "smoke2" and
-        // damage (code 0x24 → 0x48809c), then guard_2_delay2 (75).
-        131 => switch (wpn_id) {
-            1062 => .{ .anim = S, .wait = ticks("attack_guard_1_delay", 45), .after = 30 },
-            1063 => .{ .anim = L, .wait = 43 + 5, .after = 75, .pre = 43 },
-            else => .{ .anim = "attack_3", .wait = 40, .after = 30 },
-        },
-        // Puppet (0x48b4dc): 1067 short_attack after puppet_s_delay (32), then 30;
-        // otherwise long_attack: flash and shot (code 11) after l_delay (53), flash
-        // held l_timeout (16), then 30.
-        132 => if (wpn_id == 1067) .{ .anim = S, .wait = 32, .after = 30 } else .{ .anim = L, .wait = 53, .after = ticks("attack_puppet_l_timeout", 16) + 30 },
-        // Squeaker (0x48a3cc): shake (code 27) after sq_delay (50), then delay2 (30).
-        133 => .{ .anim = L, .wait = 50, .after = 30 },
-        // Schizo (0x48b914): 1077 short_attack, hit after schizo_t_delay (50), then
-        // t_delay2 (40); 1078 long_attack, gas from the bell after g_delay (78), cloud
-        // (code 49) g_delay2 (98) later, then g_delay3 (30); 1079 attack_3, flash and
-        // shot (code 11) after r_delay (60), flash until r_delay2 (35).
-        136 => switch (wpn_id) {
-            1077 => .{ .anim = S, .wait = 50, .after = 40 },
-            1078 => .{ .anim = L, .wait = 78 + 98, .after = 30, .pre = 78 },
-            else => .{ .anim = "attack_3", .wait = 60, .after = ticks("attack_schizo_r_delay2", 35) },
-        },
-        // Lucy (0x48ace3): 1057 short_attack after lucy_s_delay (35), then 30;
-        // otherwise long_attack: flash and shot (code 11) after l_delay (74), flash
-        // attack_rifle_flash_timeout (5), then 20.
-        137 => if (wpn_id == 1057) .{ .anim = S, .wait = 35, .after = 30 } else .{ .anim = L, .wait = 74, .after = flash + 20 },
-        // Incubus (0x48b626): ball (code 42) after incubus_delay (15), then delay2 (90).
-        138 => .{ .anim = L, .wait = 15, .after = 90 },
-        // Messiah (0x48b7ee): 1073 short_attack after messiah_s_delay (50), then 30;
-        // otherwise long_attack after l_delay (48), then 60.
-        139 => if (wpn_id == 1073) .{ .anim = S, .wait = 50, .after = 30 } else .{ .anim = L, .wait = 48, .after = 60 },
-        else => unreachable, // other nameIDs use heroTable
+/// Only for classic_ids where `heroTable` is false.
+fn monsterAttack(id: rules.Who, wpn: rules.Who) MonsterAttack {
+    return resolve(rules.monsterAttack(id, wpn).?.*);
+}
+
+fn resolve(r: rules.MonsterAttack) MonsterAttack {
+    return .{
+        .anim = r.anim,
+        .wait = r.hit_delay.ticks(),
+        .after = r.after_delay.ticks(),
+        .second = r.second_delay.ticks(),
+        .react = r.react_delay,
+        .pre = if (r.flash_delay) |p| p.ticks() else null,
+        .vanish = r.vanish_delay,
+        .lift = if (r.lift_delay > 0) .{ .bind_at = r.lift_delay, .release_after = r.drop_delay } else null,
+        .gas = r.gas,
+        .linked = r.linked_anim,
     };
+}
+
+/// A strike: the hero table or a monster branch.
+pub const Strike = union(enum) { hero: HeroAttack, monster: MonsterAttack };
+
+/// `who`'s strike with `wpn`. classic_id picks the table (0x4896b0), not the side: Medusa
+/// (119) uses her branch even in the party. The generic fighter (classType 100) and,
+/// in an OpenGorky project, any weapon take the weapon class fields over the row
+/// (`overlay`); the exe has no such fields.
+pub fn strikeOf(who: *Object, wpn: *Object) Strike {
+    if (Class.of(who) == .generic) return .{ .monster = genericAttack(wpn) };
+    const id = rules.who(who);
+    // A fighter whose rows don't cover this weapon (an OpenGorky row for one weapon
+    // only, no weapon = 0 row) strikes with it by the hero table.
+    const row = if (heroTable(id)) null else rules.monsterAttack(id, rules.who(wpn));
+    if (row == null) {
+        const h = heroAttack(id, rules.who(wpn));
+        return .{ .hero = if (rules.og) overlayHero(h, wpn) else h };
+    }
+    const m = resolve(row.?.*);
+    return .{ .monster = if (rules.og) overlay(m, wpn) else m };
+}
+
+pub fn animOf(s: Strike) []const u8 {
+    return switch (s) {
+        inline else => |x| x.anim,
+    };
+}
+
+/// Generic fighter's strike: the weapon fields over long_attack / short_attack (by
+/// `longAttack`), `attackEffectDelay` (else 15) and 30 after (the common tail 0x48b864).
+pub fn genericAttack(wpn: *Object) MonsterAttack {
+    const eff = wpn.getInt("attackEffectDelay");
+    return overlay(.{
+        .anim = if (wpn.getInt("long_attack") != 0) "long_attack" else "short_attack",
+        .wait = if (eff > 0) @intCast(eff) else 15,
+        .after = 30,
+    }, wpn);
+}
+
+/// Weapon class fields over a strike (the generic fighter's; in an OpenGorky project
+/// any weapon's, over its MonsterAttack row; rules attacks.ss):
+/// - `attack_anim`: logical animation;
+/// - `hit_delay`: ticks until the hit;
+/// - `after_delay`: wait after the hit until the attack ends (also 0);
+/// - `second_delay`: second projectile that many ticks later;
+/// - `react_delay`: repeat the target's reaction without damage after that many ticks;
+/// - `flash_delay`: muzzle flash before the hit at that tick.
+/// Numbers 0 or less (but `after_delay`) keep the row's.
+pub fn overlay(base: MonsterAttack, wpn: *Object) MonsterAttack {
+    var m = base;
+    const anim = wpn.getString("attack_anim");
+    if (anim.len > 0) m.anim = anim;
+    if (positive(wpn.getInt("hit_delay"))) |v| m.wait = v;
+    if (wpn.getVar("after_delay")) |v| m.after = @intCast(@max(0, v.value.toInt()));
+    if (positive(wpn.getInt("second_delay"))) |v| m.second = v;
+    if (positive(wpn.getInt("react_delay"))) |v| m.react = v;
+    if (positive(wpn.getInt("flash_delay"))) |v| m.pre = v;
+    return m;
+}
+
+/// The same fields over a hero strike (HeroAttack row); `hit_delay` drops the wdelay shift.
+fn overlayHero(base: HeroAttack, wpn: *Object) HeroAttack {
+    var h = base;
+    const anim = wpn.getString("attack_anim");
+    if (anim.len > 0) h.anim = anim;
+    if (positive(wpn.getInt("hit_delay"))) |v| {
+        h.wait = v;
+        h.extra = 0;
+    }
+    if (wpn.getVar("after_delay")) |v| h.after = @intCast(@max(0, v.value.toInt()));
+    if (positive(wpn.getInt("flash_delay"))) |v| h.pre = v;
+    return h;
+}
+
+fn positive(v: i32) ?u32 {
+    return if (v > 0) @intCast(v) else null;
 }
 
 test "table 0x48d618: hero branches, Guard and Jet Elmer" {
     const t = @import("std").testing;
-    for ([_]i32{ 103, 104, 111, 112, 134, 99, 140 }) |id| try t.expect(heroTable(id));
-    // Every nameID 100…139 outside the hero branches has its own entry (no unreachable).
-    for (100..140) |i| if (!heroTable(@intCast(i))) {
-        _ = monsterAttack(@intCast(i), 0);
+    for ([_]i32{ 103, 104, 111, 112, 134, 99, 140 }) |id| try t.expect(heroTable(.{ .id = id }));
+    // Every classic_id 100…139 outside the hero branches has its own entry (no unreachable).
+    for (100..140) |i| if (!heroTable(.{ .id = @intCast(i) })) {
+        _ = monsterAttack(.{ .id = @intCast(i) }, .{ .id = 0 });
     };
     // Jet Elmer 56: two hits (36, then 12 later), tail 30 (0x48a152).
-    const je = monsterAttack(100, 56);
+    const je = monsterAttack(.{ .id = 100 }, .{ .id = 56 });
     try t.expectEqual(@as(u32, 36), je.wait);
     try t.expectEqual(@as(u32, 12), je.second);
     try t.expectEqual(@as(u32, 30), je.after);
     // Guard: short strike and attack_3 have tail 30 (0x48b864); beam damage at 43 + 5.
-    try t.expectEqual(@as(u32, 30), monsterAttack(131, 1062).after);
-    try t.expectEqual(@as(u32, 30), monsterAttack(131, 1).after);
-    try t.expectEqual(@as(u32, 48), monsterAttack(131, 1063).wait);
+    try t.expectEqual(@as(u32, 30), monsterAttack(.{ .id = 131 }, .{ .id = 1062 }).after);
+    try t.expectEqual(@as(u32, 30), monsterAttack(.{ .id = 131 }, .{ .id = 1 }).after);
+    try t.expectEqual(@as(u32, 48), monsterAttack(.{ .id = 131 }, .{ .id = 1063 }).wait);
     // Lasers (code 0x23) at tick 43, smoke and damage (code 0x24) 5 later.
-    try t.expectEqual(@as(?u32, 43), monsterAttack(131, 1063).pre);
+    try t.expectEqual(@as(?u32, 43), monsterAttack(.{ .id = 131 }, .{ .id = 1063 }).pre);
 }

@@ -14,7 +14,6 @@ const scenario = @import("../scene.zig").scenario;
 const floor_mod = @import("../world.zig").floor;
 const sources = @import("../world.zig").sources;
 const start = @import("../world.zig").start;
-const archive = @import("../formats.zig").archive;
 const fields = @import("../fields.zig");
 const World = @import("../state.zig").world.World;
 const Object = @import("../script.zig").object.Object;
@@ -38,9 +37,9 @@ pub const Report = struct {
 };
 
 /// Scene `name` on level `level`.
-pub fn run(io: Io, gpa: Allocator, dat: Io.Dir, models: *model_cache.Cache, level: []const u8, name: []const u8) !Report {
+pub fn run(io: Io, gpa: Allocator, worlds: @import("../core.zig").source.Factory, models: *model_cache.Cache, level: []const u8, name: []const u8) !Report {
     const eq = std.ascii.eqlIgnoreCase;
-    const w = try life.create(io, gpa, dat, level, models, .{});
+    const w = try life.create(io, gpa, worlds, level, models, .{});
     defer w.destroy();
     // Skip the level's load scene.
     for (0..3) |_| try game.tick(w);
@@ -75,12 +74,7 @@ pub fn run(io: Io, gpa: Allocator, dat: Io.Dir, models: *model_cache.Cache, leve
             if (eq(c.arg(0).str(), jn[0])) break true;
         } else false;
         if (!used) continue;
-        var pb: [128]u8 = undefined;
-        const path = try std.fmt.bufPrint(&pb, "{s}/other.dat", .{jn[1]});
-        var arc = archive.Archive.open(io, gpa, dat, path) catch continue;
-        defer arc.close(io, gpa);
-        const e = arc.find(jn[2]) orelse continue;
-        const src = try arc.readAlloc(io, gpa, e);
+        const src = try w.res.source.loadForeign(gpa, jn[1], jn[2]) orelse continue;
         defer gpa.free(src);
         try sources.addSource(w, jn[2], src);
         const cls = w.rt.loadClass(jn[2]) catch continue;
@@ -182,7 +176,7 @@ pub fn run(io: Io, gpa: Allocator, dat: Io.Dir, models: *model_cache.Cache, leve
             continue;
         }
         const sp = w.screenPos(o);
-        if (start.backgroundSize(w)) |bs| {
+        if (w.res.source.backgroundSize()) |bs| {
             const bw: f32 = @floatFromInt(bs[0]);
             const bh: f32 = @floatFromInt(bs[1]);
             if (sp[0] < 0 or sp[1] < 0 or sp[0] >= bw or sp[1] >= bh) iw(&issues, gpa, "{s} off background at {d:.0},{d:.0}", .{ o.name, sp[0], sp[1] });

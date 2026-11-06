@@ -1,6 +1,7 @@
 //! Turn phases: side turn start and end, fire/gas damage, counter-attack, end of turn,
 //! victory/defeat check.
 
+const ut = @import("../core.zig").ui_text;
 const std = @import("std");
 const fields = @import("../fields.zig");
 const weapons = @import("weapons.zig");
@@ -21,22 +22,20 @@ const grid = @import("../battle.zig").grid;
 const Fighter = @import("../battle.zig").fighter.Fighter;
 const Side = @import("../battle.zig").fighter.Side;
 const roster = @import("roster.zig");
+const events = @import("events.zig");
+const hooks = @import("../state.zig").hooks;
+const modules = @import("../core.zig").modules;
+const script_value = @import("../script.zig").value;
 
 pub fn enemyTurnOver(self: *Battle, w: *World) !void {
-    _ = self;
     const l = w.level orelse return;
     _ = try w.rt.callIfExists(l, "CombatEnemiesAppear", &.{});
-    // Mid-battle dialogs are hard-coded in the exe: levelMode 7 after the first enemy
-    // turn (McFadden's death), 10 after the second (helicopter in the museum).
-    const mode = l.getInt("levelMode");
-    const turn_no = l.getInt("turnNo");
-    const dlg: ?[2][]const u8 = if (mode == 7 and turn_no == 1)
-        .{ "04__city_mfd", "04__city_mfd.dlg" }
-    else if (mode == 10 and turn_no == 2)
-        .{ "03__museum_chopper_2", "03__museum_chopper2.dlg" }
-    else
-        null;
-    if (dlg) |d| try scenes.startDialog(w, d[0], d[1]);
+    _ = try hooks.on(w, l, "Battle.OnEnemiesAppear", &.{});
+    // OpenGorky: the battle's OnEnemyTurnOver(turn); the mid-battle dialog after it.
+    if (l.implementsC("OnEnemyTurnOver")) try events.tell(w, l, "Battle.OnEnemyTurnOver", .{script_value.Value{ .int = self.turn }});
+    // Mid-battle dialogs (the exe hard-codes them by levelMode: rules MidDialog).
+    const dlg = modules.midDialog(l.getInt("mode"), l.getInt("turn"));
+    if (dlg) |d| try scenes.startDialog(w, d.dialog, if (d.dialog_file.len > 0) d.dialog_file else d.dialog);
 }
 
 /// Popups over fighters (TextEffect 0x4c8830) are world objects ([0x63bcb8],
@@ -45,27 +44,53 @@ pub fn tickPopups(self: *Battle) void {
     popup_mod.tickAll(&self.popups);
 }
 
-/// Victory when all enemies are dead; defeat when any hero dies (all of them with `lenient_loss`).
+/// The battle's end by the core module Battle (exe: victory when all enemies are dead;
+/// defeat when any hero dies, all of them with `lenient_loss`).
 pub fn checkEnd(self: *Battle) bool {
-    var heroes: usize = 0;
-    var dead_heroes: usize = 0;
-    var enemies: usize = 0;
+    var c: modules.Count = .{ .heroes = 0, .dead_heroes = 0, .enemies = 0, .lenient = self.lenient_loss };
     for (self.fighters.items) |f| switch (f.side) {
         .hero => if (f.alive()) {
-            if (f.controllable()) heroes += 1;
+            if (f.controllable()) c.heroes += 1;
         } else {
-            dead_heroes += 1;
+            c.dead_heroes += 1;
         },
         .enemy => if (f.alive()) {
-            enemies += 1;
+            c.enemies += 1;
         },
-        .neutral => {},
+        .neutral, .civilian => {},
     };
-    // Any hero's death ends the game (0x490620 → GUI_GameOver); in the playthrough
-    // (`lenient_loss`) only the whole party's. Defeat is checked before victory (bomb).
-    const lost = if (self.lenient_loss) heroes == 0 else dead_heroes > 0 or heroes == 0;
-    if (lost) self.phase = .lost else if (enemies == 0) self.phase = .won;
+    switch (modules.battleOutcome(c)) {
+        .lost => self.phase = .lost,
+        .won => self.phase = .won,
+        .none => {},
+    }
     return self.phase == .won or self.phase == .lost;
+}
+
+/// `checkEnd`, and on the end: the heroes unlocked after a win, OnBattleEnd (OpenGorky).
+/// OpenGorky: a script's BattleWin/BattleLose first; then the battle's Outcome(): "won" or
+/// "lost" ends it so, another answer keeps it going, nil leaves it to `checkEnd`.
+pub fn ended(self: *Battle, w: *World) !bool {
+    if (self.declared) |won| {
+        self.phase = if (won) .won else .lost;
+        battle.note(self, "  Declared: {t}", .{self.phase});
+        return over(self, w);
+    }
+    const said = if (w.level) |l| (if (l.implementsC("Outcome")) try hooks.on(w, l, "Battle.Outcome", &.{}) else null) else null;
+    if (said) |v| {
+        const s = if (v == .string) v.string else "";
+        if (std.mem.eql(u8, s, "won")) self.phase = .won else if (std.mem.eql(u8, s, "lost")) self.phase = .lost else return false;
+        battle.note(self, "  Outcome: {s}", .{s});
+    } else if (!checkEnd(self)) return false;
+    return over(self, w);
+}
+
+fn over(self: *Battle, w: *World) !bool {
+    if (self.phase == .won) roster.unlockAll(w);
+    // The battle's roles go (Enemy; Hero of an ally outside the party) before OnBattleEnd.
+    try @import("../world.zig").party.syncRolesIn(w, self);
+    try hooks.battleEnd(w, self.phase == .won);
+    return true;
 }
 
 /// Before the player turn, heroes' states one by one (0x498650 step 5), then the turn.
@@ -78,10 +103,11 @@ fn startPlayerPhase(self: *Battle, w: *World) !void {
     self.phase = .player;
     self.cam_pair = null;
     self.enemy_period = false;
+    try events.turnStart(self, w, .hero);
     for (self.fighters.items) |*f| {
         resetTurn(f);
     }
-    if (w.level) |l| l.setInt("turnNo", self.turn);
+    if (w.level) |l| l.setInt("turn", self.turn);
     if (self.selected == null or !self.fighters.items[self.selected.?].alive() or !self.fighters.items[self.selected.?].controllable()) {
         // The hero selected in the UI first, else the first one alive.
         self.selected = null;
@@ -95,6 +121,7 @@ fn startPlayerPhase(self: *Battle, w: *World) !void {
     // (0x45b2be → 0x454e40) and the camera flies to it (0x45b2c3 → 0x4c9100),
     // rather than staying on the last enemy.
     if (self.selected) |i| control.selectFx(self, w, i, false);
+    try hooks.turnStart(w, "hero", self.turn);
     if (self.skip_turn) {
         self.skip_turn = false;
         try endTurn(self, w);
@@ -130,7 +157,7 @@ pub fn stepSeq(self: *Battle, w: *World) !void {
         const f = &self.fighters.items[i];
         // A burning barrel explodes at the heroes' turn start (0x4903d0).
         const barrel = s.side == .hero and f.side == .neutral and f.explosive;
-        if ((f.side != s.side and !barrel) or !f.alive()) continue;
+        if ((!f.actsOn(s.side) and !barrel) or !f.alive()) continue;
         if (try sideStartOne(self, w, f, @intCast(i))) {
             s.wait = 60;
             return;
@@ -138,15 +165,13 @@ pub fn stepSeq(self: *Battle, w: *World) !void {
     }
     const side = s.side;
     self.seq = null;
-    if (checkEnd(self)) {
-        if (self.phase == .won) roster.unlockAll(w);
-        return;
-    }
+    if (try ended(self, w)) return;
     if (side == .hero) try startPlayerPhase(self, w);
 }
 
 /// Fighter turn start (0x48f6f0, 0x4903d0 with 1): defence ends, fire and gas
-/// burn 15/10/5 for the remaining 3/2/1 turns, effect 8 deals 20; true if damaged.
+/// burn by the turns left, effect 8 every turn (rules StateEffect: the exe's 15/10/5 for
+/// 3/2/1, 20); true if damaged.
 fn sideStartOne(self: *Battle, w: *World, f: *Fighter, i: u16) !bool {
     {
         f.attracted = true; // 0x48f72c
@@ -160,8 +185,9 @@ fn sideStartOne(self: *Battle, w: *World, f: *Fighter, i: u16) !bool {
         // +0x248dc, gas +0x248e4, 5/10/15 by counter; Invisible's poison +0x248e8, 20),
         // each with its own popup; never on the dead (0x490e83).
         var hits: [3]i32 = undefined;
-        for ([_]i32{ f.burning, f.gassed }, 0..) |turns, k| hits[k] = hazardDamage(turns);
-        hits[2] = if (f.bitten) 20 else 0;
+        hits[0] = modules.stateEffect(.burn).damageAt(f.burning);
+        hits[1] = modules.stateEffect(.gas).damageAt(f.gassed);
+        hits[2] = if (f.bitten) modules.stateEffect(.bite).damageAt(0) else 0;
         var hurt_any = false;
         for (hits) |dmg| if (dmg > 0 and f.alive()) {
             battle.note(self, "turn {d}: {s} burning/poisoned: {d}", .{ self.turn, f.obj.name, dmg });
@@ -179,28 +205,21 @@ fn sideStartOne(self: *Battle, w: *World, f: *Fighter, i: u16) !bool {
 pub fn resetTurn(f: *Fighter) void {
     f.used = 0;
     f.acted = false;
-    const can_walk = !fields.moveLock(f.obj) and !f.disabled();
-    const can_strike = f.obj.getInt("attackLock") == 0 and !f.disabled();
+    // A hero's second strike (double_turn, strike.startAttack) is per turn; the AI's
+    // second move ends in its own turn (ai_turn.stepAI).
+    if (f.side == .hero) f.second = false;
+    const can_walk = f.canWalk();
+    const can_strike = f.obj.getInt("attack_locked") == 0 and !f.disabled();
     if (!can_walk and !can_strike) {
-        f.used = @floatFromInt(fields.walkRange(f.obj));
+        f.used = @floatFromInt(f.walkRange());
         f.acted = true;
     }
-}
-
-/// Fire or gas damage by turns left (0x4903d0): 3/2/1 → 15/10/5.
-fn hazardDamage(turns: i32) i32 {
-    return switch (turns) {
-        3 => 15,
-        2 => 10,
-        1 => 5,
-        else => 0,
-    };
 }
 
 /// Side turn end (0x4903d0 with 2): state counters decrease.
 pub fn sideTurnEnd(self: *Battle, w: *World, side: Side) void {
     for (self.fighters.items) |*f| {
-        if (f.side != side or !f.alive()) continue;
+        if (!f.actsOn(side) or !f.alive()) continue;
         f.soaked = @max(0, f.soaked - 1);
         if (f.asleep > 0) {
             f.asleep -= 1;
@@ -231,8 +250,8 @@ pub fn startCounter(self: *Battle, w: *World) bool {
         self.selected = @intCast(i);
         w.selected_hero = f.obj.name;
         // "Counterattack" over the hero is an ordinary TextEffect popup (0x45be2b).
-        battle.popup(self, f.*, w.stringOr(516, "Counterattack"), .counter) catch {};
-        w.out.sound(w.gpa, "selecthero", null);
+        battle.popup(self, f.*, w.stringOr(ut.id(.counterattack), "Counterattack"), .counter) catch {};
+        w.out.sound(w.gpa, modules.ui().sounds.select_hero, null);
         const a = world_mod.actorOf(f.*.obj);
         a.play(a.resolve("defend_end"), false, true);
         // 0x45be60..0x45be92: after "defend_end" the battle stance by weapon (0x427c70),
@@ -271,14 +290,6 @@ pub fn autoCounter(self: *Battle, w: *World) !void {
     if (best) |aim| try strike.startAttack(self, w, me, f.weapon.?, aim) else self.phase = .enemy;
 }
 
-/// Right click in battle (0x4563e0): during a counterattack decline it (0x452a00); in the
-/// facing choice exit it (0x452edb); otherwise toggle aim mode.
-pub fn rightClick(self: *Battle, w: *World) !void {
-    if (self.phase == .counter) return endTurn(self, w);
-    if (self.facing_mode) return control.cancelFacing(self);
-    w.mouse.aim = !w.mouse.aim;
-}
-
 /// Player turn end (EndTurnGlobal / button): the enemies act. During a counter-
 /// attack, decline it.
 pub fn endTurn(self: *Battle, w: *World) !void {
@@ -294,6 +305,8 @@ pub fn endTurn(self: *Battle, w: *World) !void {
     }
     if (self.phase != .player or self.pending != .none) return;
     sideTurnEnd(self, w, .hero);
+    try events.turnEnd(self, w, .hero);
+    try hooks.turnEnd(w, "hero", self.turn);
     // Heroes' turn end (0x454d97 → 0x48f790 for the party): rage −1.
     for (self.fighters.items) |*f| if (f.side == .hero) f.spendRage();
     // Enemy turn start (0x49844c): every weapon's recharge −1.
@@ -305,7 +318,7 @@ pub fn endTurn(self: *Battle, w: *World) !void {
     // then the victory check (0x4983d0): are enemies left (two Garcias).
     if (self.invisible_leaving) {
         self.invisible_leaving = false;
-        if (self.invisibleMfd()) |i| {
+        if (self.leaver()) |i| {
             const f = &self.fighters.items[i];
             f.dead = true;
             World.nativeOf(f.obj).deleted = true;
@@ -322,15 +335,11 @@ pub fn endTurn(self: *Battle, w: *World) !void {
     self.phase = .enemy;
     self.enemy_cursor = 0;
     self.ai_stage = .plan;
+    try events.turnStart(self, w, .enemy);
     for (self.fighters.items) |*f| {
         resetTurn(f);
     }
     @memset(self.reach_left, -1);
     self.target_len = 0;
-}
-
-// ---------------------------------------------------------------- tests
-
-test "fire and gas damage by turns left: 15/10/5 (0x4903d0)" {
-    try std.testing.expectEqual([5]i32{ 15, 10, 5, 0, 0 }, [5]i32{ hazardDamage(3), hazardDamage(2), hazardDamage(1), hazardDamage(0), hazardDamage(4) });
+    try hooks.turnStart(w, "enemy", self.turn);
 }

@@ -4,9 +4,8 @@ const std = @import("std");
 const og = @import("opengorky");
 const c = @import("sdl");
 const gfx = @import("../media/gfx.zig");
-const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const archive = og.formats.archive;
+const Assets = og.loaders.assets.Stack;
 
 /// "3D font" glyph (0x47ad40): a rectangle on a 256×256 page.
 const Glyph = struct { x: f32, y: f32, w: f32, h: f32, page: u1 };
@@ -59,12 +58,11 @@ pub const MenuFont = struct {
     }
 };
 
-/// Texture `gfx_3d\textures\<name>`.
-pub fn loadTex(io: Io, gpa: Allocator, r: *c.SDL_Renderer, other: *archive.Archive, name: []const u8) ?*c.SDL_Texture {
+/// Texture `textures/<name>`.
+pub fn loadTex(gpa: Allocator, r: *c.SDL_Renderer, as: *Assets, name: []const u8) ?*c.SDL_Texture {
     var buf: [96]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "gfx_3d\\textures\\{s}", .{name}) catch return null;
-    const e = other.find(path) orelse return null;
-    const data = other.readAlloc(io, gpa, e) catch return null;
+    const path = std.fmt.bufPrint(&buf, "textures/{s}", .{name}) catch return null;
+    const data = as.read(gpa, path) catch return null;
     defer gpa.free(data);
     var img = og.formats.tex3df.decode(gpa, data) catch return null;
     defer img.deinit(gpa);
@@ -73,20 +71,19 @@ pub fn loadTex(io: Io, gpa: Allocator, r: *c.SDL_Renderer, other: *archive.Archi
 
 /// Two-page font (0x47ad40): `.fnt` entries of 16 bytes (x, y, w, h); the second
 /// page replaces chars with w > 0. Space is half of "w" plus the spacing.
-pub fn loadFont(io: Io, gpa: Allocator, r: *c.SDL_Renderer, other: *archive.Archive, page1: []const u8, page2: []const u8) MenuFont {
+pub fn loadFont(gpa: Allocator, r: *c.SDL_Renderer, as: *Assets, page1: []const u8, page2: []const u8) MenuFont {
     var f: MenuFont = .{};
     for ([2][]const u8{ page1, page2 }, 0..) |name, k| {
         var buf: [64]u8 = undefined;
-        const fnt = std.fmt.bufPrint(&buf, "{s}.fnt", .{name}) catch continue;
-        const e = other.find(fnt) orelse continue;
-        const data = other.readAlloc(io, gpa, e) catch continue;
+        const fnt = std.fmt.bufPrint(&buf, "fonts/{s}.fnt", .{name}) catch continue;
+        const data = as.read(gpa, fnt) catch continue;
         defer gpa.free(data);
         const recs = og.formats.font.parseTex(data) catch continue;
         for (recs, &f.glyphs) |rec, *g| if (rec) |x| {
             g.* = .{ .x = @floatFromInt(x.x), .y = @floatFromInt(x.y), .w = @floatFromInt(x.w), .h = @floatFromInt(x.h), .page = @intCast(k) };
         };
         var tb: [64]u8 = undefined;
-        f.pages[k] = if (k == 1 and std.mem.eql(u8, page1, page2)) f.pages[0] else loadTex(io, gpa, r, other, std.fmt.bufPrint(&tb, "{s}.3df", .{name}) catch continue);
+        f.pages[k] = if (k == 1 and std.mem.eql(u8, page1, page2)) f.pages[0] else loadTex(gpa, r, as, std.fmt.bufPrint(&tb, "{s}.3df", .{name}) catch continue);
     }
     if (f.glyphs['w']) |g| f.space = 0.5 * g.w + MenuFont.spacing;
     return f;

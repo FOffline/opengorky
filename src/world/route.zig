@@ -5,7 +5,7 @@
 const std = @import("std");
 const value = @import("../script.zig").value;
 const num = @import("../num.zig");
-const level_files = @import("../formats.zig").level_files;
+const level_files = @import("../core.zig").map;
 const actor_mod = @import("../actor.zig");
 const fields = @import("../fields.zig");
 const nav = @import("nav.zig");
@@ -16,8 +16,8 @@ const World = world_mod.World;
 
 /// The level's `.ap` links (start sx, sy → end dx, dy) in file order, for the route search.
 pub fn levelPortals(self: *const World, gpa: std.mem.Allocator) ![]nav.Portal {
-    const out = try gpa.alloc(nav.Portal, self.paths.len);
-    for (self.paths, out) |pa, *p| p.* = .{
+    const out = try gpa.alloc(nav.Portal, self.map.paths.len);
+    for (self.map.paths, out) |pa, *p| p.* = .{
         .a = .{ value.floatToInt(pa.link[0]), value.floatToInt(pa.link[1]) },
         .b = .{ value.floatToInt(pa.link[2]), value.floatToInt(pa.link[3]) },
     };
@@ -74,7 +74,7 @@ pub fn walkTo(self: *World, o: *Object, target_bg: [2]f32) !void {
                 // point; forward: link end cell). Projecting the world point at z = 0
                 // pushed it up by the floor height (museum −171) and the hero walked
                 // back over blocked cells.
-                const pa = self.paths[pt.index];
+                const pa = self.map.paths[pt.index];
                 prev = if (pt.reverse and pa.points.len > 0)
                     .{ pa.points[0][0], pa.points[0][1] }
                 else
@@ -108,7 +108,7 @@ pub fn walkTo(self: *World, o: *Object, target_bg: [2]f32) !void {
 /// Numbering matches the port ladder and plank scripts (`drabinka.pth`, `deska.pth`); the
 /// city ladder (`04_city/drabinka.pth`) is off by one — apparently a data bug.
 fn addPathWaypoints(self: *World, a: *actor_mod.Actor, m: level_files.WalkMap, index: u16, reverse: bool) !void {
-    const pa = self.paths[index];
+    const pa = self.map.paths[index];
     const cs = level_files.WalkMap.cell_size;
     // The exe stores 16 points: x,y +0x20, angle +0xa0, int +0xe0 (0x4ab306…0x4ab31a, no
     // length check); the game uses at most 13. Plus the end cell.

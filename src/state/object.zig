@@ -4,6 +4,7 @@
 const std = @import("std");
 const actor_mod = @import("../actor.zig");
 const fight_obj = @import("../battle.zig").obj;
+const Object = @import("../script.zig").object.Object;
 
 /// Native part of a location object by file extension.
 pub fn nativeFor(ext: []const u8) Native {
@@ -42,7 +43,7 @@ pub const Kind = enum {
     }
 };
 
-/// Weapon skill (+0x24644, 12-byte records): weapon nameID, level, use count (0x48fea0).
+/// Weapon skill (+0x24644, 12-byte records): weapon classic_id, level, use count (0x48fea0).
 pub const Skill = struct { id: i32, level: i32, count: i32 = 0 };
 
 /// Native part of an object (what the exe keeps in its C++ class).
@@ -68,6 +69,9 @@ pub const Native = struct {
     fighter: bool = false,
     /// Made from a script file of the location's archive (not by a script: Item_New…).
     from_file: bool = false,
+    /// An area's party heroes inside its polygon at the last check (OpenGorky: its
+    /// OnEnter/OnLeave, game/life.zig areaEvents; empty until one of its components has them).
+    inside: [12]?*Object = @splat(null),
     /// Came from the party when the location was created (+0x74, global-list object);
     /// post_init is not called (0x4319c4…0x4319cf).
     from_party: bool = false,
@@ -84,11 +88,14 @@ pub const Native = struct {
     growth: Growth = .{},
     /// Hero quick-list scroll (+0x32c4).
     short_scroll: usize = 0,
+    /// The interface's questions about this actor, answered by its traits at the end of
+    /// each tick (game.zig uiFlags): the viewer runs no script, it reads these.
+    ui: struct { can_push: bool = true, can_select: bool = true } = .{},
 };
 
 /// Hero development, written by level-up and skill code.
 const Growth = struct {
-    /// Weapon skills (FighterSetWeaponSkillLevel): weapon nameID → level.
+    /// Weapon skills (FighterSetWeaponSkillLevel): weapon classic_id → level.
     skills: std.ArrayList(Skill) = .empty,
     /// Unspent level-up points (5 per level, 0x48fa30).
     stat_points: i32 = 0,

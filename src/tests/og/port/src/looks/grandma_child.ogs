@@ -1,0 +1,22 @@
+module looks {
+    look grandma_child {
+        mesh = "wnuczek";
+        portrait = "wnuczek";
+        turn_speed = 0.2;
+        walk = [Speed(anim = "walk", speed = 3.6)];
+        idles = [
+            Idle(state = 0, anim = "idle1", weight = 100),
+            Idle(state = 0, anim = "idle2", weight = 100),
+            Idle(state = 0, anim = "idle3", weight = 100),
+            Idle(state = 0, anim = "amb1", weight = 30),
+            Idle(state = 0, anim = "amb3", weight = 30),
+        ];
+        slots = [
+            Slot(state = 0, name = "walk", anim = "walk"),
+            Slot(state = 0, name = "short_attack", anim = "atak1"),
+            Slot(state = 0, name = "long_attack", anim = "atak2"),
+            Slot(state = 0, name = "hit", anim = "hit"),
+            Slot(state = 0, name = "death", anim = "die"),
+        ];
+    }
+}

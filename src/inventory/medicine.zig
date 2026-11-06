@@ -1,4 +1,4 @@
-//! Medicine (0x48ff50): effects by nameID, MacFadden's bonus, out-of-battle heal.
+//! Medicine (0x48ff50): effects by classic_id, MacFadden's bonus, out-of-battle heal.
 
 const std = @import("std");
 const fields = @import("../fields.zig");
@@ -8,27 +8,27 @@ const Object = @import("../script.zig").object.Object;
 const Rand = @import("../crt_rand.zig").Rand;
 const popup_mod = @import("../popup.zig");
 const item_mod = @import("item.zig");
+const rules = @import("../rules.zig");
+const entity = @import("../core.zig").entity;
+const hooks = @import("../state.zig").hooks;
 
-/// Medicine effect (0x48ff50) by nameID: 1043 Drugs = rage + heal, 83 Painkiller = calm +
-/// heal, 1044 = cure gas only, 1047 = wake only, others heal. Unknown drugs (1049) act as
-/// one of {1045, 1047, 1044, 1043} (0x48ff76: rand & 3).
-const Medicine = enum { heal, rage, calm, ungas, wake };
+/// Medicine effect (0x48ff50) by classic_id (rules items.ss).
+const Medicine = rules.MedicineKind;
 
-fn medicineKind(name_id: i32, rand: *Rand) Medicine {
-    const id = if (name_id == 1049) ([_]i32{ 1045, 1047, 1044, 1043 })[rand.below(4)] else name_id;
-    return switch (id) {
-        1043 => .rage,
-        83 => .calm,
-        1044 => .ungas,
-        1047 => .wake,
-        else => .heal,
-    };
+/// A `random` row picks with rand.below(len) (the exe: rand & 3 of 4); its pick's own
+/// kind, one level only.
+fn medicineKind(item: rules.Who, rand: *Rand) Medicine {
+    const m = entity.itemOf(item).medicine;
+    if (m.random.len == 0) return m.kind;
+    const k = rand.below(@intCast(m.random.len));
+    // An item archetype in that place (an OpenGorky project's): the core's number of it.
+    const id = if (k < m.random_class.len and m.random_class[k].len > 0) entity.idOf(m.random_class[k]) orelse 0 else m.random[k];
+    return entity.itemOf(.{ .id = id }).medicine.kind;
 }
 
-/// Heal bonus (0x48ffee): when MacFadden (nameID 24) heals, ⌊hp × 0.15⌋ (0x50a218).
-fn healBonus(healer_id: i32, hp: i32) i32 {
-    if (healer_id != 24) return 0;
-    return @intFromFloat(@floor(@as(f64, @floatFromInt(hp)) * 0.15));
+/// Heal bonus (0x48ffee): ⌊hp × pct / 100⌋ (hp > 0 here).
+fn healBonus(healer: rules.Who, hp: i32) i32 {
+    return @divFloor(hp * entity.heroOf(healer).heal_pct, 100);
 }
 
 /// Plain heal: item `hp`, capped at `max_hp`; consumes the item. False if not medicine.
@@ -42,19 +42,19 @@ pub fn use(hero: *Object, item: *Object) bool {
 }
 
 /// Medicine `item` used by `healer` on `target` (0x48ff50). Item `hp` 0 only plays the
-/// sound (gas antidote, 0x48ff66); otherwise the effect by nameID (`medicineKind`)
+/// sound (gas antidote, 0x48ff66); otherwise the effect by classic_id (`medicineKind`)
 /// and, for rage, Painkiller and plain heals, hp + MacFadden's bonus (0x48ffee) capped at
 /// max_hp (0x4900b5). health2 plays only for males (`sex` 0, +0x24580; 0x4900cb). Battle
 /// states (rage, gas, sleep) are handled by combat. The item is not consumed.
 pub fn medicine(self: *World, healer: ?*Object, target: *Object, item: *Object) !?Healed {
-    defer if (target.getInt("sex") == 0)
-        self.out.sound(self.gpa, "health2", self.screenPos(target));
+    defer if (target.getInt("gender") == 0)
+        self.out.sound(self.gpa, @import("../core.zig").modules.ui().sounds.heal, self.screenPos(target));
     const hp = fields.hp(item);
     if (hp == 0) return null;
-    var h: Healed = .{ .kind = medicineKind(fields.nameId(item), self.crt()) };
+    var h: Healed = .{ .kind = medicineKind(rules.who(item), self.crt()) };
     if (h.kind == .ungas or h.kind == .wake or hp < 0) return h;
     h.hp = hp;
-    h.bonus = healBonus(if (healer) |o| fields.nameId(o) else -1, hp);
+    h.bonus = healBonus(if (healer) |o| rules.who(o) else .{ .id = -1 }, hp);
     fields.setHp(target, @min(fields.maxHp(target), fields.hp(target) + hp + h.bonus));
     return h;
 }
@@ -68,15 +68,17 @@ pub fn healText(buf: []u8, h: Healed) []const u8 {
 /// `target` by clicking the hero or his portrait. Runs 0x48ff50 (`medicine`) with a popup
 /// if it healed; then the item leaves the hand (0x42b2d0) and is destroyed (+0x60) even
 /// without effect, and the mode closes (0x450cc4 → 0x450e80). No animation. Rage, sleep
-/// and gas need a battle fighter (recreated per battle, 0x48e0a0).
-pub fn healWith(self: *World, hero: *Object, target: *Object, item: *Object) !void {
-    if (item_mod.typeOf(item) != .medicine) return;
+/// and gas need a battle fighter (recreated per battle, 0x48e0a0). True: used (the
+/// "Use … on …" mode closes).
+pub fn healWith(self: *World, hero: *Object, target: *Object, item: *Object) !bool {
+    if (item_mod.typeOf(item) != .medicine) return false;
+    if (try hooks.itemUse(self, hero, item, target)) return true;
     if (try medicine(self, hero, target, item)) |h| if (h.hp > 0) {
         var buf: [24]u8 = undefined;
         try self.popups.append(self.gpa, popup_mod.Popup.make(fields.pos(target), healText(&buf, h), .heal));
     };
     item_mod.consume(item);
-    self.mouse.use = null;
+    return true;
 }
 
 /// Medicine result (0x48ff50): effect, item `hp` and MacFadden's bonus (0 = no heal).
@@ -85,18 +87,20 @@ const Healed = struct { kind: Medicine, hp: i32 = 0, bonus: i32 = 0 };
 test "medicine kinds and MacFadden's bonus follow 0x48ff50" {
     var rr: Rand = .{};
     const r = &rr;
-    try std.testing.expectEqual(Medicine.rage, medicineKind(1043, r));
-    try std.testing.expectEqual(Medicine.calm, medicineKind(83, r));
-    try std.testing.expectEqual(Medicine.ungas, medicineKind(1044, r));
-    try std.testing.expectEqual(Medicine.wake, medicineKind(1047, r));
-    try std.testing.expectEqual(Medicine.heal, medicineKind(1045, r));
-    try std.testing.expectEqual(Medicine.heal, medicineKind(71, r));
+    try std.testing.expectEqual(Medicine.rage, medicineKind(.{ .id = 1043 }, r));
+    try std.testing.expectEqual(Medicine.calm, medicineKind(.{ .id = 83 }, r));
+    try std.testing.expectEqual(Medicine.ungas, medicineKind(.{ .id = 1044 }, r));
+    try std.testing.expectEqual(Medicine.wake, medicineKind(.{ .id = 1047 }, r));
+    try std.testing.expectEqual(Medicine.heal, medicineKind(.{ .id = 1045 }, r));
+    try std.testing.expectEqual(Medicine.heal, medicineKind(.{ .id = 71 }, r));
     // Unknown drugs: exactly four outcomes, all seen.
     var seen: [5]bool = @splat(false);
-    for (0..64) |_| seen[@backingInt(medicineKind(1049, r))] = true;
+    for (0..64) |_| seen[@backingInt(medicineKind(.{ .id = 1049 }, r))] = true;
     try std.testing.expect(seen[@backingInt(Medicine.heal)] and seen[@backingInt(Medicine.rage)] and
         seen[@backingInt(Medicine.ungas)] and seen[@backingInt(Medicine.wake)] and !seen[@backingInt(Medicine.calm)]);
-    try std.testing.expectEqual(@as(i32, 6), healBonus(24, 40));
-    try std.testing.expectEqual(@as(i32, 15), healBonus(24, 100));
-    try std.testing.expectEqual(@as(i32, 0), healBonus(1, 100));
+    try std.testing.expectEqual(@as(i32, 6), healBonus(.{ .id = 24 }, 40));
+    try std.testing.expectEqual(@as(i32, 15), healBonus(.{ .id = 24 }, 100));
+    // The integer form is the exe's ⌊hp × 0.15⌋ (a double) for every hp.
+    for (1..200_000) |hp| try std.testing.expectEqual(@as(i32, @intFromFloat(@floor(@as(f64, @floatFromInt(hp)) * 0.15))), healBonus(.{ .id = 24 }, @intCast(hp)));
+    try std.testing.expectEqual(@as(i32, 0), healBonus(.{ .id = 1 }, 100));
 }

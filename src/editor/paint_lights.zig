@@ -6,18 +6,15 @@ const screen = @import("paint.zig").screen;
 const Paint = @import("paint.zig").Paint;
 const Allocator = std.mem.Allocator;
 const c = @import("sdl");
-const ui = @import("ui");
 const og = @import("opengorky");
 const lf = og.formats.level_files;
-const clay = @import("clay.zig");
-const font_mod = @import("font.zig");
+const gui = @import("widgets.zig");
+const lay = @import("layout.zig");
+const ink = @import("render.zig").ink;
 const tx = @import("text.zig");
-const main = @import("app.zig");
-const App = main.App;
-const theme = main.theme;
-const txt = main.txt;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
 const Doc = @import("level.zig").Doc;
-const paint = @import("paint.zig");
 
 /// The level's `.lts` (Store index), if it has one.
 fn lightsFile(app: *App, d: *const Doc) ?usize {
@@ -48,9 +45,9 @@ pub fn dropLight(app: *App, i: usize) void {
 fn putLights(app: *App, d: *const Doc, l: lf.Lights) void {
     const f = lightsFile(app, d) orelse return;
     const t = lf.encodeLights(app.gpa, l) catch return;
-    app.store.replaceLabeled(f, t, tx.alloc(app.frame.allocator(), tx.lp_step_light, .{d.name})) catch |err| {
+    app.store.replaceLabeled(f, t, tx.both(app.frame.allocator(), tx.lp_step_light, .{d.name})) catch |err| {
         app.gpa.free(t);
-        app.setStatus(tx.st_set_failed, .{err});
+        app.failed(err);
     };
 }
 
@@ -80,12 +77,12 @@ pub fn drawLights(app: *App, p: *const Paint, d: *const Doc, rect: c.SDL_FRect) 
             _ = c.SDL_RenderLine(app.r, prev[0], prev[1], nx[0], nx[1]);
             prev = nx;
         }
-        _ = c.SDL_SetRenderDrawColor(app.r, 0, 0, 0, 220);
+        ink(app.r, lay.canvas.light_edge);
         _ = c.SDL_RenderFillRect(app.r, &.{ .x = s[0] - 7, .y = s[1] - 7, .w = 14, .h = 14 });
         _ = c.SDL_SetRenderDrawColor(app.r, rgb[0], rgb[1], rgb[2], 255);
         _ = c.SDL_RenderFillRect(app.r, &.{ .x = s[0] - 5, .y = s[1] - 5, .w = 10, .h = 10 });
         if (sel) {
-            _ = c.SDL_SetRenderDrawColor(app.r, 255, 255, 255, 255);
+            ink(app.r, lay.canvas.white);
             _ = c.SDL_RenderRect(app.r, &.{ .x = s[0] - 9, .y = s[1] - 9, .w = 18, .h = 18 });
         }
     }
@@ -94,7 +91,7 @@ pub fn drawLights(app: *App, p: *const Paint, d: *const Doc, rect: c.SDL_FRect) 
 /// A press of the light tool at background point `b`: a lamp there picked (and dragged
 /// from now), else a new white one over the floor under it.
 pub fn lightPress(app: *App, p: *Paint, d: *Doc, b: [2]f32) void {
-    var l = lights(app, d) orelse return app.setStatus(tx.st_set_failed, .{error.NoLights});
+    var l = lights(app, d) orelse return app.failed(error.NoLights);
     p.light_drag = null;
     for (0..l.omni.len) |k| {
         const i = l.omni.len - 1 - k; // the one drawn on top first
@@ -138,65 +135,44 @@ pub fn lightRelease(app: *App, p: *Paint) void {
     putLights(app, d, l);
 }
 
-/// A `-`/`+` pair for a value; returns the step taken (0: none).
-pub fn stepper(app: *App, a: Allocator, id: []const u8, label: []const u8, cur: f32, step: f32) f32 {
-    clay.open(.{ .layout = .{ .childGap = 6, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-    defer clay.close();
-    var out: f32 = 0;
-    if (main.button(app, std.fmt.allocPrint(a, "{s}_m", .{id}) catch id, "-", false)) out = -step;
-    if (main.button(app, std.fmt.allocPrint(a, "{s}_p", .{id}) catch id, "+", false)) out = step;
-    // The label clicked: a field for the number (the step taken is new − current).
-    const h = std.hash.Wyhash.hash(0, id);
-    const fid = clay.id(std.fmt.allocPrint(a, "{s}_n", .{id}) catch id);
-    if (app.num_edit) |*e| if (e.id == h) {
-        app.num_seen = true;
-        clay.open(.{ .id = fid, .layout = .{ .sizing = .{ .width = clay.fixed(110), .height = clay.fixed(24) }, .padding = .{ .left = 6, .right = 6 }, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } }, .backgroundColor = theme.field, .cornerRadius = clay.radius(theme.radius), .border = .{ .color = theme.accent, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } } });
-        const over = clay.hovered();
-        txt(std.fmt.allocPrint(a, "{s}|", .{e.text()}) catch "", 13, theme.text, font_mod.regular);
-        clay.close();
-        if (e.done or (app.clicked and !over)) {
-            const v = std.fmt.parseFloat(f32, e.text()) catch null;
-            app.num_edit = null;
-            if (v) |x| if (std.math.isFinite(x)) return std.math.clamp(x, -1e5, 1e5) - cur;
-        }
-        return out;
-    };
-    if (main.clickable(app, .{ .id = fid, .layout = .{ .padding = .{ .left = 4, .right = 4, .top = 2, .bottom = 2 } }, .backgroundColor = theme.panel, .cornerRadius = clay.radius(theme.radius) }, false)) {
-        var e: main.NumEdit = .{ .id = h };
-        e.len = if (std.fmt.bufPrint(&e.buf, "{d}", .{cur})) |t| t.len else |_| 0;
-        app.num_edit = e;
-        app.num_seen = true;
-    }
-    txt(label, 13, theme.text, font_mod.regular);
-    clay.close();
-    return out;
-}
+const stepper = gui.stepper;
 
-/// The light tool's panel: the level's ambient, sun and shadow; the picked lamp's
+/// The light tool's panel: the level's ambient and sun (R, G, B), shadow light and
+/// shadow (Classic too: the exe reads them all); the picked lamp's
 /// colour, range, height, delete.
 pub fn lightsPanel(app: *App, a: Allocator, p: *Paint) void {
-    clay.text(tx.get(tx.lp_lights_hint), .{ .textColor = theme.dim, .fontSize = 12, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
+    gui.note(tx.get(tx.lp_lights_hint));
     const d = app.doc orelse return;
-    var l = lights(app, d) orelse {
-        clay.text(tx.get(tx.lp_lights_none), .{ .textColor = theme.warn, .fontSize = 12, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
-        return;
-    };
+    var l = lights(app, d) orelse return gui.warning(tx.get(tx.lp_lights_none));
     var touched = false;
     const clamp01 = struct {
         fn f(v: f32) f32 {
             return std.math.clamp(v, 0, 1);
         }
     }.f;
-    // The game's levels have grey ambient and sun: one value for the three channels.
-    const amb = stepper(app, a, "lp_amb", tx.alloc(a, tx.lp_ambient, .{l.ambient[0]}), l.ambient[0], 0.05);
-    if (amb != 0) {
-        for (&l.ambient) |*v| v.* = clamp01(v.* + amb);
-        touched = true;
+    // Every field of the .lts the exe reads (0x47f070): ambient and sun by channel, the
+    // shadow light's point (shadows fall away from it), the shadow's strength.
+    const rgb = [_][]const u8{ "R", "G", "B" };
+    for (rgb, 0..) |ch, k| {
+        const v = stepper(app, a, std.fmt.allocPrint(a, "lp_amb{d}", .{k}) catch "lp_amb", tx.alloc(a, tx.lp_ambient, .{ ch, l.ambient[k] }), l.ambient[k], 0.05);
+        if (v != 0) {
+            l.ambient[k] = clamp01(l.ambient[k] + v);
+            touched = true;
+        }
     }
-    const sun = stepper(app, a, "lp_sun", tx.alloc(a, tx.lp_directional, .{l.directional_color[0]}), l.directional_color[0], 0.05);
-    if (sun != 0) {
-        for (&l.directional_color) |*v| v.* = clamp01(v.* + sun);
-        touched = true;
+    for (rgb, 0..) |ch, k| {
+        const v = stepper(app, a, std.fmt.allocPrint(a, "lp_sun{d}", .{k}) catch "lp_sun", tx.alloc(a, tx.lp_directional, .{ ch, l.directional_color[k] }), l.directional_color[k], 0.05);
+        if (v != 0) {
+            l.directional_color[k] = clamp01(l.directional_color[k] + v);
+            touched = true;
+        }
+    }
+    for ([_][]const u8{ "X", "Y", "Z" }, 0..) |ax, k| {
+        const v = stepper(app, a, std.fmt.allocPrint(a, "lp_sl{d}", .{k}) catch "lp_sl", tx.alloc(a, tx.lp_shadow_light, .{ ax, l.shadow_light[k] }), l.shadow_light[k], 100);
+        if (v != 0) {
+            l.shadow_light[k] += v;
+            touched = true;
+        }
     }
     const sh = stepper(app, a, "lp_shadow", tx.alloc(a, tx.lp_shadow, .{l.shadow_intensity}), l.shadow_intensity, 0.1);
     if (sh != 0) {
@@ -204,8 +180,7 @@ pub fn lightsPanel(app: *App, a: Allocator, p: *Paint) void {
         touched = true;
     }
     if (p.light) |i| if (i < l.omni.len) {
-        clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .childGap = 6, .padding = .{ .top = 6, .bottom = 6 } }, .border = .{ .color = theme.line, .width = .{ .top = 1, .bottom = 1 } } });
-        txt(tx.alloc(a, tx.lp_light_n, .{ i + 1, l.omni.len }), 13, theme.text, font_mod.bold);
+        gui.subhead(tx.alloc(a, tx.lp_light_n, .{ i + 1, l.omni.len }));
         const o = &l.omni[i];
         for ([_][]const u8{ "R", "G", "B" }, 0..) |ch, k| {
             const v = stepper(app, a, std.fmt.allocPrint(a, "lp_col{d}", .{k}) catch "c", tx.alloc(a, tx.lp_light_color, .{ ch, o.color[k] }), o.color[k], 0.1);
@@ -224,8 +199,7 @@ pub fn lightsPanel(app: *App, a: Allocator, p: *Paint) void {
             o.pos[2] += hz;
             touched = true;
         }
-        if (main.button(app, "lp_light_del", tx.get(tx.vo_remove), false)) app.askDelete(.light, i, std.fmt.allocPrint(a, "{s} {d}", .{ tx.get(tx.lp_lamp_word), i + 1 }) catch "");
-        clay.close();
+        if (gui.footer(app, "lp_light_del", &.{tx.get(tx.vo_remove)}, null) != null) app.askDelete(.light, i, std.fmt.allocPrint(a, "{s} {d}", .{ tx.get(tx.lp_lamp_word), i + 1 }) catch "");
     };
     if (touched) putLights(app, d, l);
 }

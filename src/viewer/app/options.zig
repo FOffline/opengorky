@@ -42,6 +42,10 @@ pub const Options = struct {
     /// Debug: input script in the interactive loop (hidden window), see app/input_script.zig.
     input: ?[]const u8 = null,
     heroes: bool = false,
+    /// --start location:<level>[@<area>] | battle:<battle> | test-room:<character>[@<battle>]
+    /// (gorky-tool play's, the editor's Play): that level straight in, as `<level>/sprite.dat
+    /// --level --heroes --play`; an area: the party on its points (run.zig `startAt`).
+    start: ?[]const u8 = null,
     debug: level_view.Debug = .{},
     /// For --shot: console commands (after the level loads).
     console_cmds: [24][]const u8 = undefined,
@@ -54,13 +58,21 @@ pub const Options = struct {
     /// into DIR/000.png… — for attack and effect GIFs.
     frames: u32 = 0,
     frames_dir: ?[]const u8 = null,
+    /// --mix-dump OUT: open the sound bank even in a silent run and write the mixer's
+    /// output (f32 stereo, one world tick of samples per frame) to OUT at exit; with
+    /// --input (one tick a frame) the dump is the same every run.
+    mix_dump: ?[]const u8 = null,
     scroll: [2]f32 = .{ 0, 0 },
     shot: ?[]const u8 = null,
+    /// --launcher-shot OUT: the launcher window (tab --launcher-tab) drawn hidden into
+    /// a PNG, then quit.
+    launcher_shot: ?[]const u8 = null,
+    launcher_tab: @import("launcher.zig").Tab = .play,
     /// For --shot: how many ms of animation to run before the shot.
     time_ms: u64 = 0,
 };
 
-pub const usage = "usage: opengorky-viewer <game-dir> [archive, e.g. 01_port/sprite.dat] [--image N] [--level] [--hide-objects] [--walk 1|2] [--areas] [--heroes] [--play] [--load-slot N] [--console CMD] [--scroll X,Y] [--time MS] [--shot out.png] [--frames N --frames-dir DIR] [--input SCRIPT]";
+pub const usage = "usage: opengorky-viewer <game-dir> [archive, e.g. 01_port/sprite.dat] [--image N] [--level] [--hide-objects] [--walk 1|2] [--areas] [--heroes] [--play] [--start location:L[@area]|battle:B|test-room:C[@B]] [--load-slot N] [--console CMD] [--scroll X,Y] [--time MS] [--shot out.png] [--frames N --frames-dir DIR] [--input SCRIPT] [--mix-dump OUT]";
 
 pub fn parseArgs(args: []const [:0]const u8) !Options {
     var opts: Options = .{ .game_dir = undefined };
@@ -106,6 +118,10 @@ pub fn parseArgs(args: []const [:0]const u8) !Options {
         i += 1;
     }
     if (opts.load_slot == 0) return error.BadArgs; // slots start at 1
+    if (opts.frames > 0 and opts.frames_dir == null) {
+        std.log.err("--frames N needs --frames-dir DIR", .{});
+        return error.BadArgs;
+    }
     // No path: main takes it from opengorky.cfg (game_path).
     opts.game_dir = game_dir orelse "";
     return opts;

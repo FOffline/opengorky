@@ -1,0 +1,11 @@
+level "01_port" {
+    area citadel_enter {
+        classic_id = 212;
+        areaName = "citadel_enter";
+        action = walk;
+        isLevelSwitch = 1;
+    }
+    item bandage1: items::bandage {
+        place = ground;
+    }
+}

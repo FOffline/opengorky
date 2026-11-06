@@ -1,0 +1,11 @@
+module weapons {
+    weapon fist {
+        classic_id = 70;
+        action = Take;
+        icon = "fist";
+        place = party;
+        class = melee;
+        max_damage = 5;
+        damage_kind = melee;
+    }
+}

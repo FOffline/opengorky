@@ -16,12 +16,6 @@ pub const Animation = struct {
     last: u32,
     speed: f32,
     sounds: []SoundCue,
-
-    /// Shown frame for step `fr` (first…last): reversed, the exe counts down from
-    /// last (0x44fb3b, 0x44fc05) and matches frame sounds against it (0x44fb92).
-    pub fn shown(self: Animation, fr: u32, reverse: bool) u32 {
-        return if (reverse) self.last - (fr - self.first) else fr;
-    }
 };
 
 pub const AnimList = struct {

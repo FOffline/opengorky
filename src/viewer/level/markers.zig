@@ -25,7 +25,7 @@ pub fn drawMarker(l: *LevelView, scroll: [2]f32) !void {
     }
     // Object 0x4c7ff0: kwadrat with disturb.3df, additive, no depth.
     const col: [4]f32 = if (mk.ok) .{ 0.1, 0.4, 0.1, 1 } else .{ 0.4, 0.1, 0.1, 1 };
-    try v.drawMeshTexAdd(.{ .arena = l.frame_arena.allocator(), .cam = l.world.cam, .scroll = scroll }, "disturb.3df", mk.pos, .{ 0, 1, 0 }, l.world.actorScale() * s, col);
+    try v.drawMeshTexAdd(.{ .arena = l.frame_arena.allocator(), .cam = l.world.cam, .scroll = scroll }, og.core.modules.ui().effects.click_marker, mk.pos, .{ 0, 1, 0 }, l.world.actorScale() * s, col);
 }
 
 /// Speaker marker (0x459e60, dialog box pre-draw — any dialog and scenes):
@@ -39,12 +39,12 @@ pub fn drawSpeakerMarker(l: *LevelView, scroll: [2]f32) !void {
     const o = for (w.rt.objects.items) |o| {
         const n = World.nativeOf(o);
         if (n.kind != .actor or !o.enabled or n.deleted or !n.actor.placed) continue;
-        if (std.ascii.eqlIgnoreCase(o.name, line.speaker) or std.ascii.eqlIgnoreCase(w.stringOr(og.fields.nameId(o), ""), line.speaker)) break o;
+        if (std.ascii.eqlIgnoreCase(o.name, line.speaker) or std.ascii.eqlIgnoreCase(w.stringOr(og.fields.classicId(o), ""), line.speaker)) break o;
     } else return;
     if (w.battle) |*b| if (b.fighterOf(o)) |fi| if (!b.fighters.items[fi].alive()) return;
     const t = og.num.toF32(l.now_ms) / 1000;
     const s = 0.7 + 0.3 * @abs(@sin(1.5 * t));
-    try v.drawMeshTexAdd(.{ .arena = l.frame_arena.allocator(), .cam = w.cam, .scroll = scroll }, "disturb.3df", og.fields.pos(o), .{ 0, 1, 0 }, l.world.actorScale() * 350, .{ 0.2 * s, 0.4 * s, 0.2 * s, 1 });
+    try v.drawMeshTexAdd(.{ .arena = l.frame_arena.allocator(), .cam = w.cam, .scroll = scroll }, og.core.modules.ui().effects.click_marker, og.fields.pos(o), .{ 0, 1, 0 }, l.world.actorScale() * 350, .{ 0.2 * s, 0.4 * s, 0.2 * s, 1 });
 }
 
 /// Active area markers (ActiveArea, tick 0x4bd510, draw 0x4bd640): at the area's
@@ -56,14 +56,13 @@ pub fn drawAreaMarkers(l: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void 
     if (w.battle != null or w.scene.cutscene or w.scene.panorama or w.scene.runner != null or l.ui_modal) return;
     if (!l.arrows_loaded) {
         l.arrows_loaded = true;
-        if (l.models) |m| if (m.readFile("gfx_3d\\textures\\strzalki.3df")) |bytes| {
-            if (og.formats.tex3df.decode(l.gpa, bytes)) |img_| {
-                var img = img_;
-                defer img.deinit(l.gpa);
-                l.arrows_tex = gfx.textureLinear(r, img) catch null;
-                if (l.arrows_tex) |tx| _ = c.SDL_SetTextureBlendMode(tx, gfx.blendAdd());
-            } else |_| {}
-        } else |_| {};
+        var tb: [128]u8 = undefined;
+        if (l.textures) |m| if (m.texture(l.gpa, std.fmt.bufPrint(&tb, "textures/{s}", .{og.core.modules.ui().effects.area_marker}) catch "")) |img_| {
+            var img = img_;
+            defer img.deinit(l.gpa);
+            l.arrows_tex = gfx.textureLinear(r, img) catch null;
+            if (l.arrows_tex) |tx| _ = c.SDL_SetTextureBlendMode(tx, gfx.blendAdd());
+        };
     }
     const tex = l.arrows_tex orelse return;
     const t = og.num.toF32(l.now_ms) / 1000;
@@ -78,7 +77,7 @@ pub fn drawAreaMarkers(l: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void 
     for (w.rt.objects.items) |o| {
         const n = World.nativeOf(o);
         if (n.kind != .area or !o.enabled or n.deleted) continue;
-        if (o.getInt("noHint") == 1) continue;
+        if (o.getInt("hint_hidden") == 1) continue;
         const area = og.world.areas.findArea(w, o.getString("areaName")) orelse continue;
         // Centre of the area polygon's bbox (0x4792e0: +0x33c/+0x340), not the entry point.
         if (area.points.len == 0) continue;

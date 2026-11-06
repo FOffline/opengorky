@@ -4,7 +4,7 @@ const std = @import("std");
 const c = @import("sdl");
 const ui = @import("ui");
 const clay = @import("clay.zig");
-const Font = @import("font.zig").Font;
+const canvas = @import("layout.zig").canvas;
 
 /// Draws a CUSTOM element (`customData` set in its declaration) into its box.
 const Custom = *const fn (ctx: *anyopaque, data: ?*anyopaque, box: c.SDL_FRect) void;
@@ -13,9 +13,18 @@ fn rgba(col: ui.Clay_Color) [4]u8 {
     return .{ @intFromFloat(col.r), @intFromFloat(col.g), @intFromFloat(col.b), @intFromFloat(col.a) };
 }
 
+/// Sets the draw colour to `col` (RGBA bytes, as `layout.canvas`'s).
+pub fn ink(r: *c.SDL_Renderer, col: [4]u8) void {
+    _ = c.SDL_SetRenderDrawColor(r, col[0], col[1], col[2], col[3]);
+}
+
+/// `col` (RGBA bytes) as a Clay colour.
+pub fn clayColor(col: [4]u8) ui.Clay_Color {
+    return .{ .r = @floatFromInt(col[0]), .g = @floatFromInt(col[1]), .b = @floatFromInt(col[2]), .a = @floatFromInt(col[3]) };
+}
+
 fn setColor(r: *c.SDL_Renderer, col: ui.Clay_Color) void {
-    const v = rgba(col);
-    _ = c.SDL_SetRenderDrawColor(r, v[0], v[1], v[2], v[3]);
+    ink(r, rgba(col));
 }
 
 /// Points around `rect` with corners rounded by `cr` (clockwise from the top left),
@@ -42,16 +51,8 @@ const n_pts = 4 * (seg + 1);
 /// The anti-aliasing fringe (points; a pixel at 2× density): colour fading to clear.
 const feather: f32 = 0.6;
 
-/// `userData` of an element drawn raised (buttons, title bars): its colour as a top-lit
-/// gradient, a light edge along the top and a shadow under it.
-var raised: u8 = 0;
-
 /// `userData` of a UI icon image: tinted by its colour.
 pub var tinted: u8 = 0;
-
-fn shade(col: ui.Clay_Color, d: f32) c.SDL_FColor {
-    return .{ .r = std.math.clamp((col.r + d) / 255, 0, 1), .g = std.math.clamp((col.g + d) / 255, 0, 1), .b = std.math.clamp((col.b + d) / 255, 0, 1), .a = col.a / 255 };
-}
 
 fn fcolor(col: ui.Clay_Color) c.SDL_FColor {
     return .{ .r = col.r / 255, .g = col.g / 255, .b = col.b / 255, .a = col.a / 255 };
@@ -79,23 +80,18 @@ fn strip(idx: []c_int, at: *usize, ia: usize, ib: usize) void {
     }
 }
 
-/// A rounded box filled from `top` to `bottom` colour (by height), its edge feathered.
-fn fillShape(r: *c.SDL_Renderer, rect: c.SDL_FRect, cr: ui.Clay_CornerRadius, top: c.SDL_FColor, bottom: c.SDL_FColor) void {
+/// A rounded box filled with `col`, its edge feathered.
+fn fillShape(r: *c.SDL_Renderer, rect: c.SDL_FRect, cr: ui.Clay_CornerRadius, col: c.SDL_FColor) void {
     var in: [n_pts][2]f32 = undefined;
     var out: [n_pts][2]f32 = undefined;
     outlineBy(rect, cr, 0, &in);
     outlineBy(rect, cr, feather, &out);
-    const at = struct {
-        fn f(t: c.SDL_FColor, b: c.SDL_FColor, k: f32, a: f32) c.SDL_FColor {
-            return .{ .r = t.r + (b.r - t.r) * k, .g = t.g + (b.g - t.g) * k, .b = t.b + (b.b - t.b) * k, .a = a };
-        }
-    }.f;
+    const clear: c.SDL_FColor = .{ .r = col.r, .g = col.g, .b = col.b, .a = 0 };
     var verts: [2 * n_pts + 1]c.SDL_Vertex = undefined;
-    verts[0] = .{ .position = .{ .x = rect.x + rect.w / 2, .y = rect.y + rect.h / 2 }, .color = at(top, bottom, 0.5, top.a) };
+    verts[0] = .{ .position = .{ .x = rect.x + rect.w / 2, .y = rect.y + rect.h / 2 }, .color = col };
     for (0..n_pts) |k| {
-        const kin = std.math.clamp((in[k][1] - rect.y) / @max(1, rect.h), 0, 1);
-        verts[1 + k] = .{ .position = .{ .x = in[k][0], .y = in[k][1] }, .color = at(top, bottom, kin, top.a) };
-        verts[1 + n_pts + k] = .{ .position = .{ .x = out[k][0], .y = out[k][1] }, .color = at(top, bottom, kin, 0) };
+        verts[1 + k] = .{ .position = .{ .x = in[k][0], .y = in[k][1] }, .color = col };
+        verts[1 + n_pts + k] = .{ .position = .{ .x = out[k][0], .y = out[k][1] }, .color = clear };
     }
     var idx: [n_pts * 3 + n_pts * 6]c_int = undefined;
     for (0..n_pts) |k| {
@@ -126,37 +122,38 @@ fn strokeShape(r: *c.SDL_Renderer, rect: c.SDL_FRect, cr: ui.Clay_CornerRadius, 
     _ = c.SDL_RenderGeometry(r, null, &verts, verts.len, &idx, @intCast(n));
 }
 
-/// A raised box: the shadow a point below it, the face lighter at the top than at the
-/// bottom, a one-point highlight under the top edge.
-fn fillRaised(r: *c.SDL_Renderer, rect: c.SDL_FRect, cr: ui.Clay_CornerRadius, col: ui.Clay_Color) void {
-    fillRounded(r, .{ .x = rect.x, .y = rect.y + 1.5, .w = rect.w, .h = rect.h }, cr, .{ .r = 0, .g = 0, .b = 0, .a = 150 });
-    fillShape(r, rect, cr, shade(col, 22), shade(col, -16));
-    const hl = shade(col, 48);
-    _ = c.SDL_SetRenderDrawColorFloat(r, hl.r, hl.g, hl.b, 0.55);
-    const inset = @min(cr.topLeft, rect.h / 2);
-    _ = c.SDL_RenderLine(r, rect.x + inset, rect.y + 1, rect.x + rect.w - inset, rect.y + 1);
-}
-
 fn rounded(cr: ui.Clay_CornerRadius) bool {
     return cr.topLeft > 0 or cr.topRight > 0 or cr.bottomLeft > 0 or cr.bottomRight > 0;
 }
 
-fn fillRounded(r: *c.SDL_Renderer, rect: c.SDL_FRect, cr: ui.Clay_CornerRadius, col: ui.Clay_Color) void {
-    const fc = fcolor(col);
-    fillShape(r, rect, cr, fc, fc);
+pub fn fillRounded(r: *c.SDL_Renderer, rect: c.SDL_FRect, cr: ui.Clay_CornerRadius, col: ui.Clay_Color) void {
+    fillShape(r, rect, cr, fcolor(col));
 }
 
-pub fn draw(r: *c.SDL_Renderer, font: *const Font, cmds: clay.Commands, custom: Custom, ctx: *anyopaque) void {
+/// `font`: the font set clay measured with (font.zig).
+/// Container `id`'s scroll bars (of `all`, clay.bars): a faint track, the thumb brighter
+/// while held. Drawn when its clipping ends, so what lies over it (a dialog) hides them.
+fn barsOf(r: *c.SDL_Renderer, all: []const clay.Bar, id: u32) void {
+    const rad = clay.bar_thick / 2;
+    const cr: ui.Clay_CornerRadius = .{ .topLeft = rad, .topRight = rad, .bottomLeft = rad, .bottomRight = rad };
+    for (all) |b| if (b.id.id == id) {
+        fillRounded(r, .{ .x = b.track.x, .y = b.track.y, .w = b.track.width, .h = b.track.height }, cr, clayColor(canvas.bar_track));
+        fillRounded(r, .{ .x = b.thumb.x, .y = b.thumb.y, .w = b.thumb.width, .h = b.thumb.height }, cr, clayColor(if (b.held) canvas.bar_held else canvas.bar_thumb));
+    };
+}
+
+pub fn draw(r: *c.SDL_Renderer, font: anytype, cmds: clay.Commands, custom: Custom, ctx: *anyopaque) void {
+    var clips: [8]c.SDL_Rect = undefined;
+    var clip_ids: [8]u32 = undefined;
+    var depth: usize = 0;
+    var bar_buf: [256]clay.Bar = undefined;
+    const all_bars = clay.bars(&bar_buf);
     for (cmds) |*cmd| {
         const bb = cmd.boundingBox;
         const rect: c.SDL_FRect = .{ .x = bb.x, .y = bb.y, .w = bb.width, .h = bb.height };
         switch (cmd.commandType) {
             ui.CLAY_RENDER_COMMAND_TYPE_RECTANGLE => {
                 const rd = cmd.renderData.rectangle;
-                if (cmd.userData == @as(?*anyopaque, &raised)) {
-                    fillRaised(r, rect, rd.cornerRadius, rd.backgroundColor);
-                    continue;
-                }
                 if (rounded(rd.cornerRadius)) {
                     fillRounded(r, rect, rd.cornerRadius, rd.backgroundColor);
                     continue;
@@ -188,15 +185,27 @@ pub fn draw(r: *c.SDL_Renderer, font: *const Font, cmds: clay.Commands, custom: 
             },
             ui.CLAY_RENDER_COMMAND_TYPE_SCISSOR_START => {
                 // In render coordinates: SDL applies the render scale to the clip rectangle.
-                const clip: c.SDL_Rect = .{
+                var clip: c.SDL_Rect = .{
                     .x = @intFromFloat(@floor(rect.x)),
                     .y = @intFromFloat(@floor(rect.y)),
                     .w = @intFromFloat(@ceil(rect.w)),
                     .h = @intFromFloat(@ceil(rect.h)),
                 };
+                // Nested in another clipping element: within it too, and its own restored at the end.
+                if (depth > 0 and !c.SDL_GetRectIntersection(&clip, &clips[depth - 1], &clip)) clip = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+                if (depth < clips.len) {
+                    clips[depth] = clip;
+                    clip_ids[depth] = cmd.id;
+                    depth += 1;
+                }
                 _ = c.SDL_SetRenderClipRect(r, &clip);
             },
-            ui.CLAY_RENDER_COMMAND_TYPE_SCISSOR_END => _ = c.SDL_SetRenderClipRect(r, null),
+            ui.CLAY_RENDER_COMMAND_TYPE_SCISSOR_END => {
+                if (depth == 0) continue;
+                depth -= 1;
+                _ = c.SDL_SetRenderClipRect(r, if (depth > 0) &clips[depth - 1] else null);
+                barsOf(r, all_bars, clip_ids[depth]);
+            },
             ui.CLAY_RENDER_COMMAND_TYPE_CUSTOM => custom(ctx, cmd.renderData.custom.customData, rect),
             // `imageData` is an SDL texture; it fills the box keeping its aspect.
             ui.CLAY_RENDER_COMMAND_TYPE_IMAGE => if (cmd.renderData.image.imageData) |p| {

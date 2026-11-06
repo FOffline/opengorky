@@ -1,0 +1,218 @@
+MonsterAttack(
+    fighter = 100,
+    weapon = 57,
+    anim = "long_attack",
+    hit_delay = 43,
+    after_delay = 30,
+    second_delay = 28,
+);
+MonsterAttack(
+    fighter = 100,
+    anim = "short_attack",
+    hit_delay = 36,
+    after_delay = 30,
+    second_delay = 12,
+);
+MonsterAttack(
+    fighter = 101,
+    weapon = 67,
+    anim = "long_attack",
+    hit_delay = 51,
+    after_delay = 50,
+    flash_delay = 41,
+);
+MonsterAttack(
+    fighter = 101,
+    anim = "short_attack",
+    hit_delay = 45,
+    after_delay = 30,
+    react_delay = 20,
+);
+MonsterAttack(
+    fighter = 102,
+    anim = "short_attack",
+    hit_delay = 28,
+    after_delay = 30,
+    react_delay = 20,
+);
+MonsterAttack(
+    fighter = 105,
+    weapon = 88,
+    anim = "short_attack",
+    hit_delay = 52,
+    after_delay = 130,
+    lift_delay = 37,
+    drop_delay = 50,
+);
+MonsterAttack(fighter = 105, anim = "long_attack", hit_delay = 35);
+MonsterAttack(fighter = 106, anim = "short_attack", hit_delay = 25, after_delay = 30);
+MonsterAttack(fighter = 107, weapon = 91, anim = "long_attack", hit_delay = 57, after_delay = 30);
+MonsterAttack(fighter = 107, anim = "short_attack", hit_delay = 28);
+MonsterAttack(fighter = 108, anim = "short_attack", hit_delay = 23, after_delay = 30);
+MonsterAttack(fighter = 109, anim = "short_attack", hit_delay = 40, after_delay = 30);
+MonsterAttack(fighter = 110, weapon = 1003, anim = "long_attack", hit_delay = 51, after_delay = 30);
+MonsterAttack(
+    fighter = 110,
+    weapon = 1004,
+    anim = "ladder_start",
+    hit_delay = 20,
+    after_delay = 30,
+    linked_anim = "long_attack",
+);
+MonsterAttack(fighter = 110, anim = "ladder_start", hit_delay = 20, after_delay = 30);
+MonsterAttack(fighter = 113, weapon = 1006, anim = "long_attack", hit_delay = 70, after_delay = 30);
+MonsterAttack(fighter = 113, anim = "short_attack", hit_delay = 70, after_delay = 30);
+MonsterAttack(fighter = 114, anim = "long_attack", hit_delay = 30, after_delay = 30);
+MonsterAttack(fighter = 115, anim = "short_attack", hit_delay = 42, after_delay = 30);
+MonsterAttack(fighter = 116, anim = "short_attack", hit_delay = 30, after_delay = 40);
+MonsterAttack(fighter = 117, anim = "short_attack", hit_delay = 30);
+MonsterAttack(
+    fighter = 118,
+    anim = "short_attack",
+    hit_delay = 43,
+    after_delay = 5,
+    second_delay = 37,
+    strike = 118,
+);
+MonsterAttack(
+    fighter = 119,
+    weapon = 1021,
+    anim = "short_attack",
+    hit_delay = 47,
+    after_delay = 72,
+    strike = 119,
+);
+MonsterAttack(fighter = 119, anim = "long_attack", hit_delay = 32, after_delay = 50, strike = 119);
+MonsterAttack(
+    fighter = 120,
+    anim = "short_attack",
+    hit_delay = 40,
+    after_delay = 80,
+    vanish_delay = 40,
+);
+MonsterAttack(fighter = 121, anim = "long_attack", hit_delay = 20, after_delay = 30, strike = 121);
+MonsterAttack(fighter = 122, anim = "short_attack", hit_delay = 32, after_delay = 30);
+MonsterAttack(fighter = 123, anim = "short_attack", hit_delay = 83, after_delay = 30);
+MonsterAttack(fighter = 124, weapon = 1075, anim = "long_attack", hit_delay = 40, after_delay = 30);
+MonsterAttack(fighter = 124, anim = "short_attack", hit_delay = 68, after_delay = 35);
+MonsterAttack(fighter = 125, anim = "long_attack", hit_delay = 50, after_delay = 45);
+MonsterAttack(
+    fighter = 126,
+    anim = "long_attack",
+    hit_delay = 65,
+    after_delay = 64,
+    flash_delay = 45,
+    strike = 126,
+);
+MonsterAttack(
+    fighter = 127,
+    weapon = 1071,
+    anim = "short_attack",
+    hit_delay = 50,
+    after_delay = 30,
+    strike = 127,
+);
+MonsterAttack(fighter = 127, anim = "long_attack", hit_delay = 4, after_delay = 80, strike = 127);
+MonsterAttack(
+    fighter = 128,
+    anim = "long_attack",
+    hit_delay = 45,
+    after_delay = 60,
+    lift_delay = 40,
+    drop_delay = 30,
+);
+MonsterAttack(fighter = 129, anim = "short_attack", hit_delay = 41, after_delay = 30);
+MonsterAttack(fighter = 135, anim = "short_attack", hit_delay = 41, after_delay = 30);
+MonsterAttack(fighter = 130, anim = "short_attack", hit_delay = 43, after_delay = 30);
+MonsterAttack(
+    fighter = 131,
+    weapon = 1062,
+    anim = "short_attack",
+    hit_delay = 45,
+    after_delay = 30,
+    strike = 131,
+);
+MonsterAttack(
+    fighter = 131,
+    weapon = 1063,
+    anim = "long_attack",
+    hit_delay = 48,
+    after_delay = 75,
+    flash_delay = 43,
+    strike = 131,
+);
+MonsterAttack(fighter = 131, anim = "attack_3", hit_delay = 40, after_delay = 30, strike = 131);
+MonsterAttack(fighter = 132, weapon = 1067, anim = "short_attack", hit_delay = 32, after_delay = 30);
+MonsterAttack(fighter = 132, anim = "long_attack", hit_delay = 53, after_delay = 46);
+MonsterAttack(fighter = 133, anim = "long_attack", hit_delay = 50, after_delay = 30, strike = 133);
+MonsterAttack(
+    fighter = 136,
+    weapon = 1077,
+    anim = "short_attack",
+    hit_delay = 50,
+    after_delay = 40,
+    strike = 136,
+);
+MonsterAttack(
+    fighter = 136,
+    weapon = 1078,
+    anim = "long_attack",
+    hit_delay = 176,
+    after_delay = 30,
+    flash_delay = 78,
+    strike = 136,
+    gas = 1,
+);
+MonsterAttack(fighter = 136, anim = "attack_3", hit_delay = 60, after_delay = 35, strike = 136);
+MonsterAttack(fighter = 137, weapon = 1057, anim = "short_attack", hit_delay = 35, after_delay = 30);
+MonsterAttack(fighter = 137, anim = "long_attack", hit_delay = 74, after_delay = 25);
+MonsterAttack(fighter = 138, anim = "long_attack", hit_delay = 15, after_delay = 90);
+MonsterAttack(fighter = 139, weapon = 1073, anim = "short_attack", hit_delay = 50, after_delay = 30);
+MonsterAttack(fighter = 139, anim = "long_attack", hit_delay = 48, after_delay = 60);
+HeroAttack(weapon = 48, anim = "attack_boxing", wait = 50, extra = -12);
+HeroAttack(weapon = 70, anim = "attack_boxing", wait = 50, extra = -12);
+HeroAttack(weapon = 43, anim = "attack_butcher", wait = 22, extra = 10);
+HeroAttack(weapon = 54, anim = "attack_butcher", wait = 28);
+HeroAttack(weapon = 42, anim = "attack_axe", wait = 30);
+HeroAttack(weapon = 47, anim = "attack_axe", wait = 30);
+HeroAttack(weapon = 44, anim = "attack_baseball", wait = 65, extra = -10);
+HeroAttack(weapon = 76, anim = "attack_baseball", wait = 65, extra = -10);
+HeroAttack(weapon = 52, anim = "attack_shocker", wait = 20, extra = 30);
+HeroAttack(weapon = 55, anim = "attack_shocker", wait = 20);
+HeroAttack(weapon = 80, anim = "attack_syringe", wait = 30);
+HeroAttack(weapon = 40, anim = "attack_knife", wait = 25);
+HeroAttack(weapon = 41, anim = "attack_stone", wait = 32);
+HeroAttack(weapon = 33, anim = "attack_grenade", wait = 37, extra = 36);
+HeroAttack(weapon = 35, anim = "attack_grenade", wait = 37, extra = 36);
+HeroAttack(weapon = 1027, anim = "attack_grenade", wait = 37, extra = 36);
+HeroAttack(weapon = 86, hero = 29, anim = "attack_molotov", wait = 75);
+HeroAttack(weapon = 86, anim = "attack_stone", wait = 32);
+HeroAttack(weapon = 1030, hero = 29, anim = "attack_molotov", wait = 75);
+HeroAttack(weapon = 1030, anim = "attack_stone", wait = 32);
+HeroAttack(weapon = 1032, hero = 29, anim = "attack_molotov", wait = 75);
+HeroAttack(weapon = 1032, anim = "attack_stone", wait = 32);
+HeroAttack(weapon = 34, hero = 24, anim = "attack_timebomb", wait = 50);
+HeroAttack(weapon = 34, hero = 29, anim = "attack_timebomb", wait = 50);
+HeroAttack(weapon = 34, anim = "pickup_start", wait = 0, until_end = 1, then = "pickup_end");
+HeroAttack(weapon = 1031, hero = 24, anim = "attack_timebomb", wait = 50);
+HeroAttack(weapon = 1031, hero = 29, anim = "attack_timebomb", wait = 50);
+HeroAttack(weapon = 1031, anim = "pickup_start", wait = 0, until_end = 1, then = "pickup_end");
+HeroAttack(weapon = 45, anim = "attack_gun", wait = 40);
+HeroAttack(weapon = 46, anim = "attack_gun", wait = 35);
+HeroAttack(weapon = 49, anim = "attack_gun", wait = 40, extra = 3, after = 5);
+HeroAttack(weapon = 50, anim = "attack_gun", wait = 40, after = 5);
+HeroAttack(weapon = 98, anim = "attack_sniper", wait = 59, extra = 35, after = 5);
+HeroAttack(weapon = 1023, anim = "attack_rifle", wait = 40, extra = 15, after = 5);
+HeroAttack(weapon = 1022, anim = "attack_chaingun", wait = 40, after = 80);
+HeroAttack(weapon = 1024, anim = "attack_bazooka", wait = 47);
+HeroAttack(weapon = 1028, anim = "attack_bazooka", wait = 50);
+HeroAttack(weapon = 1026, anim = "attack_flame", wait = 20);
+HeroAttack(weapon = 1025, anim = "attack_flame", wait = 34, after = 80);
+HeroAttack(weapon = 1029, anim = "attack_ionrifle", wait = 58, after = 14, pre = 35);
+HeroAttack(weapon = 1037, anim = "attack_blaster", wait = 59, after = 100, pre = 45);
+HeroAttack(weapon = 1038, anim = "ude_radio", wait = 0);
+HeroAttack(weapon = 1039, anim = "ude_radio", wait = 0);
+HeroAttack(weapon = 1040, anim = "use_radio", wait = 0);
+HeroAttack(weapon = 0, anim = "attack_rifle", wait = 59);
+WdelayHero(hero = 24);
+WdelayHero(hero = 29);

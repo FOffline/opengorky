@@ -1,0 +1,11 @@
+level "01_port" {
+    var int ponton = 1;
+    camera = Camera(
+        perspective = false,
+        near_plane = 600,
+        far_plane = -600,
+        ortho_rotation_radians = -0.523599,
+    );
+    placement = [Place(who = @Sullivan, at = "capt_start1")];
+    shadows = true;
+}

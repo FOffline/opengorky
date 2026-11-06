@@ -133,6 +133,28 @@ const T = if (build_options.ffmpeg) struct {
         if (av.avformat_alloc_output_context2(&t.out, null, if (dst != null) "asf" else "mp3", if (dst) |d| d.ptr else null) < 0) return error.OutOfMemory;
         const out = t.out.?;
         const global = out.oformat.*.flags & av.AVFMT_GLOBALHEADER != 0;
+        // Audio stream first, as the game's own .asf (the exe's AMMultiMediaStream, 0x436940,
+        // picks streams by purpose, so the order is only for likeness).
+        if (t.adec != null) {
+            const codec = av.avcodec_find_encoder(if (dst != null) av.AV_CODEC_ID_WMAV1 else av.AV_CODEC_ID_MP3) orelse return error.NoEncoder;
+            const e: *av.AVCodecContext = av.avcodec_alloc_context3(codec) orelse return error.OutOfMemory;
+            t.aenc = e;
+            e.sample_rate = rate;
+            av.av_channel_layout_default(&e.ch_layout, 2);
+            e.sample_fmt = av.AV_SAMPLE_FMT_FLTP;
+            e.bit_rate = 128000;
+            e.time_base = .{ .num = 1, .den = rate };
+            if (global) e.flags |= av.AV_CODEC_FLAG_GLOBAL_HEADER;
+            if (av.avcodec_open2(e, codec, null) < 0) return error.EncoderFailed;
+            t.ast = try stream(out, e);
+            if (e.frame_size <= 0) return error.EncoderFailed;
+            t.fifo = av.av_audio_fifo_alloc(e.sample_fmt, 2, e.frame_size) orelse return error.OutOfMemory;
+            t.afrm = try frame();
+            t.afrm.?.format = e.sample_fmt;
+            t.afrm.?.sample_rate = rate;
+            t.afrm.?.nb_samples = e.frame_size;
+            if (av.av_channel_layout_copy(&t.afrm.?.ch_layout, &e.ch_layout) < 0 or av.av_frame_get_buffer(t.afrm, 0) < 0) return error.OutOfMemory;
+        }
         if (t.vdec) |d| {
             const codec = av.avcodec_find_encoder(av.AV_CODEC_ID_MSMPEG4V3) orelse return error.NoEncoder;
             const e: *av.AVCodecContext = av.avcodec_alloc_context3(codec) orelse return error.OutOfMemory;
@@ -162,26 +184,6 @@ const T = if (build_options.ffmpeg) struct {
             t.vfrm.?.width = e.width;
             t.vfrm.?.height = e.height;
             if (av.av_frame_get_buffer(t.vfrm, 0) < 0) return error.OutOfMemory;
-        }
-        if (t.adec != null) {
-            const codec = av.avcodec_find_encoder(if (dst != null) av.AV_CODEC_ID_WMAV1 else av.AV_CODEC_ID_MP3) orelse return error.NoEncoder;
-            const e: *av.AVCodecContext = av.avcodec_alloc_context3(codec) orelse return error.OutOfMemory;
-            t.aenc = e;
-            e.sample_rate = rate;
-            av.av_channel_layout_default(&e.ch_layout, 2);
-            e.sample_fmt = av.AV_SAMPLE_FMT_FLTP;
-            e.bit_rate = 128000;
-            e.time_base = .{ .num = 1, .den = rate };
-            if (global) e.flags |= av.AV_CODEC_FLAG_GLOBAL_HEADER;
-            if (av.avcodec_open2(e, codec, null) < 0) return error.EncoderFailed;
-            t.ast = try stream(out, e);
-            if (e.frame_size <= 0) return error.EncoderFailed;
-            t.fifo = av.av_audio_fifo_alloc(e.sample_fmt, 2, e.frame_size) orelse return error.OutOfMemory;
-            t.afrm = try frame();
-            t.afrm.?.format = e.sample_fmt;
-            t.afrm.?.sample_rate = rate;
-            t.afrm.?.nb_samples = e.frame_size;
-            if (av.av_channel_layout_copy(&t.afrm.?.ch_layout, &e.ch_layout) < 0 or av.av_frame_get_buffer(t.afrm, 0) < 0) return error.OutOfMemory;
         }
         if (dst) |d| {
             if (av.avio_open(&out.pb, d.ptr, av.AVIO_FLAG_WRITE) < 0) return error.CannotWrite;

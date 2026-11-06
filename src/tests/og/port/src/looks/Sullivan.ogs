@@ -1,0 +1,26 @@
+module looks {
+    look Sullivan {
+        mesh = "Sulivan";
+        portrait = "Sullivan";
+        turn_speed = 0.8;
+        walk = [Speed(anim = "walk", speed = 5.2)];
+        idles = [
+            Idle(state = 0, anim = "su_idle", weight = 1000),
+            Idle(state = 0, anim = "look", weight = 40),
+            Idle(state = 0, anim = "clock", weight = 20),
+            Idle(state = 0, anim = "fightlook", weight = 30),
+            Idle(state = 1, anim = "su_g_idle", weight = 1000),
+            Idle(state = 1, anim = "g_look", weight = 40),
+        ];
+        slots = [
+            Slot(state = 0, name = "walk", anim = "su_walk"),
+            Slot(state = 1, name = "walk", anim = "su_g_walk"),
+            Slot(state = 0, name = "dodge", anim = "unik"),
+            Slot(state = 0, name = "hit", anim = "su_hit"),
+            Slot(state = 1, name = "hit", anim = "su_g_hit"),
+            Slot(state = 0, name = "death", anim = "su_death"),
+            Slot(state = 1, name = "death", anim = "su_g_death"),
+            Slot(state = 0, name = "attack_boxing", anim = "boxing"),
+        ];
+    }
+}

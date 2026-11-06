@@ -25,6 +25,7 @@ pub const projectile = @import("effects/projectile.zig");
 pub const beam = @import("effects/beam.zig");
 pub const light = @import("effects/light.zig");
 pub const batch = @import("effects/batch.zig");
+pub const material = @import("effects/material.zig");
 const retain = @import("effects/retain.zig").retain;
 
 pub const Effects = struct {
@@ -116,7 +117,7 @@ pub const Effects = struct {
         retain(&self.attached, self.ticks);
         retain(&self.blood, {});
         retain(&self.clouds, {});
-        retain(&self.flames, gpa);
+        retain(&self.flames, flame.Ctx{ .gpa = gpa, .rand = rand });
     }
 
     pub fn addBitmap(self: *Effects, gpa: Allocator, b: bitmap.Bitmap) void {
@@ -136,7 +137,7 @@ pub const Effects = struct {
 };
 
 test {
-    _ = dsc;
+    _ = beam;
     _ = particles;
     _ = flame;
     _ = @import("effects/retain.zig");

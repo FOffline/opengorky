@@ -1,0 +1,9 @@
+module speakers {
+    speaker HQ {
+        portrait = "Head Quarters";
+    }
+    speaker Lamar {
+        portrait = "Lamare";
+        prefix = true;
+    }
+}

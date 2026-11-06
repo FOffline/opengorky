@@ -1,11 +1,9 @@
 //! Background 2D animations: BitmapAnimation (0x4b3c50) and ActiveBitmapAnimation
-//! (0x4b41f0) — frames by `speed`, the `state` machine, ABA_Impulse.
+//! (0x4b41f0) — frames by `frames_per_second`, the `state` machine, ABA_Impulse.
 
 const std = @import("std");
 const state_object = @import("../state.zig").object;
 const value = @import("../script.zig").value;
-const archive = @import("../formats.zig").archive;
-const sprite = @import("../formats.zig").sprite;
 const runtime = @import("../script.zig").runtime;
 const world = @import("../state.zig").world;
 const World = world.World;
@@ -14,25 +12,15 @@ const Runtime = runtime.Runtime;
 const speed_divisor = world.speed_divisor;
 
 fn frameCount(self: *World, sprite_name: []const u8) u32 {
-    var lower_buf: [archive.name_size]u8 = undefined;
-    if (sprite_name.len + 4 > lower_buf.len) return 0;
+    var lower_buf: [256]u8 = undefined;
+    if (sprite_name.len > lower_buf.len) return 0;
     const key = std.ascii.lowerString(&lower_buf, sprite_name);
     if (self.res.frame_counts.get(key)) |n| return n;
-    const n = readFrameCount(self, sprite_name) catch 0;
+    const n = self.res.source.frameCount(sprite_name);
     const a = self.arena_state.allocator();
     const owned = a.dupe(u8, key) catch return n;
     self.res.frame_counts.put(a, owned, n) catch {};
     return n;
-}
-
-fn readFrameCount(self: *World, sprite_name: []const u8) !u32 {
-    var buf: [archive.name_size]u8 = undefined;
-    const e = self.res.sprites.find(try std.fmt.bufPrint(&buf, "{s}.spr", .{sprite_name})) orelse return 0;
-    var head: [12]u8 = undefined;
-    if (e.size < head.len or try self.res.sprites.file.readPositionalAll(self.io, &head, e.offset) != head.len) return 0;
-    if (!std.mem.eql(u8, head[0..4], sprite.magic)) return 0;
-    // The header count must fit the i32 @intCast in the animations.
-    return @min(std.mem.readInt(u32, head[8..12], .little), std.math.maxInt(i32));
 }
 
 /// The accumulator compare is unsigned (`jb`/`jae`, 0x4b3c77, 0x4b426c): a negative speed
@@ -45,11 +33,11 @@ fn advance(n: *state_object.Native, speed: i32) i32 {
 
 /// BitmapAnimation::Update (0x4b3c50): looping animation.
 pub fn updateAnimation(self: *World, o: *Object, n: *state_object.Native) void {
-    const count: i32 = @intCast(frameCount(self, o.getString("spriteFile")));
-    var frame = o.getInt("cur_frame") +% advance(n, o.getInt("speed"));
+    const count: i32 = @intCast(frameCount(self, o.getString("sprite")));
+    var frame = o.getInt("frame") +% advance(n, o.getInt("frames_per_second"));
     // `idiv` remainder (0x4b3d0e): a negative frame stays negative.
     if (count > 0) frame = @rem(frame, count);
-    o.setInt("cur_frame", frame);
+    o.setInt("frame", frame);
 }
 
 /// ActiveBitmapAnimation::Update (0x4b41f0): `state` machine (0 closed, 1 opening,
@@ -67,18 +55,18 @@ pub fn updateActiveAnimation(self: *World, o: *Object, n: *state_object.Native) 
             n.aba_move = null;
         }
     }
-    const count: i32 = @intCast(frameCount(self, o.getString("spriteFile")));
+    const count: i32 = @intCast(frameCount(self, o.getString("sprite")));
     if (count == 0) {
-        o.setInt("cur_frame", 0);
+        o.setInt("frame", 0);
         return;
     }
     const last = count - 1;
-    var frame = o.getInt("cur_frame");
+    var frame = o.getInt("frame");
     switch (o.getInt("state")) {
         0 => frame = 0,
         1 => {
-            frame +%= advance(n, o.getInt("speed"));
-            if (o.getInt("unistate") != 0) {
+            frame +%= advance(n, o.getInt("frames_per_second"));
+            if (o.getInt("one_shot") != 0) {
                 // One-shot animation (explosion, dust): hide after the end.
                 if (frame > last) {
                     frame = 0;
@@ -91,7 +79,7 @@ pub fn updateActiveAnimation(self: *World, o: *Object, n: *state_object.Native) 
         },
         2 => frame = last,
         3 => {
-            frame -%= advance(n, o.getInt("speed"));
+            frame -%= advance(n, o.getInt("frames_per_second"));
             if (frame <= 0) {
                 frame = 0;
                 o.setInt("state", 0);
@@ -99,7 +87,7 @@ pub fn updateActiveAnimation(self: *World, o: *Object, n: *state_object.Native) 
         },
         else => {},
     }
-    o.setInt("cur_frame", frame);
+    o.setInt("frame", frame);
 }
 
 /// ABA_Impulse (0x4b4424): reverse direction. `forbid` 1 blocks opening, 2 blocks closing
@@ -119,12 +107,12 @@ test "active animation state machine" {
     var cls: @import("../script.zig").object.Class = .{ .name = "door.aba", .parent = null };
     try cls.vars.appendSlice(rt.arena(), &.{
         .{ .type = .int, .name = "state", .line = 0 },
-        .{ .type = .int, .name = "cur_frame", .line = 0 },
-        .{ .type = .int, .name = "speed", .line = 0 },
-        .{ .type = .int, .name = "unistate", .line = 0 },
+        .{ .type = .int, .name = "frame", .line = 0 },
+        .{ .type = .int, .name = "frames_per_second", .line = 0 },
+        .{ .type = .int, .name = "one_shot", .line = 0 },
     });
     const o = try rt.createObject("door", &cls);
-    o.setInt("speed", 30);
+    o.setInt("frames_per_second", 30);
     try std.testing.expectEqual(0, o.getInt("state"));
     impulse(o, 0);
     try std.testing.expectEqual(1, o.getInt("state"));

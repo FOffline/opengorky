@@ -6,17 +6,17 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const og = @import("opengorky");
-const Image = og.formats.image.Image;
-const vars = @import("vars.zig");
+const Image = og.image.Image;
+const model = @import("model.zig");
 const common_archive = @import("store.zig").common_archive;
-const main = @import("app.zig");
-const App = main.App;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
 
 const sprite_archive = @import("store.zig").sprite_archive;
 
 /// Icon frames of the game: big (inventory, up to 160×100) and small (51×40).
-const big = [2]u32{ 160, 100 };
-const small = [2]u32{ 51, 40 };
+pub const big = [2]u32{ 160, 100 };
+pub const small = [2]u32{ 51, 40 };
 
 pub fn readPng(app: *App, path: []const u8) !Image {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(app.io, path, app.gpa, .limited(64 << 20));
@@ -24,39 +24,18 @@ pub fn readPng(app: *App, path: []const u8) !Image {
     return og.formats.jpeg.decode(app.gpa, bytes);
 }
 
-/// `img` resampled to w×h, each pixel the mean of the source pixels under it.
-pub fn resize(gpa: Allocator, img: Image, w: u32, h: u32) !Image {
-    var out = try Image.init(gpa, w, h);
-    const fx = @as(f32, @floatFromInt(img.width)) / @as(f32, @floatFromInt(w));
-    const fy = @as(f32, @floatFromInt(img.height)) / @as(f32, @floatFromInt(h));
-    for (0..h) |y| for (0..w) |x| {
-        const x0: usize = @intFromFloat(@as(f32, @floatFromInt(x)) * fx);
-        const y0: usize = @intFromFloat(@as(f32, @floatFromInt(y)) * fy);
-        const x1 = @max(x0 + 1, @min(img.width, @as(usize, @intFromFloat(@ceil(@as(f32, @floatFromInt(x + 1)) * fx)))));
-        const y1 = @max(y0 + 1, @min(img.height, @as(usize, @intFromFloat(@ceil(@as(f32, @floatFromInt(y + 1)) * fy)))));
-        var sum: [4]u32 = .{ 0, 0, 0, 0 };
-        for (y0..y1) |sy| for (x0..x1) |sx| for (0..4) |ch| {
-            sum[ch] += img.pixels[(sy * img.width + sx) * 4 + ch];
-        };
-        const n: u32 = @intCast((x1 - x0) * (y1 - y0));
-        for (0..4) |ch| out.pixels[(y * w + x) * 4 + ch] = @intCast(sum[ch] / n);
-    };
-    return out;
-}
+pub const resize = og.formats.tex3df.resize;
 
 /// Downscaled to fit `box` keeping the aspect (never enlarged).
-fn fit(gpa: Allocator, img: Image, box: [2]u32) !Image {
+pub fn fit(gpa: Allocator, img: Image, box: [2]u32) !Image {
     const k = @min(1.0, @min(@as(f32, @floatFromInt(box[0])) / @as(f32, @floatFromInt(img.width)), @as(f32, @floatFromInt(box[1])) / @as(f32, @floatFromInt(img.height))));
     return resize(gpa, img, @max(1, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(img.width)) * k)))), @max(1, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(img.height)) * k)))));
 }
 
-/// A free name `<base>_<n>` for which `taken` is false.
+/// A free name `<base>_<n>` (from 2) for which `taken` is false, in `a`.
 fn freeName(a: Allocator, base: []const u8, ctx: anytype, comptime taken: fn (@TypeOf(ctx), []const u8) bool) ![]const u8 {
-    for (2..1000) |n| {
-        const s = try std.fmt.allocPrint(a, "{s}_{d}", .{ base, n });
-        if (!taken(ctx, s)) return s;
-    }
-    return error.NoFreeName;
+    var buf: [128]u8 = undefined;
+    return a.dupe(u8, try @import("freename.zig").freeName(&buf, base, .{ .bare = false }, ctx, taken));
 }
 
 fn inList(list: []const []const u8, s: []const u8) bool {
@@ -77,10 +56,12 @@ pub fn importIcon(app: *App, file: usize, id: []const u8, png: []const u8) ![]co
     const a = app.catalog.arena.allocator();
     const name = try freeName(a, id, app.catalog.icons.items, inList);
     var eb: [96]u8 = undefined;
-    _ = try app.store.add(sprite_archive, try std.fmt.bufPrint(&eb, "icons\\{s}.spr", .{name}), bytes, null, true);
+    app.store.group();
+    defer app.store.endGroup("+ icons\\{s}.spr", .{name});
+    _ = try app.store.addNew(&.{.{ .archive = sprite_archive, .entry = try std.fmt.bufPrint(&eb, "icons\\{s}.spr", .{name}), .text = bytes }});
     try app.catalog.icons.append(a, name);
     var vb: [96]u8 = undefined;
-    try app.store.setVar(file, &.{"spriteFile"}, try std.fmt.bufPrint(&vb, "\"{s}\"", .{name}), "{");
+    try model.set(app, file, &.{"icon"}, try std.fmt.bufPrint(&vb, "\"{s}\"", .{name}), "{");
     return name;
 }
 
@@ -133,9 +114,43 @@ fn textureAt(app: *App, m: og.formats.mesh.Mesh, slot: u8) ![]const u8 {
     return if (slot < names.len) names[slot] else error.NoTexture;
 }
 
-/// Model `mesh` with its texture `slot` from `png` (resized to the original's size)
-/// under a new name; the other textures stay. Returns the name.
-pub fn newModel(app: *App, mesh: []const u8, png: []const u8, slot: u8) ![]const u8 {
+/// Model texture (or effect frame) from `img` in place of `orig`: the UVs stay, so the
+/// original's layout and aspect; for both at its size (at most 256, argb4444), for the port
+/// as large as the PNG allows (a power of two times, up to 4096, argb8888: tex3df.encode).
+pub fn modelTexture(gpa: Allocator, img: Image, orig: Image, target: og.formats.tex3df.Target) ![]u8 {
+    var w = orig.width;
+    var h = orig.height;
+    const most = og.formats.tex3df.maxSide(target);
+    while (@max(w, h) > most) : (h = @max(1, h / 2)) w = @max(1, w / 2);
+    if (target == .port) while (w * 2 <= img.width and h * 2 <= img.height and @max(w, h) * 2 <= most) {
+        w *= 2;
+        h *= 2;
+    };
+    var sized = try resize(gpa, img, w, h);
+    defer sized.deinit(gpa);
+    return og.formats.tex3df.encode(gpa, sized, target);
+}
+
+/// Model file `msh` (owned) within `target`'s limits (Classic: the exe's, texture names
+/// up to 47), its chunk 10 naming `ani` when given: a fork's own `.ani`, which the exe,
+/// gorky-tool and modcheck take from there (the port by the model's name).
+fn checkedMesh(gpa: Allocator, msh: []u8, ani: ?[]const u8, target: og.formats.tex3df.Target) ![]u8 {
+    errdefer gpa.free(msh);
+    var m = try og.formats.mesh.parse(gpa, msh);
+    defer m.deinit();
+    if (ani) |n| if (m.animations.len > 0) {
+        m.animations = n;
+    };
+    try og.formats.mesh.checkLimits(m, target);
+    if (ani == null or m.animations.len == 0) return msh;
+    const out = try og.formats.mesh.encode(gpa, m);
+    gpa.free(msh);
+    return out;
+}
+
+/// Model `mesh` with its texture `slot` from `png` (modelTexture for `target`) under a
+/// new name; the other textures stay. Returns the name.
+pub fn newModel(app: *App, mesh: []const u8, png: []const u8, slot: u8, target: og.formats.tex3df.Target) ![]const u8 {
     const a = app.catalog.arena.allocator();
     const msh = try commonFile(app, "gfx_3d\\{s}.msh", .{mesh});
     var m = try og.formats.mesh.parse(app.gpa, msh);
@@ -145,34 +160,90 @@ pub fn newModel(app: *App, mesh: []const u8, png: []const u8, slot: u8) ![]const
     defer orig.deinit(app.gpa);
     var img = try readPng(app, png);
     defer img.deinit(app.gpa);
-    // The model's UVs stay: the texture keeps the original's size and layout.
-    var sized = try resize(app.gpa, img, orig.width, orig.height);
-    defer sized.deinit(app.gpa);
+    const tex = try modelTexture(app.gpa, img, orig, target);
 
     const name = try freeName(a, mesh, app, modelTaken);
     var tb: [128]u8 = undefined;
     const tex_name = try std.fmt.bufPrint(&tb, "{s}.3df", .{name});
+    var ab: [160]u8 = undefined;
+    const new_msh = try checkedMesh(app.gpa, try og.formats.mesh.withTexture(app.gpa, msh, old, tex_name), try std.fmt.bufPrint(&ab, "{s}.ani", .{name}), target);
     var eb: [160]u8 = undefined;
-    const tex = try og.formats.tex3df.encodeArgb4444(app.gpa, sized);
-    _ = try app.store.add(common_archive, try std.fmt.bufPrint(&eb, "gfx_3d\\textures\\{s}", .{tex_name}), tex, null, true);
-    const new_msh = try og.formats.mesh.withTexture(app.gpa, msh, old, tex_name);
-    _ = try app.store.add(common_archive, try std.fmt.bufPrint(&eb, "gfx_3d\\{s}.msh", .{name}), new_msh, null, true);
+    app.store.group();
+    defer app.store.endGroup("+ gfx_3d\\{s}.msh", .{name});
+    _ = try app.store.addNew(&.{.{ .archive = common_archive, .entry = try std.fmt.bufPrint(&eb, "gfx_3d\\textures\\{s}", .{tex_name}), .text = tex }});
+    _ = try app.store.addNew(&.{.{ .archive = common_archive, .entry = try std.fmt.bufPrint(&eb, "gfx_3d\\{s}.msh", .{name}), .text = new_msh }});
     for ([_][]const u8{ "ani", "bfr" }) |ext| {
         const src = try app.gpa.dupe(u8, try commonFile(app, "gfx_3d\\{s}.{s}", .{ mesh, ext }));
-        _ = try app.store.add(common_archive, try std.fmt.bufPrint(&eb, "gfx_3d\\{s}.{s}", .{ name, ext }), src, null, true);
+        _ = try app.store.addNew(&.{.{ .archive = common_archive, .entry = try std.fmt.bufPrint(&eb, "gfx_3d\\{s}.{s}", .{ name, ext }), .text = src }});
     }
     try app.catalog.meshes.append(a, name);
     return name;
 }
 
+/// `entry` of common/other.dat made by the editor (new and unsaved, or not in the
+/// archive before the save that first wrote it): no game file shares it.
+/// shortcut: a file first saved in this session reads as the game's (Store.past holds
+/// earlier sessions only), so it forks once more; reload the log on save if that matters.
+pub fn editorMade(app: *App, entry: []const u8) bool {
+    if (app.store.find(common_archive, entry)) |i| if (!app.store.files.items[i].on_disk) return true;
+    const log = app.store.past orelse return false;
+    for (log.steps) |st| for (st.files) |f| {
+        if (std.mem.eql(u8, f.archive, common_archive) and std.ascii.eqlIgnoreCase(f.entry, entry)) return f.before == null;
+    };
+    return false;
+}
+
+/// Texture `slot` of model `mesh` from `png` in place when the editor made the model
+/// (a game model is shared: newModel forks it): the texture itself when the editor made
+/// it too, else a new `<mesh>_<n>.3df` the model names. Returns the texture's name, null
+/// for a game model.
+pub fn replaceOwnTexture(app: *App, mesh: []const u8, png: []const u8, slot: u8, target: og.formats.tex3df.Target) !?[]const u8 {
+    var eb: [160]u8 = undefined;
+    const msh_entry = try std.fmt.bufPrint(&eb, "gfx_3d\\{s}.msh", .{mesh});
+    if (!editorMade(app, msh_entry)) return null;
+    const msh_file = try app.store.file(common_archive, msh_entry);
+    var m = try og.formats.mesh.parse(app.gpa, app.store.text(msh_file));
+    defer m.deinit();
+    const old = try app.catalog.arena.allocator().dupe(u8, try textureAt(app, m, slot));
+    var orig = try og.formats.tex3df.decode(app.gpa, try commonFile(app, "gfx_3d\\textures\\{s}", .{old}));
+    defer orig.deinit(app.gpa);
+    var img = try readPng(app, png);
+    defer img.deinit(app.gpa);
+    const tex = try modelTexture(app.gpa, img, orig, target);
+    var lb: [160]u8 = undefined;
+    const label = std.fmt.bufPrint(&lb, "{s}: texture from PNG", .{mesh}) catch null;
+    var tb: [160]u8 = undefined;
+    const tex_entry = try std.fmt.bufPrint(&tb, "gfx_3d\\textures\\{s}", .{old});
+    if (editorMade(app, tex_entry)) {
+        try app.store.replaceLabeled(try app.store.file(common_archive, tex_entry), tex, label);
+        app.preview.reload();
+        return old;
+    }
+    const name = try std.fmt.allocPrint(app.catalog.arena.allocator(), "{s}.3df", .{try freeName(app.frame.allocator(), mesh, app, struct {
+        fn f(ap: *App, s: []const u8) bool {
+            var buf: [160]u8 = undefined;
+            return textureTaken(ap, std.fmt.bufPrint(&buf, "{s}.3df", .{s}) catch return true);
+        }
+    }.f)});
+    const new_msh = try checkedMesh(app.gpa, try og.formats.mesh.withTexture(app.gpa, app.store.text(msh_file), old, name), null, target);
+    app.store.group();
+    defer app.store.endGroup("{s}", .{label orelse mesh});
+    _ = try app.store.addNew(&.{.{ .archive = common_archive, .entry = try std.fmt.bufPrint(&tb, "gfx_3d\\textures\\{s}", .{name}), .text = tex }});
+    try app.store.replaceLabeled(msh_file, new_msh, label);
+    app.preview.reload();
+    return name;
+}
+
 /// A new look for an enemy class: its `act_*.ss` copied with a model wearing `png`.
-pub fn newLook(app: *App, act: []const u8, png: []const u8, slot: u8) ![]const u8 {
-    const mesh = vars.getStr(try commonFile(app, "classes\\{s}", .{act}), "meshFile") orelse return error.NoModel;
-    return newAct(app, act, try newModel(app, mesh, png, slot));
+pub fn newLook(app: *App, act: []const u8, png: []const u8, slot: u8, target: og.formats.tex3df.Target) ![]const u8 {
+    const mesh = model.getStr(try commonFile(app, "classes\\{s}", .{act}), "mesh") orelse return error.NoModel;
+    app.store.group();
+    defer app.store.endGroup("+ {s}", .{act});
+    return newAct(app, act, try newModel(app, mesh, png, slot, target));
 }
 
 /// Enemy look `act` (`act_*.ss`) copied with `model` as its `meshFile`; returns the copy's name.
-pub fn newAct(app: *App, act: []const u8, model: []const u8) ![]const u8 {
+pub fn newAct(app: *App, act: []const u8, mesh_file: []const u8) ![]const u8 {
     const a = app.catalog.arena.allocator();
     const act_text = try commonFile(app, "classes\\{s}", .{act});
     const base = act[0 .. std.mem.lastIndexOfScalar(u8, act, '.') orelse act.len];
@@ -184,36 +255,32 @@ pub fn newAct(app: *App, act: []const u8, model: []const u8) ![]const u8 {
     }.f);
     const new_act = try std.fmt.allocPrint(a, "{s}.ss", .{new_base});
     var vb: [128]u8 = undefined;
-    const text = try vars.set(app.gpa, act_text, "meshFile", try std.fmt.bufPrint(&vb, "\"{s}\"", .{model}), null);
+    const text = try model.setIn(app.gpa, act_text, "mesh", try std.fmt.bufPrint(&vb, "\"{s}\"", .{mesh_file}), null);
     var eb: [128]u8 = undefined;
-    _ = try app.store.add(common_archive, try std.fmt.bufPrint(&eb, "classes\\{s}", .{new_act}), text, null, true);
+    _ = try app.store.addNew(&.{.{ .archive = common_archive, .entry = try std.fmt.bufPrint(&eb, "classes\\{s}", .{new_act}), .text = text }});
     try app.catalog.acts.append(a, new_act);
     return new_act;
 }
 
-/// The model cache over the archive and the unsaved files (as the preview's).
-fn openCache(app: *App) !og.actor.model_cache.Cache {
-    var cache = try og.actor.model_cache.Cache.open(app.io, app.gpa, app.dat);
-    cache.overlay = .{ .ctx = app, .get = @import("pages.zig").overlayGet };
-    return cache;
+/// The models' files over the archive and the unsaved files (as the preview's).
+fn openModels(app: *App) !*og.compose.models.Files {
+    const f = try og.compose.models.Files.open(app.io, app.gpa, app.dat);
+    f.overlay = .{ .ctx = app, .get = @import("entries.zig").overlayGet };
+    return f;
 }
 
 /// Model `mesh` (textures, skeleton, animations, attach points) as a `.glb` at `path`.
 pub fn exportGlb(app: *App, mesh: []const u8, path: []const u8) !void {
-    var cache = try openCache(app);
-    defer cache.deinit();
-    const model = cache.get(mesh) orelse return error.NoModel;
+    const models = try openModels(app);
+    defer models.close();
     var arena_state: std.heap.ArenaAllocator = .init(app.gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const names = try og.formats.mesh.textureNames(a, model.mesh);
+    const parsed = models.parse(a, mesh) catch return error.NoModel;
+    const names = try og.formats.mesh.textureNames(a, parsed.mesh);
     const images = try a.alloc(?Image, names.len);
-    var buf: [160]u8 = undefined;
-    for (names, images) |n, *img| {
-        const bytes = cache.readFile(try std.fmt.bufPrint(&buf, "gfx_3d\\textures\\{s}", .{n})) catch null;
-        img.* = if (bytes) |b| og.formats.tex3df.decode(a, b) catch null else null;
-    }
-    const glb = try og.actor.gltf.exportGlb(app.gpa, mesh, model.mesh, model.anims.items, model.frames, images);
+    for (names, images) |n, *img| img.* = models.texture(a, n);
+    const glb = try og.compose.gltf_export.exportGlb(app.gpa, mesh, parsed.mesh, parsed.anims.items, parsed.frames, images);
     defer app.gpa.free(glb);
     try std.Io.Dir.cwd().writeFile(app.io, .{ .sub_path = path, .data = glb });
 }
@@ -226,14 +293,22 @@ fn textureTaken(app: *App, name: []const u8) bool {
     return true;
 }
 
-/// A new model `<base>_<n>` from the `.glb` at `path` (the exe's limits checked): its
+/// A new model `<base>_<n>` from the `.glb` at `path` (`target`'s limits checked): its
 /// `.msh`, `.ani`, `.bfr` and textures; a texture name the game has already (an exported
-/// model's own) gets a free `<model>_<n>.3df`, so no game texture changes.
-pub fn importGlb(app: *App, base: []const u8, path: []const u8) !struct { name: []const u8, textures: usize } {
+/// model's own) gets a free `<model>_<n>.3df`, so no game texture changes. A `.glb`
+/// without a height is fitted to `base`'s size (`fitted`: the height chosen, else 0);
+pub fn importGlb(app: *App, base: []const u8, path: []const u8, target: og.formats.mesh.Target) !struct { name: []const u8, textures: usize, fitted: f32 } {
     const glb = try std.Io.Dir.cwd().readFileAlloc(app.io, path, app.gpa, .limited(1 << 30));
     defer app.gpa.free(glb);
     const name = try freeName(app.catalog.arena.allocator(), base, app, modelTaken);
-    var files = try og.actor.gltf.importGlb(app.gpa, glb, name);
+    // As large as the model it replaces (a weapon stays a weapon's size), else a hero's.
+    const size: f32 = fit: {
+        var old = og.formats.mesh.parse(app.gpa, commonFile(app, "gfx_3d\\{s}.msh", .{base}) catch break :fit og.compose.gltf_import.hero_size) catch break :fit og.compose.gltf_import.hero_size;
+        defer old.deinit();
+        const old_size = old.height * og.compose.gltf_import.bindSize(old);
+        break :fit if (old_size > 0) old_size else og.compose.gltf_import.hero_size;
+    };
+    var files = try og.compose.gltf_import.importGlb(app.gpa, glb, name, size, target);
     defer files.deinit();
     const fa = files.arena.allocator();
     var msh: []const u8 = files.msh;
@@ -249,14 +324,16 @@ pub fn importGlb(app: *App, base: []const u8, path: []const u8) !struct { name: 
     }
     var m = try og.formats.mesh.parse(app.gpa, msh);
     defer m.deinit();
-    try og.formats.mesh.checkLimits(m);
+    try og.formats.mesh.checkLimits(m, target);
     var eb: [160]u8 = undefined;
-    for (files.textures, tex_names) |t, tn| _ = try app.store.add(common_archive, try std.fmt.bufPrint(&eb, "gfx_3d\\textures\\{s}", .{tn}), try app.gpa.dupe(u8, t.data), null, true);
+    app.store.group();
+    defer app.store.endGroup("+ gfx_3d\\{s}.msh", .{name});
+    for (files.textures, tex_names) |t, tn| _ = try app.store.addNew(&.{.{ .archive = common_archive, .entry = try std.fmt.bufPrint(&eb, "gfx_3d\\textures\\{s}", .{tn}), .text = try app.gpa.dupe(u8, t.data) }});
     for ([_][]const u8{ "msh", "ani", "bfr" }, [_][]const u8{ msh, files.ani, files.bfr }) |ext, data| {
-        _ = try app.store.add(common_archive, try std.fmt.bufPrint(&eb, "gfx_3d\\{s}.{s}", .{ name, ext }), try app.gpa.dupe(u8, data), null, true);
+        _ = try app.store.addNew(&.{.{ .archive = common_archive, .entry = try std.fmt.bufPrint(&eb, "gfx_3d\\{s}.{s}", .{ name, ext }), .text = try app.gpa.dupe(u8, data) }});
     }
     try app.catalog.meshes.append(app.catalog.arena.allocator(), name);
-    return .{ .name = name, .textures = files.textures.len };
+    return .{ .name = name, .textures = files.textures.len, .fitted = files.fitted };
 }
 
 /// The animations of the `.glb` at `path` into model `mesh` (same skeleton): one of the
@@ -264,32 +341,43 @@ pub fn importGlb(app: *App, base: []const u8, path: []const u8) !struct { name: 
 pub fn importAnims(app: *App, a: Allocator, mesh: []const u8, path: []const u8) !struct { added: []const []const u8, replaced: []const []const u8 } {
     const glb = try std.Io.Dir.cwd().readFileAlloc(app.io, path, app.gpa, .limited(1 << 30));
     defer app.gpa.free(glb);
-    var cache = try openCache(app);
-    defer cache.deinit();
-    const model = cache.get(mesh) orelse return error.NoModel;
-    var files = try og.actor.gltf.importAnimationsInto(app.gpa, glb, model.mesh, model.anims.items, model.frames);
+    const models = try openModels(app);
+    defer models.close();
+    var model_arena: std.heap.ArenaAllocator = .init(app.gpa);
+    defer model_arena.deinit();
+    const parsed = models.parse(model_arena.allocator(), mesh) catch return error.NoModel;
+    var files = try og.compose.gltf_import.importAnimationsInto(app.gpa, glb, parsed.mesh, parsed.anims.items, parsed.frames);
     defer files.deinit();
     var list = try og.formats.anim.parseAni(app.gpa, files.ani);
     defer list.deinit();
-    var bf = try og.formats.anim.parseBfr(app.gpa, files.bfr, model.frames.bones);
+    var bf = try og.formats.anim.parseBfr(app.gpa, files.bfr, parsed.frames.bones);
     defer bf.deinit(app.gpa);
-    const B = model.frames.bones;
+    const B = parsed.frames.bones;
+    var eb: [160]u8 = undefined;
+    // The frames as the archive holds them (the preview's cache keeps them converted).
+    const bfr = try app.store.file(common_archive, try std.fmt.bufPrint(&eb, "gfx_3d\\{s}.bfr", .{mesh}));
+    var raw = try og.formats.anim.parseBfr(app.gpa, app.store.text(bfr), B);
+    defer raw.deinit(app.gpa);
     var added: std.ArrayList([]const u8) = .empty;
     var replaced: std.ArrayList([]const u8) = .empty;
     for (list.items) |an| {
         // A replaced one has other frames (the kept ones may have moved down).
-        const old = model.anims.find(an.name) orelse {
+        const old = parsed.anims.find(an.name) orelse {
             try added.append(a, try a.dupe(u8, an.name));
             continue;
         };
-        const was = std.mem.sliceAsBytes(model.frames.matrices[old.first * B .. (old.last + 1) * B]);
-        if (!std.mem.eql(u8, was, std.mem.sliceAsBytes(bf.matrices[an.first * B .. (an.last + 1) * B]))) try replaced.append(a, try a.dupe(u8, an.name));
+        // Within float noise: a round trip through Blender splits each matrix into a
+        // translation and rotation and back, off in the 4th–7th digit, the same frame.
+        const was = raw.matrices[old.first * B .. (old.last + 1) * B];
+        const now = bf.matrices[an.first * B .. (an.last + 1) * B];
+        const same = was.len == now.len and for (was, now) |x, y| {
+            if (!sameMatrix(x, y)) break false;
+        } else true;
+        if (!same) try replaced.append(a, try a.dupe(u8, an.name));
     }
-    var eb: [160]u8 = undefined;
     var lb: [160]u8 = undefined;
     const label = std.fmt.bufPrint(&lb, "{s}: .glb animations", .{mesh}) catch null;
     // The frames first: the old .ani still fits them (no fewer frames; undo takes the .ani back first).
-    const bfr = try app.store.file(common_archive, try std.fmt.bufPrint(&eb, "gfx_3d\\{s}.bfr", .{mesh}));
     const ani = try app.store.file(common_archive, try std.fmt.bufPrint(&eb, "gfx_3d\\{s}.ani", .{mesh}));
     try app.store.replaceLabeled(bfr, try app.gpa.dupe(u8, files.bfr), label);
     try app.store.replaceLabeled(ani, try app.gpa.dupe(u8, files.ani), label);
@@ -297,7 +385,12 @@ pub fn importAnims(app: *App, a: Allocator, mesh: []const u8, path: []const u8) 
     return .{ .added = added.items, .replaced = replaced.items };
 }
 
-/// A model field (`.msh` chunks 11 centre, 12 height, 13 attach points).
+fn sameMatrix(x: [12]f32, y: [12]f32) bool {
+    for (x, y) |p, q| if (@abs(p - q) > 1e-3 * @max(1, @abs(p))) return false;
+    return true;
+}
+
+/// A model field (`.msh` chunks 11 centre, 12 height, 13 attach points, 14 rotation).
 pub const MeshField = union(enum) {
     height: f32,
     center: struct { k: usize, v: f32 },
@@ -305,6 +398,14 @@ pub const MeshField = union(enum) {
     hold_bone: struct { i: usize, v: u32 },
     /// Offset x, y, z (k 0–2) or angles around X, Y, Z (k 3–5).
     hold_param: struct { i: usize, k: usize, v: f32 },
+    /// Offset x, y, z all moved by `d` (a handle dragged on the preview).
+    hold_move: struct { i: usize, d: [3]f32 },
+    /// Chunk 14: angle around X, Y, Z (k 0–2).
+    rotation: struct { k: usize, v: f32 },
+    /// A new attach point of this name at the joint of the last one's bone (or bone 0;
+    /// none: model space), or point `i` removed.
+    hold_add: []const u8,
+    hold_remove: usize,
 };
 
 /// Field `f` of model `mesh` set (one undo step; the exe's limits checked); `what` names it.
@@ -313,6 +414,8 @@ pub fn setMeshField(app: *App, mesh: []const u8, f: MeshField, what: []const u8)
     const file = try app.store.file(common_archive, try std.fmt.bufPrint(&eb, "gfx_3d\\{s}.msh", .{mesh}));
     var m = try og.formats.mesh.parse(app.gpa, app.store.text(file));
     defer m.deinit();
+    // An edit keeps a model within the exe's limits; one past them (port only) stays editable.
+    const target: og.formats.mesh.Target = if (og.formats.mesh.checkLimits(m, .both)) .both else |_| .port;
     const n = m.hold_modes.len;
     switch (f) {
         .height => |v| m.height = v,
@@ -326,8 +429,28 @@ pub fn setMeshField(app: *App, mesh: []const u8, f: MeshField, what: []const u8)
         .hold_param => |h| if (h.i < n) {
             m.hold_modes[h.i].params[h.k] = h.v;
         } else return error.NoAttachPoint,
+        .hold_move => |h| if (h.i < n) {
+            for (0..3) |k| m.hold_modes[h.i].params[k] += h.d[k];
+        } else return error.NoAttachPoint,
+        .rotation => |r| {
+            m.rotation[r.k] = r.v;
+            m.has_rotation = true;
+        },
+        .hold_add => |name| {
+            const list = try m.arena.allocator().alloc(og.formats.mesh.HoldMode, n + 1);
+            @memcpy(list[0..n], m.hold_modes);
+            const bone: u32 = if (n > 0) m.hold_modes[n - 1].bone else if (m.joints.len > 0) 0 else og.formats.mesh.no_bone;
+            list[n] = .{ .name = name, .params = @splat(0), .bone = bone };
+            m.hold_modes = list;
+        },
+        .hold_remove => |i| if (i < n) {
+            const list = try m.arena.allocator().alloc(og.formats.mesh.HoldMode, n - 1);
+            @memcpy(list[0..i], m.hold_modes[0..i]);
+            @memcpy(list[i..], m.hold_modes[i + 1 ..]);
+            m.hold_modes = list;
+        } else return error.NoAttachPoint,
     }
-    try og.formats.mesh.checkLimits(m);
+    try og.formats.mesh.checkLimits(m, target);
     const bytes = try og.formats.mesh.encode(app.gpa, m);
     errdefer app.gpa.free(bytes);
     var lb: [160]u8 = undefined;

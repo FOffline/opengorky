@@ -1,4 +1,4 @@
-//! Hero inventory screen (`common/sprite.dat: inventory.spr`, icons `icons\*.spr`).
+//! Hero inventory screen (`sprites/inventory.spr`, icons `sprites/icons/*.spr`).
 //! Logic lives in src/inventory.zig; the layout comes from the exe tables below.
 
 const std = @import("std");
@@ -7,10 +7,8 @@ const Allocator = std.mem.Allocator;
 const og = @import("opengorky");
 const c = @import("sdl");
 const gfx = @import("media/gfx.zig");
-const lang_mod = og.formats.lang;
 const gui = @import("gui.zig");
-const archive = og.formats.archive;
-const Image = og.formats.image.Image;
+const Image = og.image.Image;
 const Font = og.formats.font.Font;
 const World = og.state.world.World;
 const Object = og.script.object.Object;
@@ -123,74 +121,51 @@ pub const InventoryView = struct {
     press_at: ?[2]f32 = null,
     /// Examine menu X: computed once at open (0x457631) for this object.
     exam_anchor: ?struct { obj: *Object, x: f32 } = null,
-    /// Examine menu (`examine_box.spr`) and area descriptions (`activeareas.inf`).
+    /// Examine menu (`examine_box.spr`); the texts are the core's (entity.texts.examine, areas).
     exbox: gfx.Frames = .{},
-    area_bytes: []u8 = &.{},
-    area_examine: og.formats.strtab.Table = .{},
     ebox: gfx.Frames = .{},
     icons: std.StringHashMapUnmanaged(gfx.Frames) = .empty,
-    sprites: archive.Archive,
-    /// Font 2 (`03_small_1.fnt`): hints, box, examine.
-    font_bytes: []u8,
+    assets: og.loaders.assets.Stack,
+    /// Font 2 (`03_small_1.fnt`): hints, box, examine (composition's, as the panel's).
     font: Font,
     /// Font 3 (`04_system_1.fnt`): inventory screen labels.
-    sys_bytes: []u8,
     sys: Font,
-    strings_bytes: []u8,
-    examine_bytes: []u8,
-    strings: og.formats.strtab.Table,
-    examine: og.formats.strtab.Table,
-    examine_arena: std.heap.ArenaAllocator,
+    /// UI texts: the core's string.tab (loaders.textTable, read by loadCore before).
+    strings: *const og.formats.strtab.Table,
     text: Image,
     text_tex: ?*c.SDL_Texture = null,
 
     pub fn load(io: Io, gpa: Allocator, r: *c.SDL_Renderer, dat: Io.Dir) !InventoryView {
-        var sprites = try archive.Archive.open(io, gpa, dat, "common/sprite.dat");
-        errdefer sprites.close(io, gpa);
-        var other = try archive.Archive.open(io, gpa, dat, "common/other.dat");
-        defer other.close(io, gpa);
-        var lang = try archive.Archive.open(io, gpa, dat, "common/lang.dat");
-        defer lang.close(io, gpa);
-        const ln = lang_mod.language(io, gpa, dat);
-        const font_bytes = lang_mod.readFont(io, gpa, &other, "03_small", ln) orelse return error.NotFound;
-        errdefer gpa.free(font_bytes);
-        const sys_bytes = lang_mod.readFont(io, gpa, &other, "04_system", ln) orelse return error.NotFound;
-        errdefer gpa.free(sys_bytes);
-        const strings_bytes = try lang.readAlloc(io, gpa, lang.find("string.tab") orelse return error.NotFound);
-        errdefer gpa.free(strings_bytes);
-        const examine_bytes = try lang.readAlloc(io, gpa, lang.find("items.inf") orelse return error.NotFound);
-        errdefer gpa.free(examine_bytes);
+        var as: og.loaders.assets.Stack = try .classic(io, gpa, dat);
+        errdefer as.deinit();
+        _ = try as.archiveOf("common/sprite.dat");
+        _ = try as.archiveOf("common/other.dat");
+        const fonts = og.loaders.loadUiFonts(io, dat);
+        const strings = og.loaders.textTable() orelse return error.NotFound;
+        // The examine texts as the core's (composition reads them once).
+        if (!og.loaders.loadExamine(io, dat)) return error.NotFound;
         var v: InventoryView = .{
             .gpa = gpa,
             .io = io,
             .renderer = r,
-            .sprites = sprites,
-            .font_bytes = font_bytes,
-            .font = try og.formats.font.parse(font_bytes),
-            .sys_bytes = sys_bytes,
-            .sys = try og.formats.font.parse(sys_bytes),
-            .strings_bytes = strings_bytes,
-            .examine_bytes = examine_bytes,
-            .strings = try og.formats.strtab.parseStrings(gpa, strings_bytes),
-            .examine = undefined,
-            .examine_arena = .init(gpa),
+            .assets = as,
+            .font = (fonts.small orelse return error.NotFound).*,
+            .sys = (fonts.system orelse return error.NotFound).*,
+            .strings = strings,
             .text = try Image.init(gpa, og.state.world.screen_w, og.state.world.screen_h),
         };
-        v.examine = try og.formats.strtab.parseExamine(gpa, v.examine_arena.allocator(), examine_bytes);
-        v.bg = try v.loadSprite("inventory.spr");
-        v.box_bg = v.loadSprite("item_list.spr") catch .{};
-        v.giveman = v.loadSprite("GiveMan.spr") catch .{};
-        v.ebox = v.loadSprite("ebox.spr") catch .{};
-        v.exbox = v.loadSprite("examine_box.spr") catch .{};
-        if (lang.find("activeareas.inf")) |e| if (lang.readAlloc(io, gpa, e)) |b| {
-            v.area_bytes = b;
-            v.area_examine = og.formats.strtab.parseExamineKey(gpa, v.examine_arena.allocator(), b, "AREA_EXAMINE:") catch .{};
-        } else |_| {};
-        v.atlas = v.loadSprite("fonts.spr") catch .{};
-        if (other.find("02_hp.fnt")) |e| if (other.readAlloc(io, gpa, e)) |b| {
+        const ua = og.core.modules.ui().assets;
+        v.bg = try v.loadSprite(ua.inventory);
+        v.box_bg = v.loadSprite(ua.item_list) catch .{};
+        v.giveman = v.loadSprite(ua.give_man) catch .{};
+        v.ebox = v.loadSprite(ua.examine) catch .{};
+        v.exbox = v.loadSprite(ua.examine_box) catch .{};
+        v.atlas = v.loadSprite(ua.atlas) catch .{};
+        var hb: [80]u8 = undefined;
+        if (v.assets.read(gpa, std.fmt.bufPrint(&hb, "fonts/{s}.fnt", .{ua.hp_font}) catch "")) |b| {
             defer gpa.free(b);
             v.digits = og.formats.font.parseTex(b) catch @splat(null);
-        } else |_| {};
+        } else |_| {}
         v.give_text = Image.init(gpa, og.state.world.screen_w, og.state.world.screen_h) catch null;
         return v;
     }
@@ -201,8 +176,6 @@ pub const InventoryView = struct {
         self.giveman.deinit(self.gpa);
         self.ebox.deinit(self.gpa);
         self.exbox.deinit(self.gpa);
-        self.area_examine.deinit(self.gpa);
-        if (self.area_bytes.len > 0) self.gpa.free(self.area_bytes);
         self.atlas.deinit(self.gpa);
         if (self.give_tex) |t| c.SDL_DestroyTexture(t);
         if (self.give_text) |*t| t.deinit(self.gpa);
@@ -214,21 +187,13 @@ pub const InventoryView = struct {
         self.icons.deinit(self.gpa);
         if (self.text_tex) |t| c.SDL_DestroyTexture(t);
         self.text.deinit(self.gpa);
-        self.strings.deinit(self.gpa);
-        self.examine.deinit(self.gpa);
-        self.examine_arena.deinit();
-        self.gpa.free(self.font_bytes);
-        self.gpa.free(self.sys_bytes);
-        self.gpa.free(self.strings_bytes);
-        self.gpa.free(self.examine_bytes);
-        self.sprites.close(self.io, self.gpa);
+        self.assets.deinit();
     }
 
-    fn loadSprite(self: *InventoryView, name: []const u8) !gfx.Frames {
-        const e = self.sprites.find(name) orelse return error.NotFound;
-        const data = try self.sprites.readAlloc(self.io, self.gpa, e);
+    fn loadSprite(self: *InventoryView, path: []const u8) !gfx.Frames {
+        const data = try self.assets.read(self.gpa, path);
         defer self.gpa.free(data);
-        return gfx.loadSmooth(self.gpa, self.renderer, name, data);
+        return gfx.loadSmooth(self.gpa, self.renderer, path, data);
     }
 
     /// Item icon `icons\<spriteFile>.spr` (frame 0 big, 1 small).
@@ -238,7 +203,7 @@ pub const InventoryView = struct {
         const key = std.ascii.lowerString(&key_buf, sprite_file);
         if (self.icons.getPtr(key)) |f| return f;
         var buf: [80]u8 = undefined;
-        const frames = self.loadSprite(std.fmt.bufPrint(&buf, "icons\\{s}.spr", .{sprite_file}) catch return null) catch gfx.Frames{};
+        const frames = self.loadSprite(std.fmt.bufPrint(&buf, "sprites/icons/{s}.spr", .{sprite_file}) catch return null) catch gfx.Frames{};
         const owned = self.gpa.dupe(u8, key) catch return null;
         self.icons.put(self.gpa, owned, frames) catch {
             self.gpa.free(owned);
@@ -294,12 +259,12 @@ pub const InventoryView = struct {
 
     /// Hero portrait (`icons\<spriteFile>.spr`).
     pub fn portrait(self: *InventoryView, hero: *Object) ?*gfx.Frames {
-        const sf = hero.getString("spriteFile");
-        return self.icon(if (sf.len > 0) sf else hero.name);
+        return self.icon(og.core.entity.hero(hero).portrait);
     }
 
-    pub fn itemName(self: *InventoryView, o: *Object) []const u8 {
-        return self.strings.get(og.fields.nameId(o)) orelse o.name;
+    /// By the core's texts: `strings` (viewer/app/run.zig hands them over).
+    pub fn itemName(_: *InventoryView, o: *Object) []const u8 {
+        return og.core.entity.item(o).name;
     }
 
     // ---------------------------------------------------------------- input (0x42dec0)
@@ -326,7 +291,7 @@ pub const InventoryView = struct {
         return .none;
     }
 
-    /// Item in a backpack cell (the first with this nameID).
+    /// Item in a backpack cell (the first with this classic_id).
     pub fn cellItem(self: *InventoryView, w: *World, hero: *Object, k: usize) ?*Object {
         var buf: [inv.list.max_entries]inv.list.Entry = undefined;
         const items = self.bagList(w, hero, &buf);
@@ -347,12 +312,12 @@ pub const InventoryView = struct {
         self.pressed = .none;
         const now = hitAt(w, x, y);
         if (was == .exit and now == .exit) {
-            w.out.sound(w.gpa, "invgive", null);
+            w.out.sound(w.gpa, og.core.modules.ui().sounds.give, null);
             self.close(w);
             return .close;
         }
         if (was == .skills and now == .skills) {
-            w.out.sound(w.gpa, "invgive", null);
+            w.out.sound(w.gpa, og.core.modules.ui().sounds.give, null);
             return .skills;
         }
         return .none;

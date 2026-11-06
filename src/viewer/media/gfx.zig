@@ -4,7 +4,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const og = @import("opengorky");
 const c = @import("sdl");
-const Image = og.formats.image.Image;
+const Image = og.image.Image;
 const sprite = og.formats.sprite;
 const shadow = @import("shadow.zig");
 
@@ -16,8 +16,8 @@ pub fn rgb(comptime r: u8, comptime g: u8, comptime b: u8) [3]f32 {
 }
 
 /// Colour `name` of adjust.kdt as 0…1 (the shipped file's `default` without it).
-pub fn adjRgb(name: []const u8, default: [3]u8) [3]f32 {
-    const v = og.formats.adjust.getRgb(name, default);
+pub fn adjRgb(comptime name: []const u8) [3]f32 {
+    const v = og.rules.adjust.rgb(name);
     return .{ @as(f32, @floatFromInt(v[0])) / 255.0, @as(f32, @floatFromInt(v[1])) / 255.0, @as(f32, @floatFromInt(v[2])) / 255.0 };
 }
 
@@ -52,12 +52,12 @@ pub fn check(ok: bool) SdlError!void {
 /// Tile highlight and name-entry cursor pulse (0x45c8a0): min + (max − min)·(sin(phase) + 1)/2,
 /// tile_flash_min/max 0.2/0.4; the phase grows by tile_flash_speed 0.15 per logic tick.
 pub fn tilePulse(phase: f32) f32 {
-    const lo = og.formats.adjust.getFloat("tile_flash_min", 0.2);
-    const hi = og.formats.adjust.getFloat("tile_flash_max", 0.4);
+    const lo = og.rules.adjust.float("tile_flash_min");
+    const hi = og.rules.adjust.float("tile_flash_max");
     return lo + (hi - lo) * (@sin(phase) + 1) * 0.5;
 }
 pub fn tileFlashStep() f32 {
-    return og.formats.adjust.getFloat("tile_flash_speed", 0.15);
+    return og.rules.adjust.float("tile_flash_speed");
 }
 
 /// Additive colour; destination alpha unchanged.
@@ -123,14 +123,33 @@ pub var upscale_k: u32 = 1;
 /// shortcut: global like `upscale_k`.
 pub var wide: f32 = 0;
 
+/// The canvas's (`Canvas(height = …)`, ui.ogs): logical rows the frame has above and below
+/// the 640×480 middle while the world is on screen (0 — the exe's frame). The world spans
+/// the whole frame about its centre; the interface's 640×480 box stands at the bottom
+/// (`ui_y`). Set at frame start.
+pub var tall: f32 = 0;
+
+/// The interface box's top in the frame: `2 · tall` (the panel at the canvas's bottom).
+pub fn uiY() f32 {
+    return 2 * tall;
+}
+
+/// The frame's logical size.
+pub fn frameW() f32 {
+    return 640 + 2 * wide;
+}
+pub fn frameH() f32 {
+    return 480 + 2 * tall;
+}
+
 /// `scaling = adaptive-fill`: the world's zoom so a level narrower than the wide
 /// frame fills it (1 — none). Multiplies the game's own zoom.
 pub var fill: f32 = 1;
 
 /// Drawing in the middle 640×480 (UI coordinates).
 pub fn middleView(r: *c.SDL_Renderer) void {
-    if (wide == 0) return;
-    _ = c.SDL_SetRenderViewport(r, &.{ .x = @intFromFloat(wide), .y = 0, .w = 640, .h = 480 });
+    if (wide == 0 and tall == 0) return;
+    _ = c.SDL_SetRenderViewport(r, &.{ .x = @intFromFloat(wide), .y = @intFromFloat(uiY()), .w = 640, .h = 480 });
 }
 
 /// Drawing over the whole frame (the world, full-width fills, the cursor).

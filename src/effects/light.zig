@@ -18,10 +18,8 @@ pub const Light = struct {
     }
 };
 
-const max_lights = 16;
-
-/// Add a light flash; the exe pool holds 16, extras are dropped.
+/// Add a light flash; the exe pool holds 16 (an OpenGorky project 64), extras are dropped.
 pub fn add(lights: *std.ArrayList(Light), gpa: Allocator, l: Light) void {
-    if (lights.items.len >= max_lights) return;
+    if (lights.items.len >= @as(usize, if (@import("../rules.zig").og) 64 else 16)) return;
     lights.append(gpa, l) catch {};
 }

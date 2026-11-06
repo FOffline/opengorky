@@ -1,6 +1,6 @@
 //! Bottom panel (one for exploration and battle, exe 0x4b1ab0/0x4b1d50/0x4b2440),
-//! hero portraits, cursor. Sprites from `common/sprite.dat` (`game_box.spr`,
-//! `icons\<hero>.spr`, `mouse.spr`).
+//! hero portraits, cursor. Sprites `sprites/…` (loaders/assets.zig: `game_box.spr`,
+//! `icons/<hero>.spr`, `mouse.spr`).
 
 const std = @import("std");
 const Io = std.Io;
@@ -9,7 +9,7 @@ const og = @import("opengorky");
 const c = @import("sdl");
 const gfx = @import("media/gfx.zig");
 const lang = og.formats.lang;
-const archive = og.formats.archive;
+const Assets = og.loaders.assets.Stack;
 
 pub const panel_h = 68;
 /// GUI text colours: light (names, first hint line) and dim (second line, labels)
@@ -86,14 +86,18 @@ pub const Scrollbar = struct {
 /// so a miss next to a button or the weapon slot doesn't send the hero walking.
 pub const panel_hit_y = panel_y - 12;
 
-/// Panel buttons (table 0x52b388; y from the panel top).
-pub const Button = enum(u4) { inventory, give, hand, short_list, push, defend, hero0, hero1, hero2, hero3, hero4, turn, end_turn, skills, stats };
+/// Panel buttons: controls and portrait slots (core module "interface", core/ui.zig;
+/// the exe's table 0x52b388).
+pub const Button = og.core.ui.Button;
 
-/// Shutters of inactive buttons (0x6c6038): frames min..max, ±0.6 per tick.
-pub const shutters = [15]?[2]f32{
-    .{ 4, 9 },   .{ 4, 9 },   .{ 10, 21 }, null,        .{ 4, 9 }, .{ 4, 9 }, .{ 29, 34 }, .{ 29, 34 },
-    .{ 29, 34 }, .{ 29, 34 }, .{ 29, 34 }, .{ 22, 28 }, .{ 4, 9 }, null,      null,
-};
+/// The panel's places (core module "interface"; y from the panel top).
+/// shortcut: the first `max_places` only (shutter state per place), raise it with a larger layout.
+pub fn panelPlaces() []const og.core.ui.Place {
+    const p = og.core.modules.ui().panel.places;
+    return p[0..@min(p.len, max_places)];
+}
+
+pub const max_places = 32;
 
 const gui_windows = @import("gui/windows.zig");
 const gui_text = @import("gui/text.zig");
@@ -146,22 +150,17 @@ pub const Gui = struct {
     tip_extra_col: [3]u8 = .{ 0, 255, 255 },
     item_list: gfx.Frames = .{},
     scrollbar: gfx.Frames = .{},
-    /// Shutter positions (fractional frame) and the world tick they were updated at.
-    shutter: [15]f32 = blk: {
-        var a: [15]f32 = undefined;
-        for (&a, shutters) |*v, sh| v.* = if (sh) |m| m[0] else 0;
-        break :blk a;
-    },
+    /// Shutter positions (fractional frame) per panel place and the world tick they
+    /// were updated at; null: not started (each at its minimum).
+    shutter: ?[max_places]f32 = null,
     shutter_tick: u64 = 0,
     inv_dir: ?bool = null,
     /// Pressed button (mouse held) and the button under the cursor (0x52b384, 0x52b380).
     pressed_btn: ?Button = null,
     hover_btn: ?Button = null,
     /// Panel text (health, round number): font 03_small, digit atlas 02_hp.
-    font_bytes: []u8 = &.{},
     font: ?og.formats.font.Font = null,
     /// Font 3 (`04_system`): window names and labels.
-    sys_bytes: []u8 = &.{},
     sys_font: ?og.formats.font.Font = null,
     /// Stats window (`HeroStats.spr`, 0x6c5fd0).
     stats: gui_windows.StatsWindow = .{},
@@ -170,12 +169,12 @@ pub const Gui = struct {
     hero_stats: gfx.Frames = .{},
     atlas: gfx.Frames = .{},
     hp_glyphs: [256]?og.formats.font.TexGlyph = @splat(null),
-    text: ?og.formats.image.Image = null,
+    text: ?og.image.Image = null,
     text_tex: ?*c.SDL_Texture = null,
     /// Ready textures of shadowed text (hints, labels), so they aren't rebuilt every frame.
     texts: gui_text.TextCache = .{},
     /// Window text (full screen).
-    win_text: ?og.formats.image.Image = null,
+    win_text: ?og.image.Image = null,
     win_tex: ?*c.SDL_Texture = null,
     panel: gfx.Frames = .{},
     /// `scaling = adaptive`: the riveted plate beside the panel (assets/panel-plate.png).
@@ -191,85 +190,73 @@ pub const Gui = struct {
     spinner: gfx.Frames = .{},
     io: Io,
     renderer: *c.SDL_Renderer,
-    sprites: archive.Archive,
+    assets: Assets,
 
     pub fn load(io: Io, gpa: Allocator, r: *c.SDL_Renderer, dat: Io.Dir) !Gui {
-        const arc = try archive.Archive.open(io, gpa, dat, "common/sprite.dat");
-        var g: Gui = .{ .gpa = gpa, .io = io, .renderer = r, .sprites = arc };
+        var g: Gui = .{ .gpa = gpa, .io = io, .renderer = r, .assets = try .classic(io, gpa, dat) };
         errdefer g.deinit();
-        const ln = lang.language(io, gpa, dat);
-        g.panel = try loadSprite(io, gpa, r, arc, "game_box.spr");
+        _ = try g.assets.archiveOf("common/sprite.dat");
+        const as = &g.assets;
+        const ua = og.core.modules.ui().assets;
+        const ln = og.core.entity.texts.language; // loaders.loadCore read string.tab
+        g.panel = try loadSprite(gpa, r, as, ua.panel);
         if (og.formats.jpeg.decode(gpa, @embedFile("panel_plate_png"))) |img| {
             var im = img;
             defer im.deinit(gpa);
             g.plate = gfx.textureLinear(r, im) catch null;
         } else |_| {}
-        g.cursor = loadSprite(io, gpa, r, arc, "mouse.spr") catch .{};
-        g.fighter_info = loadSprite(io, gpa, r, arc, "FighterInfo.spr") catch .{};
-        g.border = loadSprite(io, gpa, r, arc, "border.spr") catch .{};
-        if (archive.Archive.open(io, gpa, dat, "common/other.dat")) |other_| {
-            var other = other_;
-            defer other.close(io, gpa);
-            g.spinner = loadSprite(io, gpa, r, other, "pila.spr") catch .{};
+        g.cursor = loadSprite(gpa, r, as, ua.cursor) catch .{};
+        g.fighter_info = loadSprite(gpa, r, as, ua.fighter_info) catch .{};
+        g.border = loadSprite(gpa, r, as, ua.border) catch .{};
+        g.spinner = loadSprite(gpa, r, as, ua.spinner) catch .{};
+        g.atlas = loadSprite(gpa, r, as, ua.atlas) catch .{};
+        g.skill_spr = loadSprite(gpa, r, as, ua.skills) catch .{};
+        g.intro = loadSprite(gpa, r, as, ua.intro) catch .{};
+        g.hero_stats = loadSprite(gpa, r, as, ua.hero_stats) catch .{};
+        g.dialog_box = loadSprite(gpa, r, as, ua.dialog_box) catch .{};
+        g.raport = loadSprite(gpa, r, as, ua.report) catch .{};
+        g.item_list = loadSprite(gpa, r, as, ua.item_list) catch .{};
+        g.scrollbar = loadSprite(gpa, r, as, ua.scrollbar) catch .{};
+        var hb: [80]u8 = undefined;
+        if (as.read(gpa, std.fmt.bufPrint(&hb, "fonts/{s}.fnt", .{ua.hp_font}) catch "")) |b| {
+            defer gpa.free(b);
+            g.hp_glyphs = og.formats.font.parseTex(b) catch @splat(null);
         } else |_| {}
-        g.atlas = loadSprite(io, gpa, r, arc, "fonts.spr") catch .{};
-        g.skill_spr = loadSprite(io, gpa, r, arc, "WeaponSkill.spr") catch .{};
-        g.intro = loadSprite(io, gpa, r, arc, "intro.spr") catch .{};
-        g.hero_stats = loadSprite(io, gpa, r, arc, "HeroStats.spr") catch .{};
-        g.dialog_box = loadSprite(io, gpa, r, arc, "dialog_box.spr") catch .{};
-        g.raport = loadSprite(io, gpa, r, arc, "raport.spr") catch .{};
-        g.item_list = loadSprite(io, gpa, r, arc, "item_list.spr") catch .{};
-        g.scrollbar = loadSprite(io, gpa, r, arc, "GScrollBar.spr") catch .{};
-        if (archive.Archive.open(io, gpa, dat, "common/other.dat")) |other_arc| {
-            var other = other_arc;
-            defer other.close(io, gpa);
-            if (other.find("02_hp.fnt")) |e| if (other.readAlloc(io, gpa, e)) |b| {
+        // The interface fonts: composition's, read once (the inventory has the same).
+        const fonts = og.loaders.loadUiFonts(io, dat);
+        g.font = if (fonts.small) |f| f.* else null;
+        g.sys_font = if (fonts.system) |f| f.* else null;
+        g.text = og.image.Image.init(gpa, 640, panel_h) catch null;
+        // 3d_msg font (0x47ad40): page 1 is `3d_msg_1`; for language N > 1 the
+        // second page is the `3d_msg_N<suffix>` set, whose glyphs replace the main ones.
+        var nbuf: [48]u8 = undefined;
+        var pb: [48]u8 = undefined;
+        const pages = [2]?[]const u8{ std.fmt.bufPrint(&pb, "{s}_1", .{ua.msg_font}) catch null, lang.setName(&nbuf, ua.msg_font, ln) };
+        for (pages, 0..) |name_, k| {
+            const name = name_ orelse continue;
+            var fb: [64]u8 = undefined;
+            const fnt = std.fmt.bufPrint(&fb, "fonts/{s}.fnt", .{name}) catch continue;
+            if (as.read(gpa, fnt)) |b| {
                 defer gpa.free(b);
-                g.hp_glyphs = og.formats.font.parseTex(b) catch @splat(null);
-            } else |_| {};
-            if (lang.readFont(io, gpa, &other, "03_small", ln)) |b| {
-                g.font_bytes = b;
-                g.font = og.formats.font.parse(b) catch null;
-            }
-            if (lang.readFont(io, gpa, &other, "04_system", ln)) |b| {
-                g.sys_bytes = b;
-                g.sys_font = og.formats.font.parse(b) catch null;
-            }
-        } else |_| {}
-        g.text = og.formats.image.Image.init(gpa, 640, panel_h) catch null;
-        if (archive.Archive.open(io, gpa, dat, "common/other.dat")) |oa| {
-            var other = oa;
-            defer other.close(io, gpa);
-            // 3d_msg font (0x47ad40): page 1 is `3d_msg_1`; for language N > 1 the
-            // second page is the `3d_msg_N<suffix>` set, whose glyphs replace the main ones.
-            var nbuf: [48]u8 = undefined;
-            const pages = [2]?[]const u8{ "3d_msg_1", lang.setName(&nbuf, "3d_msg", ln) };
-            for (pages, 0..) |name_, k| {
-                const name = name_ orelse continue;
-                var fb: [64]u8 = undefined;
-                const fnt = std.fmt.bufPrint(&fb, "{s}.fnt", .{name}) catch continue;
-                if (other.find(fnt)) |e| if (other.readAlloc(io, gpa, e)) |b| {
-                    defer gpa.free(b);
-                    const glyphs: [256]?og.formats.font.TexGlyph = og.formats.font.parseTex(b) catch @splat(null);
-                    for (glyphs, &g.msg_glyphs, &g.msg_page) |x, *dst, *pg| if (x != null) {
-                        dst.* = x;
-                        pg.* = @intCast(k);
-                    };
-                } else |_| {};
-                var tb: [96]u8 = undefined;
-                const tex = std.fmt.bufPrint(&tb, "gfx_3d\\textures\\{s}.3df", .{name}) catch continue;
-                if (other.find(tex)) |e| if (other.readAlloc(io, gpa, e)) |b| {
-                    defer gpa.free(b);
-                    if (og.formats.tex3df.decode(gpa, b)) |img_| {
-                        var img = img_;
-                        defer img.deinit(gpa);
-                        g.msg_tex[k] = gfx.textureLinear(r, img) catch null;
-                        if (g.msg_tex[k]) |t| _ = c.SDL_SetTextureBlendMode(t, c.SDL_BLENDMODE_ADD);
-                    } else |_| {}
-                } else |_| {};
-            }
-        } else |_| {}
-        g.win_text = og.formats.image.Image.init(gpa, 640, 480) catch null;
+                const glyphs: [256]?og.formats.font.TexGlyph = og.formats.font.parseTex(b) catch @splat(null);
+                for (glyphs, &g.msg_glyphs, &g.msg_page) |x, *dst, *pg| if (x != null) {
+                    dst.* = x;
+                    pg.* = @intCast(k);
+                };
+            } else |_| {}
+            var tb: [96]u8 = undefined;
+            const tex = std.fmt.bufPrint(&tb, "textures/{s}.3df", .{name}) catch continue;
+            if (as.read(gpa, tex)) |b| {
+                defer gpa.free(b);
+                if (og.formats.tex3df.decode(gpa, b)) |img_| {
+                    var img = img_;
+                    defer img.deinit(gpa);
+                    g.msg_tex[k] = gfx.textureLinear(r, img) catch null;
+                    if (g.msg_tex[k]) |t| _ = c.SDL_SetTextureBlendMode(t, c.SDL_BLENDMODE_ADD);
+                } else |_| {}
+            } else |_| {}
+        }
+        g.win_text = og.image.Image.init(gpa, 640, 480) catch null;
         return g;
     }
 
@@ -289,8 +276,6 @@ pub const Gui = struct {
         if (self.plate) |t| c.SDL_DestroyTexture(t);
         self.texts.deinit();
         if (self.text) |*t| t.deinit(self.gpa);
-        if (self.font_bytes.len > 0) self.gpa.free(self.font_bytes);
-        if (self.sys_bytes.len > 0) self.gpa.free(self.sys_bytes);
         self.hero_stats.deinit(self.gpa);
         var it = self.portraits.iterator();
         while (it.next()) |e| {
@@ -302,13 +287,12 @@ pub const Gui = struct {
         self.fighter_info.deinit(self.gpa);
         self.border.deinit(self.gpa);
         self.spinner.deinit(self.gpa);
-        self.sprites.close(self.io, self.gpa);
+        self.assets.deinit();
     }
 
     /// Hero portrait (`spriteFile`, else the name), cached.
     pub fn portrait(self: *Gui, hero: *og.script.object.Object) ?*gfx.Frames {
-        const sf = hero.getString("spriteFile");
-        return self.icon(if (sf.len > 0) sf else hero.name);
+        return self.icon(og.core.entity.hero(hero).portrait);
     }
 
     /// Icon `icons\<name>.spr` (portrait or item), cached.
@@ -318,8 +302,8 @@ pub const Gui = struct {
         const key = std.ascii.lowerString(&key_buf, name);
         if (self.portraits.getPtr(key)) |f| return f;
         var buf: [80]u8 = undefined;
-        const file = std.fmt.bufPrint(&buf, "icons\\{s}.spr", .{key}) catch return null;
-        const frames = loadSprite(self.io, self.gpa, self.renderer, self.sprites, file) catch gfx.Frames{};
+        const file = std.fmt.bufPrint(&buf, "sprites/icons/{s}.spr", .{key}) catch return null;
+        const frames = loadSprite(self.gpa, self.renderer, &self.assets, file) catch gfx.Frames{};
         const owned = self.gpa.dupe(u8, key) catch return null;
         self.portraits.put(self.gpa, owned, frames) catch {
             self.gpa.free(owned);
@@ -333,11 +317,10 @@ pub const Gui = struct {
     pub const short_rows = [4][4]f32{ .{ 6, 9, 80, 61 }, .{ 6, 61, 80, 114 }, .{ 6, 114, 80, 166 }, .{ 6, 166, 80, 219 } };
 };
 
-fn loadSprite(io: Io, gpa: Allocator, r: *c.SDL_Renderer, arc: archive.Archive, name: []const u8) !gfx.Frames {
-    const e = arc.find(name) orelse return error.NotFound;
-    const data = try arc.readAlloc(io, gpa, e);
+fn loadSprite(gpa: Allocator, r: *c.SDL_Renderer, as: *Assets, path: []const u8) !gfx.Frames {
+    const data = try as.read(gpa, path);
     defer gpa.free(data);
-    return gfx.loadSmooth(gpa, r, name, data);
+    return gfx.loadSmooth(gpa, r, path, data);
 }
 
 /// Cursor hint (0x45bef0): font 2, white with shadow, at (mouse + (40, 20)); the main
@@ -355,7 +338,7 @@ pub fn drawHint(self: *Gui, r: *c.SDL_Renderer, mx: f32, my: f32, main: []const 
     h.update(&extra_col);
     h.update(std.mem.asBytes(&gui_text.fontId(f)));
     const tex = self.texts.get(h.final()) orelse blk: {
-        var img = try og.formats.image.Image.init(self.gpa, tw, f.height + 2);
+        var img = try og.image.Image.init(self.gpa, tw, f.height + 2);
         defer img.deinit(self.gpa);
         @memset(img.pixels, 0);
         // Shadowed (0x47b4e0 with flag 1).
@@ -367,7 +350,7 @@ pub fn drawHint(self: *Gui, r: *c.SDL_Renderer, mx: f32, my: f32, main: []const 
 }
 
 /// Shadowed text (0x47b4e0): first at (x+1, y+1) in (10,10,10).
-pub fn textShadow(f: og.formats.font.Font, img: og.formats.image.Image, x: i32, y: i32, s: []const u8, col: [3]u8) void {
+pub fn textShadow(f: og.formats.font.Font, img: og.image.Image, x: i32, y: i32, s: []const u8, col: [3]u8) void {
     f.draw(img, x + 1, y + 1, s, .{ 10, 10, 10 });
     f.draw(img, x, y, s, col);
 }

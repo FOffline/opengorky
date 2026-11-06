@@ -74,7 +74,7 @@ fn menuKey(v: *Viewer, ev: c.SDL_Event) !bool {
             c.SDLK_RETURN, c.SDLK_KP_ENTER => try flow.gameOverChoose(v, g.go_sel == 0),
             c.SDLK_UP, c.SDLK_DOWN => {
                 g.go_sel ^= 1;
-                v.uiSound("menu1");
+                v.uiSound(og.core.modules.ui().sounds.menu_open);
             },
             else => {},
         }
@@ -89,7 +89,7 @@ fn menuKey(v: *Viewer, ev: c.SDL_Event) !bool {
             c.SDLK_RETURN, c.SDLK_KP_ENTER => try flow.menuAction(v, m.enter()),
             c.SDLK_BACKSPACE => if (m.editing != null) {
                 menu_slots.backspace(m);
-                v.uiSound("keyboard");
+                v.uiSound(og.core.modules.ui().sounds.keyboard);
             } else m.back(),
             else => {},
         }
@@ -148,7 +148,7 @@ fn blockedKey(v: *Viewer, ev: c.SDL_Event) bool {
     // turned on by accident.
     if (v.play) switch (ev.key.key) {
         c.SDLK_F1, c.SDLK_LEFTBRACKET, c.SDLK_RIGHTBRACKET, c.SDLK_L, c.SDLK_O, c.SDLK_M, c.SDLK_K, c.SDLK_N, c.SDLK_H, c.SDLK_MINUS, c.SDLK_EQUALS, c.SDLK_BACKSPACE, c.SDLK_R, c.SDLK_HOME => return true,
-        c.SDLK_TAB => if (v.level) |*l| if (l.world.combat_map == null) return true,
+        c.SDLK_TAB => if (v.level) |*l| if (l.world.map.combat == null) return true,
         else => {},
     };
     return false;
@@ -189,7 +189,7 @@ fn gameKey(v: *Viewer, ev: c.SDL_Event) !?Flow {
         },
         // Tab in battle: the battle grid (0x4b4aa0); outside battle: speed-up (debug).
         c.SDLK_TAB => if (v.level) |*l| {
-            if (l.world.combat_map != null) battle_grid.toggleGrid(l) else l.speed = 8;
+            if (l.world.map.combat != null) battle_grid.toggleGrid(l) else l.speed = 8;
         },
         c.SDLK_Q => if (v.level) |*l| if (l.world.battle) |*b| control_mod.cycleWeapon(b, l.world),
         c.SDLK_E, c.SDLK_RETURN => if (v.level) |*l| if (l.world.battle) |*b| try turns_mod.endTurn(b, l.world),
@@ -211,7 +211,7 @@ fn gameKey(v: *Viewer, ev: c.SDL_Event) !?Flow {
             if (!v.play) {
                 l.paused = !l.paused;
             } else if (v.gui != null and l.world.battle != null and gui_panel.enabled(l.world, .push)) {
-                l.world.mouse.push = !l.world.mouse.push;
+                l.mode.push = !l.mode.push;
             }
         },
         // G: give (panel button 1).
@@ -295,7 +295,7 @@ fn onEscape(v: *Viewer) Flow {
         // Esc (0x415ad0): to the parent screen; in the in-game menu — resume.
         if (m.open and m.screen == .ingame and v.level != null) {
             m.open = false;
-            v.uiSound("click");
+            v.uiSound(og.core.modules.ui().sounds.click);
             return .next;
         }
         if (m.open and m.screen != .main) {

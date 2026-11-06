@@ -9,16 +9,16 @@ const common = @import("common.zig");
 /// Headless battle: heroes and enemies move by AI until one side wins.
 /// Battles in sequence (`a,b,c`): heroes, their health, exp and items carry over.
 pub fn autoBattle(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, levels: []const u8, turns: i32, seed: u64) !void {
-    var dat = try common.openDat(io, game_dir, .{});
+    var dat = try common.openDat(io, game_dir);
     defer dat.close(io);
-    var models = try og.actor.model_cache.Cache.open(io, gpa, dat);
+    var models = try og.compose.models.open(io, gpa, dat, null);
     defer models.deinit();
     var party: ?og.world.party.Party = null;
     defer if (party) |*p| p.deinit();
     var it = std.mem.splitScalar(u8, levels, ',');
     while (it.next()) |level| {
         try out.print("=== {s}\n", .{level});
-        const world = try og.game.life.create(io, gpa, dat, level, &models, .{ .party = if (party) |*p| p else null });
+        const world = try og.loaders.world.create(io, gpa, dat, level, &models, .{ .party = if (party) |*p| p else null });
         defer world.destroy();
         try battleOne(out, world, level, turns, seed);
         if (party) |*p| p.deinit();

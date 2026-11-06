@@ -1,0 +1,25 @@
+component Reinforcements for battle {
+    param list<Wave> waves = [] "Волны";
+    var int killed = 0;
+    fn OnTurnStart(side, turn) {
+        arrive(Trigger::turn_start, side, turn);
+    }
+    fn OnTurnEnd(side, turn) {
+        arrive(Trigger::turn_end, side, turn);
+    }
+    fn OnTick() {
+        if (host.enemies_killed != killed) {
+            killed = host.enemies_killed;
+            arrive(Trigger::enemy_dies, nil, killed);
+        }
+    }
+    fn arrive(when, side, n) {
+        for w in waves {
+            if (w.when == when and w.turn == n and (side == nil or w.side == side)) {
+                for s in w.spawn {
+                    battle::SpawnEnemy(s.who, s.tile[0], s.tile[1]);
+                }
+            }
+        }
+    }
+}

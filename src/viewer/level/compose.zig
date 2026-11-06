@@ -21,29 +21,32 @@ const Allocator = std.mem.Allocator;
 const LevelView = level_file.LevelView;
 const SoundContext = level_file.SoundContext;
 const World = og.state.world.World;
-const lf = og.formats.level_files;
-const archive = og.formats.archive;
-const level = og.formats.level;
+const core_map = og.core.map;
 const Scene = og.audio.scene.Scene;
 const model_cache = og.actor.model_cache;
 
 /// Draws the level world `world` (owned by game.Game).
-pub fn load(io: Io, gpa: Allocator, r: *c.SDL_Renderer, dat: Io.Dir, world: *World, snd: ?SoundContext, models: ?*model_cache.Cache) !LevelView {
+pub fn load(io: Io, gpa: Allocator, r: *c.SDL_Renderer, dat: Io.Dir, world: *World, snd: ?SoundContext, models: ?*model_cache.Cache, textures: ?*og.render.textures.Textures) !LevelView {
     const name = world.level_name;
-    var lvl = try level.load(io, gpa, dat, name);
-    errdefer lvl.deinit();
+    var backdrop_arena: std.heap.ArenaAllocator = .init(gpa);
+    errdefer backdrop_arena.deinit();
+    const bd = try world.res.source.loadBackdrop(backdrop_arena.allocator());
     var path_buf: [256]u8 = undefined;
-    var sprites = try archive.Archive.open(io, gpa, dat, try std.fmt.bufPrint(&path_buf, "{s}/sprite.dat", .{name}));
-    errdefer sprites.close(io, gpa);
+    var sprites: og.loaders.assets.Stack = try .classic(io, gpa, dat);
+    errdefer sprites.deinit();
+    // No sprite.dat, no view (as before the stack).
+    _ = try sprites.archiveOf(try std.fmt.bufPrint(&path_buf, "{s}/sprite.dat", .{name}));
 
     var view: LevelView = .{
         .gpa = gpa,
         .io = io,
         .renderer = r,
-        .level = lvl,
+        .backdrop = bd,
+        .backdrop_arena = backdrop_arena,
         .world = world,
-        .sprites = sprites,
+        .assets = sprites,
         .models = models,
+        .textures = textures,
         .frame_arena = .init(gpa),
         .sound_ctx = snd,
     };
@@ -51,24 +54,24 @@ pub fn load(io: Io, gpa: Allocator, r: *c.SDL_Renderer, dat: Io.Dir, world: *Wor
         view.background.deinit(gpa);
         for (view.walk_textures) |t| if (t) |tex| c.SDL_DestroyTexture(tex);
     }
-    if (lvl.background) |bg| view.background = try level_file.loadEntry(io, gpa, r, sprites, bg);
-    if (models != null) try actor_layer.makeLayer(&view, 1, 640);
+    if (bd.background) |bg| view.background = try level_file.loadEntry(gpa, r, &view.assets, bg);
+    if (models != null) try actor_layer.makeLayer(&view, 1, 640, 480);
     if (snd) |s| {
         view.scene = Scene.init(gpa, s.bank, s.mixer, s.params);
         view.scene.?.startMusic(og.game.levelMusic(world)) catch |err| std.log.warn("music: {t}", .{err});
     }
-    for ([2]?lf.WalkMap{ world.walk_map, world.walk_map2 }, &view.walk_textures) |wm, *tex| {
+    for ([2]?core_map.WalkMap{ world.map.walk, world.map.walk2 }, &view.walk_textures) |wm, *tex| {
         if (wm) |m| tex.* = try debug_layers.walkMapTexture(gpa, r, m);
     }
     return view;
 }
 
 /// Actor layer detail (pixels per screen pixel); the layer is recreated.
-pub fn setDetail(self: *LevelView, ss: u32, lw: u32) void {
-    if (self.layer == null or (ss == self.ss and lw == self.layer_w)) return;
-    actor_layer.makeLayer(self, ss, lw) catch |err| {
+pub fn setDetail(self: *LevelView, ss: u32, lw: u32, lh: u32) void {
+    if (self.layer == null or (ss == self.ss and lw == self.layer_w and lh == self.layer_h)) return;
+    actor_layer.makeLayer(self, ss, lw, lh) catch |err| {
         std.log.warn("actor layer ×{d}: {t}", .{ ss, err });
-        actor_layer.makeLayer(self, 1, 640) catch {};
+        actor_layer.makeLayer(self, 1, 640, 480) catch {};
     };
 }
 
@@ -85,9 +88,9 @@ pub fn draw(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32, mouse: [2]f32)
             const n = World.nativeOf(o);
             if (n.kind != .animation and n.kind != .active_animation) continue;
             if (!o.enabled or n.deleted or !n.visible) continue;
-            const frames = self.spriteFrames(o.getString("spriteFile")) orelse continue;
+            const frames = self.spriteFrames(o.getString("sprite")) orelse continue;
             if (frames.len() == 0) continue;
-            const frame: usize = @intCast(std.math.clamp(o.getInt("cur_frame"), 0, @as(i32, @intCast(frames.len() - 1))));
+            const frame: usize = @intCast(std.math.clamp(o.getInt("frame"), 0, @as(i32, @intCast(frames.len() - 1))));
             const x: f32 = @floatFromInt(o.getInt("pos_x"));
             const y: f32 = @floatFromInt(o.getInt("pos_y"));
             try frames.draw(r, frame, x - scroll[0], y - scroll[1]);

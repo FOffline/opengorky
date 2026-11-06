@@ -1,4 +1,5 @@
 //! Script builtins: items and weapons (Item_*, Weapon_New, ammo).
+const std = @import("std");
 const state_object = @import("../state.zig").object;
 const fields = @import("../fields.zig");
 const areas = @import("../world.zig").areas;
@@ -50,7 +51,7 @@ fn itemNew(w: *World, args: []const Value, kind: state_object.Kind) !void {
     _ = try inventory.create.newItem(w, args_mod.argString(args, 0), args_mod.argString(args, 1), owner, counter, kind);
 }
 
-/// FighterSetWeaponSkillLevel(fighter, weapon nameID, level) (0x4be990 → 0x48fe30).
+/// FighterSetWeaponSkillLevel(fighter, weapon classic_id, level) (0x4be990 → 0x48fe30).
 pub fn biFighterSetWeaponSkillLevel(ctx: *anyopaque, rt: *Runtime, _: *Object, args: []const Value) anyerror!Value {
     const o = args_mod.targetObject(ctx, rt, args) orelse return .zero;
     if (args.len < 3 or World.nativeOf(o).kind != .actor) return .zero;
@@ -65,7 +66,7 @@ pub fn biFighterSetWeaponSkillLevel(ctx: *anyopaque, rt: *Runtime, _: *Object, a
 }
 
 pub fn biItemGetNameID(ctx: *anyopaque, rt: *Runtime, self: *Object, args: []const Value) anyerror!Value {
-    return args_mod.itemField(ctx, rt, self, args, "nameID");
+    return args_mod.itemField(ctx, rt, self, args, "classic_id");
 }
 
 /// Item_Animation(item, "anim", reverse): item model animation (box: Open is
@@ -98,12 +99,12 @@ pub fn biItemSetPos(ctx: *anyopaque, rt: *Runtime, self: *Object, args: []const 
     if (idx >= 0) {
         const pt = area.points[@intCast(idx)];
         bg = .{ pt[0], pt[1] };
-        fields.setF(o, "walk_angle", pt[2]);
+        fields.setF(o, "approach_angle", pt[2]);
     }
     bg = .{ @trunc(bg[0]), @trunc(bg[1]) };
-    const h: f32 = if (w.walk_map) |m| floor.floorHeight(m, bg) else 0;
-    o.setInt("walk_x", value.floatToInt(bg[0]));
-    o.setInt("walk_y", value.floatToInt(bg[1] + 20));
+    const h: f32 = if (w.map.walk) |m| floor.floorHeight(m, bg) else 0;
+    o.setInt("approach_x", value.floatToInt(bg[0]));
+    o.setInt("approach_y", value.floatToInt(bg[1] + 20));
     fields.setPos(o, w.cam.unproject(bg[0], bg[1], h + args[3].toFloat()));
     return .zero;
 }
@@ -116,7 +117,7 @@ pub fn biItemSetAngle(ctx: *anyopaque, rt: *Runtime, self: *Object, args: []cons
 
 pub fn biItemSetNameID(ctx: *anyopaque, rt: *Runtime, self: *Object, args: []const Value) anyerror!Value {
     const o = args_mod.objectArg(ctx, rt, self, args) orelse return .zero;
-    if (args.len > 1) fields.setNameId(o, args[1].toInt());
+    if (args.len > 1) fields.setClassicId(o, args[1].toInt());
     return .zero;
 }
 
@@ -160,12 +161,32 @@ pub fn biItemSetVisible(ctx: *anyopaque, rt: *Runtime, self: *Object, args: []co
 
 pub fn biItemSetFuncID(ctx: *anyopaque, rt: *Runtime, self: *Object, args: []const Value) anyerror!Value {
     const o = args_mod.objectArg(ctx, rt, self, args) orelse return .zero;
-    if (args.len > 1) o.setInt("funcID", args[1].toInt());
+    if (args.len > 1) o.setInt("action", if (args[1] == .string) actionNumber(args[1].string) orelse return .zero else args[1].toInt());
     return .zero;
 }
 
+/// ActionId(name): the number of action `name` (rules Action; "walk" −1, "none" 0), 0: none such.
+pub fn biActionId(_: *anyopaque, _: *Runtime, _: *Object, args: []const Value) anyerror!Value {
+    return .{ .int = actionNumber(args_mod.argString(args, 0)) orelse 0 };
+}
+
+/// The number of action word `word`: "walk" −1, "none" 0, else its rules Action's; null: none.
+fn actionNumber(word: []const u8) ?i32 {
+    if (@import("../core.zig").schema.noAction(word)) |n| return n;
+    return if (@import("../rules.zig").actionNamed(word)) |a| a.classic_id else null;
+}
+
+/// Runtime.field_words: an action field's word (`action`, `action1`…`action9`).
+pub fn actionWord(field: []const u8, word: []const u8) ?i32 {
+    if (!std.ascii.startsWithIgnoreCase(field, "action")) return null;
+    if (field.len != 6 and !(field.len == 7 and std.ascii.isDigit(field[6]))) return null;
+    return actionNumber(word);
+}
+
 pub fn biItemGetType(ctx: *anyopaque, rt: *Runtime, self: *Object, args: []const Value) anyerror!Value {
-    return args_mod.itemField(ctx, rt, self, args, "type");
+    const o = args_mod.objectArg(ctx, rt, self, args) orelse return .{ .int = -1 };
+    if (!world_mod.isItem(o)) return .{ .int = -1 };
+    return .{ .int = fields.itemType(o) };
 }
 
 /// AnyHero_HaveItem("item") (0x4c05a0): the item's `Owner` is a hero.

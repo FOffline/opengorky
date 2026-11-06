@@ -11,7 +11,7 @@ docker run --rm -v "$ROOT":/src:ro -v "$GAME":/game:ro -v opengorky-linux-cache:
     set -e
     cp -r /src /work && cd /work && rm -rf zig-out .zig-cache
     zig build test
-    zig build
+    zig build -Drelease
     ./zig-out/bin/gorky-tool check /game | tail -3
     sh scripts/fullgame.sh /game | grep -E "end of game|: lost" | tail -3
     sh scripts/regress.sh /game

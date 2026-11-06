@@ -10,7 +10,6 @@ const Allocator = std.mem.Allocator;
 const og = @import("opengorky");
 const c = @import("sdl");
 const gfx = @import("../media/gfx.zig");
-const archive = og.formats.archive;
 /// Glyph baseline in the atlas (sixth field of a `03_sejf.fnt` entry).
 const baseline = 39;
 const World = og.state.world.World;
@@ -37,19 +36,21 @@ pub const SafeView = struct {
     held: ?usize = null,
 
     pub fn load(io: Io, gpa: Allocator, r: *c.SDL_Renderer, dat: Io.Dir) !SafeView {
-        var sprites = try archive.Archive.open(io, gpa, dat, "common/sprite.dat");
-        defer sprites.close(io, gpa);
-        var other = try archive.Archive.open(io, gpa, dat, "common/other.dat");
-        defer other.close(io, gpa);
-        const spr = try sprites.readAlloc(io, gpa, sprites.find("sejf.spr") orelse return error.NotFound);
+        var as: og.loaders.assets.Stack = try .classic(io, gpa, dat);
+        defer as.deinit();
+        _ = try as.archiveOf("common/sprite.dat");
+        _ = try as.archiveOf("common/other.dat");
+        const ua = og.core.modules.ui().assets;
+        const spr = try as.read(gpa, ua.safe);
         defer gpa.free(spr);
-        var frames = try gfx.loadSmooth(gpa, r, "sejf.spr", spr);
+        var frames = try gfx.loadSmooth(gpa, r, ua.safe, spr);
         errdefer frames.deinit(gpa);
-        const fonts = try sprites.readAlloc(io, gpa, sprites.find("fonts.spr") orelse return error.NotFound);
+        const fonts = try as.read(gpa, ua.atlas);
         defer gpa.free(fonts);
-        var atlas = try gfx.loadFrames(gpa, r, "fonts.spr", fonts);
+        var atlas = try gfx.loadFrames(gpa, r, ua.atlas, fonts);
         errdefer atlas.deinit(gpa);
-        const fnt = try other.readAlloc(io, gpa, other.find("03_sejf.fnt") orelse return error.NotFound);
+        var fb: [80]u8 = undefined;
+        const fnt = try as.read(gpa, try std.fmt.bufPrint(&fb, "fonts/{s}.fnt", .{ua.safe_font}));
         defer gpa.free(fnt);
         return .{ .gpa = gpa, .frames = frames, .atlas = atlas, .glyphs = try og.formats.font.parseTex(fnt) };
     }
@@ -61,9 +62,9 @@ pub const SafeView = struct {
 
     /// Key under a screen point: row·3 + column (0..11).
     fn keyAt(x: f32, y: f32) ?usize {
-        const adj = og.formats.adjust;
-        const fx = (x - origin[0] - @as(f32, @floatFromInt(adj.getInt("safe_key_start_x", 49)))) / @as(f32, @floatFromInt(adj.getInt("safe_key_width", 42)));
-        const fy = (y - origin[1] - @as(f32, @floatFromInt(adj.getInt("safe_key_start_y", 24)))) / @as(f32, @floatFromInt(adj.getInt("safe_key_height", 42)));
+        const adj = og.rules.adjust;
+        const fx = (x - origin[0] - @as(f32, @floatFromInt(adj.int("safe_key_start_x")))) / @as(f32, @floatFromInt(adj.int("safe_key_width")));
+        const fy = (y - origin[1] - @as(f32, @floatFromInt(adj.int("safe_key_start_y")))) / @as(f32, @floatFromInt(adj.int("safe_key_height")));
         if (fx < 0 or fy < 0 or fx >= 3 or fy >= 4) return null;
         return @as(usize, @intFromFloat(fy)) * 3 + @as(usize, @intFromFloat(fx));
     }

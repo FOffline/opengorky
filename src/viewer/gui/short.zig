@@ -90,18 +90,18 @@ pub fn shortTooltip(self: *Gui, w: *og.state.world.World, x: f32, y: f32, string
 /// weapon (suffix in `tip_extra`). The hand button shows it too (0x4b26e8).
 pub fn itemTooltip(self: *Gui, hero: *og.script.object.Object, o: *og.script.object.Object, strings: ?*const og.formats.strtab.Table) ?[]const u8 {
     const st = strings orelse return null;
-    const name = st.get(og.fields.nameId(o)) orelse o.name;
+    const name = st.get(og.fields.classicId(o)) orelse o.name;
     self.tip_extra = "";
-    if (o.getInt("type") == og.inventory.item.type_medicine) {
-        self.tip_extra = std.fmt.bufPrint(&self.tip_extra_buf, " +{d}{s}", .{ og.fields.hp(o), st.get(576) orelse "HP" }) catch "";
+    if (og.fields.itemType(o) == og.inventory.item.type_medicine) {
+        self.tip_extra = std.fmt.bufPrint(&self.tip_extra_buf, " +{d}{s}", .{ og.fields.hp(o), st.get(og.core.ui_text.id(.hp_short)) orelse "HP" }) catch "";
         self.tip_extra_col = .{ 0, 255, 255 };
     } else if (og.state.world.World.nativeOf(o).kind == .weapon) {
         // Hero skill level (0x45c712 → 0x48fdb0): missing from the list — 1; > 0 — "Lv.N".
         const lv = for (og.state.world.World.nativeOf(hero).growth.skills.items) |sk| {
-            if (sk.id == og.fields.nameId(o)) break sk.level;
+            if (sk.id == og.fields.classicId(o)) break sk.level;
         } else 1;
         if (lv > 0) {
-            self.tip_extra = std.fmt.bufPrint(&self.tip_extra_buf, " {s}{d}", .{ st.get(577) orelse "Lv.", lv }) catch "";
+            self.tip_extra = std.fmt.bufPrint(&self.tip_extra_buf, " {s}{d}", .{ st.get(og.core.ui_text.id(.level_short)) orelse "Lv.", lv }) catch "";
             self.tip_extra_col = .{ 255, 255, 0 };
         }
     }
@@ -125,11 +125,11 @@ pub fn drawShortList(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World) !
         const k = self.short_scroll + i;
         if (k >= items.len) break;
         const it = items[k];
-        if (self.icon(it.item.getString("spriteFile"))) |fr| if (fr.len() > 1) {
+        if (self.icon(it.item.getString("icon"))) |fr| if (fr.len() > 1) {
             const sz = fr.sizes.items[1];
             try fr.drawShadowed(r, 1, gfx.Frames.center(83 + rc[0], rc[2] - rc[0], sz[0]), gfx.Frames.center(185 + rc[1], rc[3] - rc[1], sz[1]));
         };
-        if (!og.inventory.equipment.weaponVisible(og.fields.nameId(hero), og.fields.nameId(it.item)) and self.panel.len() > 43)
+        if (!og.inventory.equipment.weaponVisible(hero, it.item) and self.panel.len() > 43)
             try self.panel.draw(r, 43, 83 + rc[0], 185 + rc[1]);
         if (og.inventory.item.typeOf(it.item) == .ammo or it.count > 1) if (self.sys_font orelse self.font) |f3| {
             var nb: [12]u8 = undefined;

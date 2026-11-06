@@ -14,6 +14,8 @@ pub const Ctx = struct {
     io: std.Io,
     mixer: *og.audio.mixer.Mixer,
     opts: *const Options,
+    /// --mix-dump: the mixer's output so far.
+    mix_out: ?*std.ArrayList(f32) = null,
     dragging: bool = false,
     drag_dist: f32 = 0,
     /// The UI took the press (the quick list closed on press), so the release of

@@ -3,6 +3,8 @@
 //! The file is a sequence of chunks `u32 size (with header), u32 type, data`
 //! (loader 0x44c6c0 in the exe). A model has several parts, each with its own
 //! vertices, triangles and skeleton bone influences.
+//! OpenGorky (layer only, the exe never reads it): a part past u16 vertex indices keeps
+//! its triangles in chunk 15 (u32 indices) instead of chunk 6.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -28,7 +30,8 @@ pub const Part = struct {
     /// Per vertex, a range `[start, end)` into `influences`.
     ranges: [][2]u32,
     influences: []Influence,
-    triangles: [][3]u16,
+    /// Chunk 6 (u16) or 15 (u32, OpenGorky) vertex indices.
+    triangles: [][3]u32,
     /// Part texture (chunk 9 after this part's chunk 3; menus have one per part).
     texture: []const u8 = "",
 };
@@ -72,12 +75,6 @@ pub const Mesh = struct {
 
     pub fn boneCount(self: Mesh) usize {
         return self.joints.len;
-    }
-
-    /// Attachment point by name (case-insensitive), first match.
-    pub fn holdMode(self: Mesh, name: []const u8) ?HoldMode {
-        for (self.hold_modes) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h;
-        return null;
     }
 };
 
@@ -123,6 +120,9 @@ const Reader = struct {
     }
 };
 
+/// Chunk 6 with u32 indices: a part over 65536 vertices (OpenGorky only).
+const wide_triangles = 15;
+
 /// Result strings point into `bytes`.
 pub fn parse(gpa: Allocator, bytes: []const u8) Error!Mesh {
     var mesh: Mesh = .{ .arena = .init(gpa) };
@@ -166,8 +166,13 @@ pub fn parse(gpa: Allocator, bytes: []const u8) Error!Mesh {
             },
             6 => {
                 const p = cur orelse return error.BadChunk;
-                p.triangles = try a.alloc([3]u16, try r.count(6));
+                p.triangles = try a.alloc([3]u32, try r.count(6));
                 for (p.triangles) |*t| t.* = .{ try r.u16_(), try r.u16_(), try r.u16_() };
+            },
+            wide_triangles => {
+                const p = cur orelse return error.BadChunk;
+                p.triangles = try a.alloc([3]u32, try r.count(12));
+                for (p.triangles) |*t| t.* = .{ try r.u32_(), try r.u32_(), try r.u32_() };
             },
             7 => {
                 const p = cur orelse return error.BadChunk;
@@ -240,26 +245,47 @@ const max_part_triangles = 2048;
 
 const LimitError = error{ StringTooLong, NameTooLong, TooManyVertices, TooManyTriangles, BadTriangle, BadRanges, BadBone };
 
-/// Whether the exe can load and draw `m` (see the limits above).
-pub fn checkLimits(m: Mesh) LimitError!void {
-    for ([_][]const u8{ m.name, m.texture, m.animations }) |s| if (s.len > max_string) return error.StringTooLong;
+pub const Target = @import("tex3df.zig").Target;
+
+/// Whether `target` can load and draw `m`: the format's own needs always (indices and
+/// bones in range), for `.both` also the exe's limits above (u16 indices among them).
+pub fn checkLimits(m: Mesh, target: Target) LimitError!void {
+    const exe = target == .both;
+    if (exe) for ([_][]const u8{ m.name, m.texture, m.animations }) |s| if (s.len > max_string) return error.StringTooLong;
     for (m.hold_modes) |h| {
-        if (h.name.len > max_name) return error.NameTooLong;
+        if (exe and h.name.len > max_name) return error.NameTooLong;
         // Bone −1: a point in model space (ponton, which has no bones).
         if (h.bone >= m.joints.len and h.bone != no_bone) return error.BadBone;
     }
     for (m.parts) |p| {
-        if (p.name.len > max_name or p.texture.len > max_texture) return error.NameTooLong;
-        if (p.vertices.len > max_part_vertices) return error.TooManyVertices;
-        if (p.triangles.len > max_part_triangles) return error.TooManyTriangles;
+        if (exe and (p.name.len > max_name or p.texture.len > max_texture)) return error.NameTooLong;
+        if (exe and p.vertices.len > max_part_vertices) return error.TooManyVertices;
+        if (exe and p.triangles.len > max_part_triangles) return error.TooManyTriangles;
         for (p.triangles) |t| {
-            if (t[0] == t[1] or t[1] == t[2] or t[0] == t[2]) return error.BadTriangle;
+            if (exe and (t[0] == t[1] or t[1] == t[2] or t[0] == t[2])) return error.BadTriangle;
             for (t) |i| if (i >= p.vertices.len) return error.BadTriangle;
         }
-        if (p.ranges.len != p.vertices.len or p.influences.len > 0xffff) return error.BadRanges;
+        if (p.ranges.len != p.vertices.len or (exe and p.influences.len > 0xffff)) return error.BadRanges;
         for (p.ranges) |rg| if (rg[0] > rg[1] or rg[1] > p.influences.len) return error.BadRanges;
         for (p.influences) |inf| if (inf.bone >= m.joints.len) return error.BadBone;
     }
+}
+
+test "checkLimits: exe caps only for both" {
+    var verts: [1500]Vertex = undefined;
+    @memset(&verts, .{ .pos = .{ 0, 0, 0 }, .uv = .{ 0, 0 } });
+    var ranges: [1500][2]u32 = @splat(.{ 0, 0 });
+    var tris = [_][3]u32{.{ 0, 1, 2 }};
+    var parts = [_]Part{.{ .name = "cialo", .vertices = &verts, .ranges = &ranges, .influences = &.{}, .triangles = &tris }};
+    const m: Mesh = .{ .arena = undefined, .parts = &parts };
+    try std.testing.expectError(error.TooManyVertices, checkLimits(m, .both));
+    try checkLimits(m, .port);
+    tris[0][2] = 1500;
+    try std.testing.expectError(error.BadTriangle, checkLimits(m, .port));
+    // A texture name past 47 (a fork of a fork: the editor checks its `_n` names).
+    var few = [_]Part{.{ .name = "cialo", .texture = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.3df", .vertices = verts[0..3], .ranges = ranges[0..3], .influences = &.{}, .triangles = &.{} }};
+    try std.testing.expectError(error.NameTooLong, checkLimits(.{ .arena = undefined, .parts = &few }, .both));
+    try checkLimits(.{ .arena = undefined, .parts = &few }, .port);
 }
 
 /// The `.msh` bytes of `m` in the order the game's files have (0, 11, 14, 12, 1, 13,
@@ -309,9 +335,11 @@ pub fn encode(gpa: Allocator, m: Mesh) Allocator.Error![]u8 {
         try w.begin(5);
         try w.u32_(@intCast(p.ranges.len));
         for (p.ranges) |rg| try w.vec(&rg);
-        try w.begin(6);
+        // u16 indices (the game's chunk 6) while they fit.
+        const wide = p.vertices.len > 0x10000;
+        try w.begin(if (wide) wide_triangles else 6);
         try w.u32_(@intCast(p.triangles.len));
-        for (p.triangles) |t| for (t) |k| try w.bytes(&std.mem.toBytes(std.mem.nativeToLittle(u16, k)));
+        for (p.triangles) |t| for (t) |k| if (wide) try w.u32_(k) else try w.bytes(&std.mem.toBytes(std.mem.nativeToLittle(u16, @intCast(k))));
         try w.begin(7);
         try w.u32_(@intCast(p.influences.len));
         for (p.influences) |inf| {
@@ -495,4 +523,33 @@ test "encode gives the file back, unknown chunks included" {
     defer m2.deinit();
     try std.testing.expectEqual(0.5, m2.parts[0].influences[0].weight);
     try std.testing.expectEqual(99, m2.unknown[0].kind);
+}
+
+test "a part over 65536 vertices round-trips through chunk 15" {
+    const gpa = std.testing.allocator;
+    const n = 70000;
+    const verts = try gpa.alloc(Vertex, n);
+    defer gpa.free(verts);
+    for (verts, 0..) |*v, i| v.* = .{ .pos = .{ @floatFromInt(i), 0, 0 }, .uv = .{ 0, 0 } };
+    const ranges = try gpa.alloc([2]u32, n);
+    defer gpa.free(ranges);
+    @memset(ranges, .{ 0, 0 });
+    var tris = [_][3]u32{ .{ 0, 1, 2 }, .{ n - 3, n - 2, n - 1 } };
+    var parts = [_]Part{.{ .name = "dense", .vertices = verts, .ranges = ranges, .influences = &.{}, .triangles = &tris }};
+    const m: Mesh = .{ .arena = undefined, .parts = &parts };
+    try std.testing.expectError(error.TooManyVertices, checkLimits(m, .both));
+    try checkLimits(m, .port);
+    const bytes = try encode(gpa, m);
+    defer gpa.free(bytes);
+    var back = try parse(gpa, bytes);
+    defer back.deinit();
+    try std.testing.expectEqualSlices([3]u32, &tris, back.parts[0].triangles);
+    try std.testing.expectEqual(n, back.parts[0].vertices.len);
+    // A small part keeps the game's u16 chunk 6.
+    parts[0].vertices = verts[0..3];
+    parts[0].ranges = ranges[0..3];
+    parts[0].triangles = tris[0..1];
+    const small = try encode(gpa, m);
+    defer gpa.free(small);
+    try std.testing.expect(std.mem.indexOf(u8, small, comptime chunk(6, &(le(u32, 1) ++ le(u16, 0) ++ le(u16, 1) ++ le(u16, 2)))) != null);
 }

@@ -4,15 +4,15 @@
 
 const std = @import("std");
 const fields = @import("../fields.zig");
-const level_files = @import("../formats.zig").level_files;
+const level_files = @import("../core.zig").map;
 const Object = @import("../script.zig").object.Object;
 const world = @import("../state.zig").world;
 const World = world.World;
 
-/// The pick 0x450fa0 skips objects with nameID −1 (`cmp [+0x58], -1; jle`): decor
+/// The pick 0x450fa0 skips objects with classic_id −1 (`cmp [+0x58], -1; jle`): decor
 /// items, used covers, exits not yet opened.
 fn pickable(o: *Object) bool {
-    return fields.nameId(o) > -1;
+    return fields.classicId(o) > -1;
 }
 
 /// Enabled active area (`.are`) under a background point.
@@ -52,16 +52,16 @@ pub fn itemAt(self: *World, bg: [2]f32) ?*Object {
 }
 
 pub fn findArea(self: *World, name: []const u8) ?level_files.Area {
-    for (self.areas) |a| if (std.ascii.eqlIgnoreCase(a.name, name)) return a;
+    for (self.map.areas) |a| if (std.ascii.eqlIgnoreCase(a.name, name)) return a;
     return null;
 }
 
-/// Area action `action`: 0 = `funcID`, 1 = `funcID1`… (the action menu is built from
-/// funcID, funcID1, …, 0x4574a3; lift buttons have a second one).
+/// Area action `action`: 0 = `action`, 1 = `action1`… (the action menu is built from
+/// action, action1, …, 0x4574a3; lift buttons have a second one).
 pub fn actionId(area: *Object, action: u8) i32 {
-    if (action == 0) return area.getInt("funcID");
+    if (action == 0) return area.getInt("action");
     var buf: [16]u8 = undefined;
-    const name = std.fmt.bufPrint(&buf, "funcID{d}", .{action}) catch return -1;
+    const name = std.fmt.bufPrint(&buf, "action{d}", .{action}) catch return -1;
     const v = area.getVarDyn(name) orelse return -1;
     return v.value.toInt();
 }

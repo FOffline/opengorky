@@ -18,7 +18,7 @@ OUT="$ROOT/zig-out/demo"
 F="$OUT/frames"
 command -v ffmpeg >/dev/null || { echo "ffmpeg is needed" >&2; exit 1; }
 cd "$ROOT"
-zig build
+zig build -Drelease
 rm -rf "$F"; mkdir -p "$F"
 
 # Steps (app/input_script.zig): c — click in 640×480, p — key, w N — frames,

@@ -46,7 +46,7 @@ write("facing.png") {
 size = 48
 let ui = ["save", "check", "play", "settings", "history", "search", "folder", "chevron-right", "chevron-down",
           "map-pin", "swords", "user", "package", "clapperboard", "volume-2", "plus", "file-text",
-          "mouse-pointer-2", "hand", "paintbrush", "pipette", "lightbulb", "square-dashed", "log-out", "crosshair", "camera", "pencil", "code", "message-square", "maximize", "x", "undo-2", "redo-2", "eye", "eye-off", "lock", "lock-open", "layers", "trash-2", "copy", "image", "grid-3x3", "box", "pause", "skip-back", "skip-forward"]
+          "mouse-pointer-2", "hand", "paintbrush", "pipette", "lightbulb", "square-dashed", "log-out", "crosshair", "camera", "pencil", "code", "message-square", "maximize", "x", "undo-2", "redo-2", "eye", "eye-off", "lock", "lock-open", "layers", "trash-2", "copy", "image", "box", "pause", "skip-back", "skip-forward"]
 for name in ui {
     write("ui_\(name.replacingOccurrences(of: "-", with: "_")).png") {
         svg(name, stroke: "#ffffff", fill: "none", width: "2").draw(in: NSRect(x: 0, y: 0, width: size, height: size))

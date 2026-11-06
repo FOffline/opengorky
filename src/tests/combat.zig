@@ -93,23 +93,23 @@ test "generic fighter: attack, effects, AI and resistances from fields" {
     var files: TestFiles = .{ .files = &.{
         .{
             "drone.ftr",
-            \\int classType; int nameID; string ai; string resist; int armor_class;
-            \\function init() { classType = 100; nameID = 2001; ai = "Focused"; resist = "fire gas"; armor_class = 1; };
+            \\int battle_class; int classic_id; string ai; string resist; int armor_class;
+            \\function init() { battle_class = 100; classic_id = 2001; ai = "Focused"; resist = "fire gas"; armor_class = 1; };
         },
         .{
             "gun.wpn",
-            \\int nameID; int longAttack; int attackEffectDelay; string attack_anim; string projectile; int hit_delay; int after_delay; int flash_delay;
-            \\function init() { nameID = 2101; longAttack = 1; attack_anim = "atak"; projectile = "rocket"; hit_delay = 40; after_delay = 0; flash_delay = 12; };
+            \\int classic_id; int long_attack; int attackEffectDelay; string attack_anim; string projectile; int hit_delay; int after_delay; int flash_delay;
+            \\function init() { classic_id = 2101; long_attack = 1; attack_anim = "atak"; projectile = "rocket"; hit_delay = 40; after_delay = 0; flash_delay = 12; };
         },
         .{
             "plain.wpn",
-            \\int nameID; int longAttack; int attackEffectDelay;
-            \\function init() { nameID = 67; longAttack = 0; attackEffectDelay = 0; };
+            \\int classic_id; int long_attack; int attackEffectDelay;
+            \\function init() { classic_id = 67; long_attack = 0; attackEffectDelay = 0; };
         },
         .{
             "garcia.ftr",
-            \\int classType; int nameID;
-            \\function init() { classType = 1; nameID = 101; };
+            \\int battle_class; int classic_id;
+            \\function init() { battle_class = 1; classic_id = 101; };
         },
     } };
     var rt: Runtime = .init(std.testing.allocator, .{ .ctx = &files, .fetch = TestFiles.fetch });
@@ -124,14 +124,14 @@ test "generic fighter: attack, effects, AI and resistances from fields" {
     _ = try rt.callIfExists(garcia, "init", &.{});
 
     try std.testing.expect(generic.is(drone) and !generic.is(garcia));
-    const a = generic.attack(gun);
+    const a = battle_dir.attacks.genericAttack(gun);
     try std.testing.expectEqualStrings("atak", a.anim);
     try std.testing.expectEqual(@as(u32, 40), a.wait);
     try std.testing.expectEqual(@as(u32, 0), a.after); // after_delay = 0 set explicitly
     try std.testing.expectEqual(@as(?u32, 12), a.pre);
     try std.testing.expectEqual(@as(i32, 1024), generic.fxId(gun));
-    // No fields: ordinary monster defaults, effects by own nameID.
-    const d = generic.attack(plain);
+    // No fields: ordinary monster defaults, effects by own classic_id.
+    const d = battle_dir.attacks.genericAttack(plain);
     try std.testing.expectEqualStrings("short_attack", d.anim);
     try std.testing.expectEqual(@as(u32, 15), d.wait);
     try std.testing.expectEqual(@as(u32, 30), d.after);
@@ -141,8 +141,8 @@ test "generic fighter: attack, effects, AI and resistances from fields" {
     var k: battle_dir.immunity.Known = .{};
     generic.registerFighter(&k, drone);
     generic.registerFighter(&k, garcia); // game fighter: the exe table is unchanged
-    try std.testing.expect(k.immune(2001, .fire) and k.immune(2001, .gas) and !k.immune(2001, .electricity));
-    try std.testing.expectEqual(@as(?i32, 0), k.armorClass(2001));
+    try std.testing.expect(k.immune(.{ .id = 2001 }, .fire) and k.immune(.{ .id = 2001 }, .gas) and !k.immune(.{ .id = 2001 }, .electricity));
+    try std.testing.expectEqual(@as(?i32, 0), k.armorClass(.{ .id = 2001 }));
     try std.testing.expectEqual(@as(usize, 1), k.n);
 }
 
@@ -161,7 +161,7 @@ test "decoy and bombs occupy their tile: a ray stops there and the tile is an ai
     const fi = try combat.devices.addDevice(&t.b, decoy, .{ 3, 0 });
     try std.testing.expectEqual(.neutral, t.b.fighters.items[fi].side);
     var buf: [64]battle_dir.grid.Target = undefined;
-    const aims = battle_dir.grid.targets(t.b.grid(), battle_dir.patterns.find(1).?, .{ 0, 0 }, 0, true, false, &buf);
+    const aims = battle_dir.grid.targets(t.b.grid(), @import("../rules.zig").pattern(1).?, .{ 0, 0 }, 0, true, false, &buf);
     var last: i32 = 0;
     for (aims) |a| last = @max(last, a.tile[0]);
     try std.testing.expectEqual(3, last);
@@ -199,4 +199,15 @@ test "turn reset: an asleep or frozen fighter loses the turn at once (0x48f6f0)"
     asleep.frozen = 1;
     turns.resetTurn(asleep);
     try std.testing.expect(asleep.acted);
+}
+
+test "snapAngle: a placement on the exact diagonal rounds as the exe does" {
+    // 04__city_trapatthetruck: needle3 (2×2 at 0,13) and Trantigne at 5,18 — (5, 5) tiles apart.
+    // The CombatMap is a level format, so this test lives outside the core.
+    const lf = @import("../core.zig").map;
+    const cm: lf.CombatMap = .{ .center = .{ 3323.302979, -7874.714844, -365 }, .rotation = 0.02, .cell_size = .{ 387.5, 387.5 }, .width = 8, .height = 24, .blocked = &.{}, .heights = &.{} };
+    const me = cm.toWorld(1, 14);
+    const to = cm.toWorld(5.5, 18.5);
+    const raw = std.math.atan2(@as(f64, to[1]) - me[1], @as(f64, to[0]) - me[0]);
+    try std.testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0 + 0.02), combat.anim.snapAngle(raw, 0.02), 1e-5);
 }

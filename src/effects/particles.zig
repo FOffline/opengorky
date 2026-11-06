@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const Rand = @import("../crt_rand.zig").Rand;
-const adjust = @import("../formats.zig").adjust;
+const adjust = @import("../rules.zig").adjust;
 
 /// Particle of 0x4ccbe0 (0x2c bytes): `rest` +0x1c, `blend` +0x20 (fade), `shrink` +0x24,
 /// `dead` +0x28.
@@ -18,18 +18,18 @@ const Drop = struct {
 
 /// particle_rest_time (0x6d2aec): particle counter limit.
 pub fn restTime() u32 {
-    return @intCast(@max(1, adjust.getInt("particle_rest_time", 40)));
+    return @intCast(@max(1, adjust.int("particle_rest_time")));
 }
 /// particle_blend_start (0x6d2ad4): `blend` from which a particle fades.
 pub fn blendStart() u32 {
-    return @intCast(@max(0, adjust.getInt("particle_blend_start", 10)));
+    return @intCast(@max(0, adjust.int("particle_blend_start")));
 }
 
 /// One blood drop unit in world space per aS: 1/0.171 (double 0x50f4a8).
 pub const drop_unit = 1.0 / 0.171;
 /// blood_start_level (adjust.kdt, 0x6b67d4): initial drop height.
 pub fn bloodStartLevel() f32 {
-    return adjust.getFloat("blood_start_level", 51);
+    return adjust.float("blood_start_level");
 }
 
 /// 0x4ccbe0 parameters (adjust.kdt): blood_* for blood (0x4916b7), flare_* for sparks
@@ -45,20 +45,21 @@ pub const Particles = struct {
     flare: bool = false,
 
     pub fn bloodDrops() Particles {
-        return .{ .count = countOf("blood_particle_count", 15), .size = adjust.getFloat("blood_particle_size", 70), .vz = adjust.getFloat("blood_vspeed", 4), .dvz = adjust.getFloat("blood_vspeed_delta", 2), .sp = adjust.getFloat("blood_speed", 1), .dsp = adjust.getFloat("blood_speed_delta", 0.2) };
+        return .{ .count = countOf("blood_particle_count"), .size = adjust.float("blood_particle_size"), .vz = adjust.float("blood_vspeed"), .dvz = adjust.float("blood_vspeed_delta"), .sp = adjust.float("blood_speed"), .dsp = adjust.float("blood_speed_delta") };
     }
     pub fn flareSparks() Particles {
-        return .{ .count = countOf("flare_particle_count", 40), .size = adjust.getFloat("flare_particle_size", 70), .vz = adjust.getFloat("flare_vspeed", 1.5), .dvz = adjust.getFloat("flare_vspeed_delta", 3), .sp = adjust.getFloat("flare_speed", 1.4), .dsp = adjust.getFloat("flare_speed_delta", 2), .flare = true };
+        return .{ .count = countOf("flare_particle_count"), .size = adjust.float("flare_particle_size"), .vz = adjust.float("flare_vspeed"), .dvz = adjust.float("flare_vspeed_delta"), .sp = adjust.float("flare_speed"), .dsp = adjust.float("flare_speed_delta"), .flare = true };
     }
-    /// shortcut: at most the 40 drops `Blood` holds, raise the array for a mod that wants more.
-    fn countOf(name: []const u8, default: i32) u8 {
-        return @intCast(std.math.clamp(adjust.getInt(name, default), 0, 40));
+    /// At most the exe's 40 drops (an OpenGorky project: the `Blood.cap` it holds).
+    fn countOf(comptime name: []const u8) u8 {
+        return @intCast(std.math.clamp(adjust.int(name), 0, @as(i32, if (@import("../rules.zig").og) Blood.cap else 40)));
     }
 };
 
 pub const Blood = struct {
+    pub const cap = 160;
     origin: [3]f32,
-    drops: [40]Drop,
+    drops: [cap]Drop,
     n: u8,
     /// Flare sparks "flare1" (0x491ec2), otherwise blood "RedCircle" (0x4916bb).
     flare: bool = false,
@@ -105,7 +106,7 @@ pub const Blood = struct {
 /// rnd·spread − spread/2); vz = vz0 + rnd·dvz; speed sp = sp0 + rnd·dsp scales vx, vy and
 /// vz (0x4ccd93…0x4ccdbf). rand() order: angle, vz, sp.
 pub fn spawn(rand: *Rand, origin: [3]f32, from: [3]f32, p: Particles) Blood {
-    var bl: Blood = .{ .origin = origin, .drops = undefined, .n = p.count, .flare = p.flare, .shrink_rate = if (p.flare) @intCast(@max(1, adjust.getInt("flare_particle_fade_speed", 3))) else 1 };
+    var bl: Blood = .{ .origin = origin, .drops = undefined, .n = p.count, .flare = p.flare, .shrink_rate = if (p.flare) @intCast(@max(1, adjust.int("flare_particle_fade_speed"))) else 1 };
     const base = std.math.atan2(from[1] - origin[1], from[0] - origin[0]);
     for (bl.drops[0..p.count]) |*d| {
         const a = base + rand.pct() * p.spread - p.spread * 0.5;

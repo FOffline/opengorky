@@ -9,8 +9,8 @@ const std = @import("std");
 const tx = @import("text.zig");
 const Allocator = std.mem.Allocator;
 const og = @import("opengorky");
-const main = @import("app.zig");
-const App = main.App;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
 
 pub const archive_path = "common/voice.dat";
 const rate = 22050;
@@ -24,22 +24,9 @@ pub fn bytesOf(app: *App, a: Allocator, name: []const u8) ?[]const u8 {
 /// Voice file names starting with `prefix` (the archive's and the ones put in, not the
 /// removed ones), sorted.
 pub fn names(app: *App, a: Allocator, prefix: []const u8) []const []const u8 {
+    const base: []const og.formats.archive.Entry = if (app.player.voiceIndex(app)) |ar| ar.entries else &.{};
     var out: std.ArrayList([]const u8) = .empty;
-    if (app.player.voiceIndex(app)) |ar| for (ar.entries) |e| {
-        if (!std.ascii.startsWithIgnoreCase(e.name, prefix)) continue;
-        if (app.store.find(archive_path, e.name)) |i| if (app.store.gone(i)) continue;
-        out.append(a, e.name) catch {};
-    };
-    for (app.store.files.items, 0..) |f, i| {
-        if (!std.mem.eql(u8, f.archive, archive_path) or app.store.gone(i) or !std.ascii.startsWithIgnoreCase(f.entry, prefix)) continue;
-        if (app.player.voiceIndex(app)) |ar| if (ar.find(f.entry) != null) continue;
-        out.append(a, f.entry) catch {};
-    }
-    std.mem.sort([]const u8, out.items, {}, struct {
-        fn lt(_: void, x: []const u8, y: []const u8) bool {
-            return std.ascii.lessThanIgnoreCase(x, y);
-        }
-    }.lt);
+    for (app.store.listingOver(a, archive_path, base, null, true)) |n| if (std.ascii.startsWithIgnoreCase(n, prefix)) out.append(a, n) catch {};
     return out.items;
 }
 
@@ -64,9 +51,9 @@ pub fn put(app: *App, name: []const u8, bytes: []u8) !void {
 /// A WAV or MP3 chosen for line file `name`: converted, put in.
 pub fn importTo(app: *App, name: []const u8, path: []const u8) !void {
     const data = try std.Io.Dir.cwd().readFileAlloc(app.io, path, app.frame.allocator(), .limited(max_import));
-    var s = try og.audio.decode.decode(app.gpa, data);
+    var s = try og.formats.sound.decode(app.gpa, data);
     defer s.deinit(app.gpa);
-    const wav = try og.audio.decode.toPcmWav(app.gpa, s, rate);
+    const wav = try og.formats.sound.toPcmWav(app.gpa, s, rate);
     errdefer app.gpa.free(wav);
     try put(app, name, wav);
 }

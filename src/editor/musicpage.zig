@@ -9,25 +9,25 @@ const Allocator = std.mem.Allocator;
 const ui = @import("ui");
 const og = @import("opengorky");
 const clay = @import("clay.zig");
+const gui = @import("widgets.zig");
+const frame = @import("frame.zig");
+const lay = @import("layout.zig");
 const font_mod = @import("font.zig");
 const tx = @import("text.zig");
-const icons = @import("icons.zig");
 const voices = @import("voices.zig");
 const convert = @import("convert.zig");
-const textedit = @import("textedit.zig");
 const info = @import("info.zig");
-const main = @import("app.zig");
-const App = main.App;
-const theme = main.theme;
-const txt = main.txt;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
+const theme = app_mod.theme;
 
 /// The Music tab's state (`app.music`): the chosen track, the tracks (owned; read again
 /// after a change), the name an import takes (a level's own track; empty: the file's).
 pub const State = struct {
-    sel: main.Name(64) = .{},
+    sel: app_mod.Name(64) = .{},
     list: std.ArrayList([]u8) = .empty,
     read: bool = false,
-    target: main.Name(64) = .{},
+    target: app_mod.Name(64) = .{},
 };
 
 /// The tracks (`.mp3` of voice.dat and new ones), read once and after a change.
@@ -36,68 +36,51 @@ pub fn names(app: *App) []const []u8 {
         app.music.read = true;
         for (app.music.list.items) |n| app.gpa.free(n);
         app.music.list.clearRetainingCapacity();
-        if (og.formats.archive.Archive.open(app.io, app.gpa, app.dat, voices.archive_path)) |ar_| {
-            var ar = ar_;
-            defer ar.close(app.io, app.gpa);
-            for (ar.entries) |e| if (std.ascii.endsWithIgnoreCase(e.name, ".mp3")) {
-                if (app.store.find(voices.archive_path, e.name)) |i| if (app.store.gone(i)) continue;
-                app.music.list.append(app.gpa, app.gpa.dupe(u8, e.name) catch continue) catch {};
-            };
-            for (app.store.files.items, 0..) |f, i| {
-                if (!std.mem.eql(u8, f.archive, voices.archive_path) or !std.ascii.endsWithIgnoreCase(f.entry, ".mp3") or app.store.gone(i) or ar.find(f.entry) != null) continue;
-                app.music.list.append(app.gpa, app.gpa.dupe(u8, f.entry) catch continue) catch {};
-            }
-        } else |_| {}
-        std.mem.sort([]u8, app.music.list.items, {}, struct {
-            fn lt(_: void, x: []u8, y: []u8) bool {
-                return std.ascii.lessThanIgnoreCase(x, y);
-            }
-        }.lt);
+        for (app.store.listing(app.frame.allocator(), voices.archive_path, isMp3, true)) |n| app.music.list.append(app.gpa, app.gpa.dupe(u8, n) catch continue) catch {};
     }
     return app.music.list.items;
 }
 
 pub fn page(app: *App, a: Allocator) void {
     const name = app.music.sel.get();
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = .{ .left = 20, .right = 20, .top = 16, .bottom = 16 }, .childGap = 12 } });
+    if (name.len > 0) frame.stage(app);
+    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = gui.pad(lay.space.xl, lay.space.lg), .childGap = lay.space.md } });
     if (name.len == 0) {
-        if (main.toolButton(app, "mus_import", .plus, tx.get(tx.mus_import), false, true)) app.askMusic(null);
-        clay.text(tx.get(tx.mus_hint), .{ .textColor = theme.dim, .fontSize = 13, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
+        if (gui.toolButton(app, "mus_import", .plus, tx.get(tx.mus_import), false, true)) app.askMusic(null);
+        gui.txtWrap(tx.get(tx.mus_hint), .body, theme.dim, font_mod.regular);
         return clay.close();
     }
-    clay.open(.{ .layout = .{ .childGap = 10, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-    icons.leaf(app.r, app.gpa, .volume_2, 20, theme.accent_hover);
-    txt(name, 20, theme.text, font_mod.bold);
+    gui.rowFit(lay.space.sm);
+    gui.icon(app, .volume_2, lay.icon.lg, theme.accent_hover);
+    gui.txt(name, .heading, theme.text, font_mod.bold);
     clay.close();
-    clay.open(.{ .layout = .{ .childGap = 8 } });
-    if (main.toolButton(app, "mus_play", .play, tx.get(tx.vo_play), false, true)) voices.play(app, name);
-    if (main.toolButton(app, "mus_stop", .pause, tx.get(tx.mus_stop), false, false)) app.player.stopAll();
+    gui.rowFit(lay.space.sm);
+    if (gui.toolButton(app, "mus_play", .play, tx.get(tx.vo_play), false, true)) voices.play(app, name);
+    if (gui.toolButton(app, "mus_stop", .pause, tx.get(tx.mus_stop), false, false)) app.player.stopAll();
     clay.close();
     const pos = app.player.trackPos(name);
-    main.timeBar(a, if (pos) |p| p[0] else 0, if (pos) |p| p[1] else null);
+    gui.timeBar(a, if (pos) |p| p[0] else 0, if (pos) |p| p[1] else null);
     clay.close();
-    main.propsOpen(app, "mus_props");
-    main.propsTitle(tx.get(tx.props), true);
+    frame.props(app, "mus_props");
+    gui.groupTitle(tx.get(tx.props), true);
     // The name typed anew: the track renamed (where it plays follows its name).
-    clay.open(.{ .layout = .{ .childGap = 10, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(100) } } });
-    txt(tx.get(tx.p_name), 13, theme.dim, font_mod.regular);
+    gui.fieldRow(tx.get(tx.p_name));
+    if (gui.textField(app, "mus_name", name, 0, "")) |v| rename(app, name, v);
     clay.close();
-    if (textedit.field(app, "mus_name", name, 220, "")) |v| rename(app, name, v);
-    clay.close();
-    if (voices.bytesOf(app, a, name)) |bytes| main.propRow(tx.get(tx.p_size), tx.alloc(a, tx.vid_size, .{bytes.len / 1024}));
-    main.propsTitle(tx.get(tx.info_title), false);
+    if (voices.bytesOf(app, a, name)) |bytes| gui.propRow(tx.get(tx.p_size), tx.alloc(a, tx.vid_size, .{bytes.len / 1024}));
+    gui.groupTitle(tx.get(tx.info_title), false);
     info.show(app, info.rows(app, std.fmt.allocPrint(a, "music:{s}", .{name}) catch name, name, musicInfo));
-    main.propsTitle(tx.get(tx.p_new), false);
-    if (main.toolButton(app, "mus_import", .plus, tx.get(tx.mus_import), false, false)) app.askMusic(null);
-    main.propNote(tx.get(tx.mus_hint));
-    clay.close();
+    gui.groupTitle(tx.get(tx.p_new), false);
+    if (gui.toolButton(app, "mus_import", .plus, tx.get(tx.mus_import), false, false)) app.askMusic(null);
+    gui.note(tx.get(tx.mus_hint));
+    gui.propsEnd();
 }
 
 /// The track's Info: its file; where it plays: a level of that name or its district,
 /// the battles, scenes naming it.
 fn musicInfo(name: []const u8, app: *App, list: *info.List) void {
     info.defined(list, voices.archive_path, name, false);
+    const n = list.rows.items.len;
     const stem = std.fs.path.stem(name);
     for (app.levels) |lv| {
         var cb: [2][]const u8 = undefined;
@@ -109,7 +92,7 @@ fn musicInfo(name: []const u8, app: *App, list: *info.List) void {
     }
     if (std.ascii.startsWithIgnoreCase(stem, "battle")) list.add(.{ .group = .used, .text = tx.get(if (std.ascii.endsWithIgnoreCase(stem, "_enemy")) tx.lm_music_enemy else tx.mus_battles) });
     info.scenesNaming(app, list, list.fmt("\"{s}\"", .{stem}), "");
-    if (list.rows.items.len == 1) list.add(.{ .group = .used, .text = tx.get(tx.mus_unused) });
+    info.usedNone(list, n, tx.mus_unused);
 }
 
 fn rename(app: *App, old: []const u8, typed: []const u8) void {
@@ -117,7 +100,7 @@ fn rename(app: *App, old: []const u8, typed: []const u8) void {
     const new = musicName(&nb, typed) orelse return app.setStatus(tx.st_scene_bad_name, .{typed});
     if (std.ascii.eqlIgnoreCase(new, old)) return;
     if (voices.has(app, new)) return app.setStatus(tx.st_text_taken_name, .{new});
-    voices.copyTo(app, old, new) catch |err| return app.setStatus(tx.st_set_failed, .{err});
+    voices.copyTo(app, old, new) catch |err| return app.failed(err);
     voices.remove(app, old) catch {};
     app.music.read = false;
     app.music.sel.set(new);
@@ -162,6 +145,10 @@ test musicName {
 }
 
 /// File dialog answer (app.askFile): named `app.music.target` if set.
-pub fn onMusicIn(app: *App, _: main.FileAsk, path: []const u8) !void {
+pub fn onMusicIn(app: *App, _: app_mod.FileAsk, path: []const u8) !void {
     import(app, path, if (app.music.target.len > 0) app.music.target.get() else null) catch |err| app.setStatus(tx.st_video_failed, .{err});
+}
+
+fn isMp3(name: []const u8) bool {
+    return std.ascii.endsWithIgnoreCase(name, ".mp3");
 }

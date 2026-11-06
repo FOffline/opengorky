@@ -7,7 +7,7 @@ const og = @import("opengorky");
 const c = @import("sdl");
 const gfx = @import("../media/gfx.zig");
 
-pub fn setThumb(self: *Menu, i: usize, img: ?og.formats.image.Image) void {
+pub fn setThumb(self: *Menu, i: usize, img: ?og.image.Image) void {
     if (self.thumbs[i]) |t| c.SDL_DestroyTexture(t);
     self.thumbs[i] = if (img) |x| gfx.textureFromImage(self.renderer, x) catch null else null;
 }

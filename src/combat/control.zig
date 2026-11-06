@@ -1,6 +1,7 @@
-//! Player actions: hero selection, facing, defend, tile clicks, item use, walking, turning.
+//! Player actions: hero selection, facing, defend, tile actions, item use, walking, turning.
 
 const std = @import("std");
+const ut = @import("../core.zig").ui_text;
 const weapon_class = @import("../battle.zig").weapon_class;
 const fields = @import("../fields.zig");
 const weapons = @import("weapons.zig");
@@ -8,6 +9,9 @@ const states = @import("states.zig");
 const strike = @import("strike.zig");
 const battle = @import("../battle.zig").battle;
 const anim = @import("anim.zig");
+const natives = @import("natives.zig");
+const events = @import("events.zig");
+const Value = @import("../script.zig").value.Value;
 const Battle = battle.Battle;
 const world_mod = @import("../state.zig").world;
 const World = world_mod.World;
@@ -15,9 +19,10 @@ const Object = @import("../script.zig").object.Object;
 const grid = @import("../battle.zig").grid;
 const ai = @import("ai.zig");
 const inventory = @import("../inventory.zig");
+const hooks = @import("../state.zig").hooks;
 const Tile = @import("../battle.zig").grid.Tile;
 const Fighter = @import("../battle.zig").fighter.Fighter;
-const Class = @import("../battle.zig").fighter.Class;
+const modules = @import("../core.zig").modules;
 const face = anim.face;
 
 /// Facing arrow tiles (0x453380): side neighbours of the hero, inside the grid and
@@ -51,7 +56,7 @@ fn chooseFacing(self: *Battle, w: *World, t: Tile) void {
     };
 }
 
-/// Leave facing selection (right button, 0x453680).
+/// Leave facing selection (0x453680).
 pub fn cancelFacing(self: *Battle) void {
     self.facing_mode = false;
 }
@@ -66,7 +71,7 @@ pub fn defend(self: *Battle, w: *World) void {
     f.acted = true;
     f.spendRage(); // 0x48f790
     self.facing_mode = false;
-    f.used = @floatFromInt(fields.walkRange(f.obj));
+    f.used = @floatFromInt(f.walkRange());
     const a = world_mod.actorOf(f.*.obj);
     a.state = 4;
     a.forced_idle = null;
@@ -97,21 +102,15 @@ pub fn select(self: *Battle, w: *World, o: *Object) void {
 pub fn selectFx(self: *Battle, w: *World, i: u16, sound: bool) void {
     const f = self.fighters.items[i];
     w.out.pan_to = f.obj;
-    if (sound) w.out.sound(w.gpa, "selecthero", null);
+    if (sound) w.out.sound(w.gpa, modules.ui().sounds.select_hero, null);
     if (f.defending) return;
     const hand = inventory.equipment.equipped(w, f.obj, .hand);
     const two = if (hand) |h| h.getInt("two_handed") == 1 else false;
     const a = world_mod.actorOf(f.obj);
     if (a.path_index < a.path.items.len) return; // walking: don't break the step
-    a.play(if (two) "g_fightlook" else "fightlook", false, true);
+    const look = modules.ui().anims;
+    a.play(if (two) look.fight_look_two_handed else look.fight_look, false, true);
     a.detached = true;
-}
-
-/// Item chosen in battle (hand button 0x45b3d0/0x45b3e0, quick list 0x4b1146): a
-/// weapon enters aiming, anything else "Use … on …".
-pub fn chooseItem(self: *Battle, w: *World, item: *Object) void {
-    if (World.nativeOf(item).kind != .weapon) w.mouse.use = item else w.mouse.aim = true;
-    refreshSelection(self, w);
 }
 
 /// Recompute reachable tiles and targets of the selected fighter.
@@ -123,8 +122,9 @@ pub fn refreshSelection(self: *Battle, w: *World) void {
     if (!f.alive()) return;
     if (f.disabled()) return;
     // Walking by the remaining budget, also after a strike (0x2460c isn't reset by it).
+    // An Immobile one (a native, core/natives.zig) has no tiles to walk to.
     if (self.phase == .player) {
-        grid.reach(self.grid(), self.reach_left, f.tile, f.size, self.selected.?, f.budget());
+        if (!f.obj.implementsC("Immobile")) grid.reach(self.grid(), self.reach_left, f.tile, f.size, self.selected.?, f.budget());
         // One strike per turn (+0x24610).
         if (f.acted) return;
     }
@@ -133,6 +133,19 @@ pub fn refreshSelection(self: *Battle, w: *World) void {
     const wpn = f.weapon orelse return;
     const pat = weapon_class.pattern(wpn) orelse return;
     self.target_len = grid.targets(self.grid(), pat, f.tile, self.selected.?, true, false, &self.target_buf).len;
+    // OpenGorky: the weapon's CanAim(user, tile) drops an aim. Out of memory reads as may
+    // (no error path here).
+    if (wpn.implementsC("CanAim")) {
+        var k: usize = 0;
+        for (self.target_buf[0..self.target_len]) |t| {
+            const xy = events.tileList(w, t.tile) catch return;
+            const v = natives.ask(w, wpn, "Weapon.CanAim", .{ f.obj.ref(), Value{ .list = xy } }) catch null;
+            if (v != null and !v.?.truth()) continue;
+            self.target_buf[k] = t;
+            k += 1;
+        }
+        self.target_len = k;
+    }
 }
 
 pub fn targetList(self: *Battle) []const grid.Target {
@@ -152,11 +165,11 @@ fn reachable(self: *Battle, t: Tile) bool {
 fn tryAttack(self: *Battle, w: *World, me: u16, wpn: *Object, aim: grid.Target) !void {
     const f = &self.fighters.items[me];
     const refusal: ?[]const u8 = if (World.nativeOf(wpn).fight.recharge > 0)
-        w.stringOr(525, "Recharging")
-    else if (!weapons.hasAmmo(w, f.*, wpn)) w.stringOr(513, "No ammo") else null;
+        w.stringOr(ut.id(.recharging), "Recharging")
+    else if (!weapons.hasAmmo(w, f.*, wpn)) w.stringOr(ut.id(.no_ammo), "No ammo") else null;
     if (refusal) |text| {
         try battle.popup(self, f.*, text, .range);
-        w.out.sound(w.gpa, "battle_noammo", null);
+        w.out.sound(w.gpa, modules.ui().sounds.no_ammo, null);
         return;
     }
     try strike.startAttack(self, w, me, wpn, aim);
@@ -172,10 +185,10 @@ fn aimAt(self: *Battle, t: Tile) ?grid.Target {
     return null;
 }
 
-/// Tile click; `aiming` is aim mode (right button, 0x4524d0): a strike on any tile
-/// in the attack area, empty ones included (0x452660 → 0x47c120 needs no fighter
-/// on the tile).
-pub fn clickTileMode(self: *Battle, w: *World, t: Tile, aiming: bool) !void {
+/// The player's action on tile `t` (the exe's tile click): face, select, box action, strike or
+/// walk. `aiming` (aim mode, 0x4524d0): a strike on any tile in the attack area, empty ones
+/// included (0x452660 → 0x47c120 needs no fighter on the tile).
+pub fn tileAction(self: *Battle, w: *World, t: Tile, aiming: bool) !void {
     if (self.phase != .player and self.phase != .counter) return;
     if (self.pending != .none) return;
     const g = self.grid();
@@ -211,7 +224,7 @@ pub fn clickTileMode(self: *Battle, w: *World, t: Tile, aiming: bool) !void {
             try startWalk(self, w, me, t);
         return;
     }
-    // Item box (`.obs_i`, funcID: Open/Explore/Close) next to the hero: its action,
+    // Item box (`.obs_i`, action: Open/Explore/Close) next to the hero: its action,
     // as for items outside battle (0x45b026).
     if (who != grid.Grid.none and boxAction(self, who)) {
         const ob = self.fighters.items[who];
@@ -219,7 +232,7 @@ pub fn clickTileMode(self: *Battle, w: *World, t: Tile, aiming: bool) !void {
         try inventory.box.itemOperation(w, ob.obj, f.obj);
         // Open and not empty: the item window opens by itself after the lid animation,
         // as outside battle (examineChoose).
-        if (w.act.exploring == null and ob.obj.getInt("funcID") == 7 and ob.obj.getInt("cnt_itm") > 0)
+        if (w.act.exploring == null and inventory.box.opensItself(ob.obj))
             w.act.pending_explore = .{ .box = ob.obj, .hero = f.obj, .ticks = 8 };
         return;
     }
@@ -253,10 +266,16 @@ pub fn useItemOn(self: *Battle, w: *World, item: *Object, t: Tile) !UseResult {
     const target = &self.fighters.items[who];
     if (target.side != .hero) return .none;
     if (!self.adjacent(f.obj, target.obj)) {
-        try battle.popup(self, f.*, w.stringOr(514, "Out of range"), .range);
+        try battle.popup(self, f.*, w.stringOr(ut.id(.out_of_range), "Out of range"), .range);
         return .out_of_range;
     }
     if (inventory.item.typeOf(item) != .medicine) return .none;
+    // OpenGorky: OnItemUse did it; the giver's action is spent all the same.
+    if (try hooks.itemUse(w, f.obj, item, target.obj)) {
+        f.acted = true;
+        refreshSelection(self, w);
+        return .used;
+    }
     // 0x48ff50 on the target, then the item is destroyed (+0x60), even with no effect.
     if (try inventory.medicine.medicine(w, f.obj, target.obj, item)) |h| {
         switch (h.kind) {
@@ -319,7 +338,7 @@ pub fn startWalkPath(self: *Battle, w: *World, who: u16, path: []const Tile) !vo
     g.place(f.tile, f.size, who);
     const a = world_mod.actorOf(f.*.obj);
     a.clearPath();
-    const cm = w.combat_map.?;
+    const cm = w.map.combat.?;
     for (path[1..]) |t| {
         const p = cm.tileCenter(t, f.size);
         try a.path.append(w.gpa, .{ p[0], p[1] });
@@ -337,18 +356,14 @@ pub fn startWalkPath(self: *Battle, w: *World, who: u16, path: []const Tile) !vo
     self.pending = .{ .walk = who };
 }
 
-/// End of an enemy's turn. Puppet (0x4e17b0) and Messiah (own command 2, 0x4dfdd4)
-/// stand properly (+0xd0(0), smoothly); Messiah does "atakB" if both hands are
-/// blocked by boxes. Others turn at the end of their walk (`faceAfterWalk`), not
-/// after a strike.
+/// End of an AI fighter's turn. One with a StandAngle after its move (native Stand: Puppet
+/// 0x4e17b0, Messiah own command 2, 0x4dfdd4) stands properly (+0xd0(0), smoothly), then
+/// its OnMoveEnd (native Arms: their `blocked`, "atakB", if a box blocks both). Others
+/// turn at the end of their walk (`faceAfterWalk`), not after a strike.
 pub fn afterMove(self: *Battle, w: *World, f: *Fighter) void {
-    const ct = Class.of(f.obj);
-    if ((ct == .puppet or ct == .messiah) and f.side == .enemy and f.obj.getInt("attackLock") == 0 and !f.disabled())
+    if (natives.standAngle(w, f.obj, true) != null and f.obj.getInt("attack_locked") == 0 and !f.disabled())
         if (self.fighterOf(f.obj)) |i| faceDefault(self, w, i, true);
-    if (ct == .messiah and ai.obstacleAt(self, .{ 10, 17 }) and ai.obstacleAt(self, .{ 10, 19 })) {
-        const a = world_mod.actorOf(f.*.obj);
-        a.play("atakB", false, true);
-    }
+    _ = natives.ask(w, f.obj, "Fighter.OnMoveEnd", .{}) catch null;
 }
 
 /// End of a battle walk, command 2 in the queue (0x48f5b0, 0x499c09 → 0x423ce5):
@@ -359,7 +374,7 @@ pub fn afterMove(self: *Battle, w: *World, f: *Fighter) void {
 pub fn faceAfterWalk(self: *Battle, w: *World, who: u16) void {
     const f = self.fighters.items[who];
     if (f.side != .enemy or self.phase != .enemy) return;
-    if (f.obj.getInt("attackLock") != 0 or f.disabled()) return;
+    if (f.obj.getInt("attack_locked") != 0 or f.disabled()) return;
     faceDefault(self, w, who, true);
 }
 
@@ -367,7 +382,7 @@ pub fn faceAfterWalk(self: *Battle, w: *World, who: u16) void {
 /// (0x4df8d0) 3.14. Others (0x48ef10) face the nearest (x, y, z) fighter of the
 /// other side (hero to non-hero, enemy to hero; obstacles, +0x2c 4/5, don't
 /// count), atan2 from the grid axis rounded to π/2 (remainder > π/4 rounds up).
-/// Obstacles and Messiah (nameID 139) don't turn. With argument 1 (battle start,
+/// Obstacles don't turn (the exe's Messiah, classic_id 139, neither: his class stands). With argument 1 (battle start,
 /// 0x4b4a51) at once, with 0 smoothly via command 0x12 at rotSpeed (0x48f0f3).
 pub fn faceDefault(self: *Battle, w: *World, i: usize, smooth: bool) void {
     const f = self.fighters.items[i];
@@ -376,13 +391,9 @@ pub fn faceDefault(self: *Battle, w: *World, i: usize, smooth: bool) void {
             if (sm) world_mod.actorOf(fi.obj).turnTo(fi.obj, v) else fields.setAngle(fi.obj, v);
         }
     }.angle;
-    switch (Class.of(f.obj)) {
-        .puppet => return set(f, -1.57, smooth),
-        .messiah => return set(f, 3.14, smooth),
-        else => {},
-    }
-    if (f.side == .neutral or fields.nameId(f.obj) == 139) return;
-    const cm = w.combat_map orelse return;
+    if (natives.standAngle(w, f.obj, false)) |angle| return set(f, angle, smooth);
+    if (f.side == .neutral) return;
+    const cm = w.map.combat orelse return;
     const me = fields.pos(f.obj);
     var best: f32 = std.math.floatMax(f32);
     var near: ?[3]f32 = null;
@@ -403,16 +414,16 @@ pub fn faceDefault(self: *Battle, w: *World, i: usize, smooth: bool) void {
 /// a neighbouring tile ("give" mode, 0x45389c → 0x4c8830, scale 0.6).
 pub fn outOfRange(self: *Battle, w: *World, o: *Object) !void {
     const i = self.fighterOf(o) orelse return;
-    try battle.popup(self, self.fighters.items[i], w.stringOr(514, "Out of range"), .range);
+    try battle.popup(self, self.fighters.items[i], w.stringOr(ut.id(.out_of_range), "Out of range"), .range);
 }
 
-/// Box with an action (`.obs_i`, funcID > 0) next to the selected hero who hasn't
+/// Box with an action (`.obs_i`, action > 0) next to the selected hero who hasn't
 /// struck yet: clicking it runs the box action, not a strike.
 fn boxAction(self: *Battle, who: u16) bool {
     if (self.phase != .player) return false;
     const me = self.selected orelse return false;
     const f = self.fighters.items[me];
     const ob = self.fighters.items[who];
-    if (f.acted or ob.side != .neutral or ob.obj.getInt("funcID") <= 0) return false;
+    if (f.acted or ob.side != .neutral or ob.obj.getInt("action") <= 0) return false;
     return @abs(ob.tile[0] - f.tile[0]) <= 1 and @abs(ob.tile[1] - f.tile[1]) <= 1;
 }

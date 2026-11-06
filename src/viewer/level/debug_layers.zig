@@ -9,8 +9,8 @@ const gfx = @import("../media/gfx.zig");
 const LevelView = level.LevelView;
 const World = og.state.world.World;
 const Allocator = std.mem.Allocator;
-const Image = og.formats.image.Image;
-const lf = og.formats.level_files;
+const Image = og.image.Image;
+const core_map = og.core.map;
 
 /// Debug: places unplaced heroes near the screen centre.
 pub fn placeHeroes(l: *LevelView, scroll: [2]f32) void {
@@ -35,7 +35,7 @@ pub fn impulseAll(l: *LevelView) void {
 
 pub fn cycleWalkLayer(l: *LevelView) void {
     // Battle level (no .wm): the whole `.cm` grid.
-    if (l.walk_textures[0] == null and l.walk_textures[1] == null and l.world.combat_map != null) {
+    if (l.walk_textures[0] == null and l.walk_textures[1] == null and l.world.map.combat != null) {
         l.show_grid = !l.show_grid;
         return;
     }
@@ -64,7 +64,7 @@ pub fn drawActionMenu(l: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32, mouse: 
 
 /// Grid cell colours by `kind` bits: `.ap` path ends (bits 1, 2) magenta,
 /// walkable (bit 0) green.
-pub fn walkMapTexture(gpa: Allocator, r: *c.SDL_Renderer, m: lf.WalkMap) !*c.SDL_Texture {
+pub fn walkMapTexture(gpa: Allocator, r: *c.SDL_Renderer, m: core_map.WalkMap) !*c.SDL_Texture {
     var img = try Image.init(gpa, m.width, m.height);
     defer img.deinit(gpa);
     for (m.cells, 0..) |cell, i| {
@@ -79,7 +79,7 @@ pub fn walkMapTexture(gpa: Allocator, r: *c.SDL_Renderer, m: lf.WalkMap) !*c.SDL
     return gfx.textureFromImage(r, img);
 }
 
-fn drawAreas(r: *c.SDL_Renderer, areas: []const lf.Area, scroll: [2]f32) !void {
+fn drawAreas(r: *c.SDL_Renderer, areas: []const core_map.Area, scroll: [2]f32) !void {
     var pts: [64]c.SDL_FPoint = undefined;
     for (areas) |a| {
         const n = @min(a.points.len, pts.len - 1);
@@ -94,7 +94,7 @@ fn drawAreas(r: *c.SDL_Renderer, areas: []const lf.Area, scroll: [2]f32) !void {
     }
 }
 
-fn drawPaths(r: *c.SDL_Renderer, paths: []const lf.Path, scroll: [2]f32) !void {
+fn drawPaths(r: *c.SDL_Renderer, paths: []const core_map.Path, scroll: [2]f32) !void {
     var pts: [64]c.SDL_FPoint = undefined;
     for (paths) |p| {
         const n = @min(p.points.len, pts.len);
@@ -112,8 +112,8 @@ fn drawPaths(r: *c.SDL_Renderer, paths: []const lf.Path, scroll: [2]f32) !void {
 pub fn drawLayers(l: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void {
     if (l.walk_layer != 0) {
         if (l.walk_textures[l.walk_layer - 1]) |tex| {
-            const m = (if (l.walk_layer == 1) l.world.walk_map else l.world.walk_map2).?;
-            const cs: f32 = lf.WalkMap.cell_size;
+            const m = (if (l.walk_layer == 1) l.world.map.walk else l.world.map.walk2).?;
+            const cs: f32 = core_map.WalkMap.cell_size;
             const dst: c.SDL_FRect = .{
                 .x = -scroll[0],
                 .y = -scroll[1],
@@ -124,7 +124,7 @@ pub fn drawLayers(l: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void {
         }
     }
     if (l.show_areas) {
-        try drawPaths(r, l.world.paths, scroll);
-        try drawAreas(r, l.world.areas, scroll);
+        try drawPaths(r, l.world.map.paths, scroll);
+        try drawAreas(r, l.world.map.areas, scroll);
     }
 }

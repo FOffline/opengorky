@@ -38,6 +38,8 @@ pub const Scene = struct {
     music_once: bool = false,
     /// Level music and whether the enemy battle track is playing.
     level_music: []const u8 = "",
+    /// `level_music` is the battle's drawn music (it has an enemy turn track).
+    drawn_music: bool = false,
     enemy_track: bool = false,
     /// MP3_FADE (0x40efc0(3, 1)): silence after 90 ticks, no fade.
     fade_end: u64 = 0,
@@ -69,32 +71,39 @@ pub const Scene = struct {
     pub fn startMusic(self: *Scene, lm: LevelMusic) !void {
         var buf: [2][]const u8 = undefined;
         const candidates = sound.musicCandidates(lm.name, &buf);
+        var drawn = false;
         const name = for (candidates, 0..) |c, i| {
             // The first candidate must exist; the district's shared music is not checked.
             if (i > 0 or self.bank.hasMusic(c)) break c;
-        } else lm.combat orelse return;
+        } else blk: {
+            drawn = true;
+            break :blk lm.combat orelse return;
+        };
         try self.switchMusic(self.bank.music(name) orelse return, name, true);
         self.level_music = name;
+        self.drawn_music = drawn;
         self.enemy_track = false;
     }
 
     /// Switch music: the previous one stops.
-    fn switchMusic(self: *Scene, snd: *const @import("decode.zig").Sound, name: []const u8, loop: bool) !void {
+    fn switchMusic(self: *Scene, snd: *const sound.Sound, name: []const u8, loop: bool) !void {
         if (self.music) |id| self.mixer.stop(id);
         self.music = try self.mixer.playAs(self.gpa, .music, snd, 1, 0, loop);
         self.music_name = name;
         self.music_once = !loop;
     }
 
-    /// Battle music (0x40edc0): during the enemy turn and their entry `<name>_enemy`
-    /// (slot 1), during the player turn `<name>` again (slot 0); switches abruptly.
+    /// Battle music (0x40edc0): the drawn one (`LevelMusic.combat`; the exe: a track named
+    /// battle*) during the enemy turn and their entry `<name><enemy_suffix>` (slot 1, ExeMusic),
+    /// during the player turn `<name>` again (slot 0); switches abruptly.
     fn battleMusic(self: *Scene, enemy_music: ?bool) !void {
         const want = enemy_music orelse return;
-        if (!std.mem.startsWith(u8, self.level_music, "battle")) return;
+        const suffix = @import("../core.zig").modules.ui().music.enemy_suffix;
+        if (!self.drawn_music or suffix.len == 0) return;
         if (!std.mem.eql(u8, self.music_name, self.level_music) and !self.enemy_track) return;
         if (want == self.enemy_track) return;
         var buf: [32]u8 = undefined;
-        const name = if (want) std.fmt.bufPrint(&buf, "{s}_enemy", .{self.level_music}) catch return else self.level_music;
+        const name = if (want) std.fmt.bufPrint(&buf, "{s}{s}", .{ self.level_music, suffix }) catch return else self.level_music;
         try self.switchMusic(self.bank.music(name) orelse return, if (want) "" else self.level_music, true);
         self.enemy_track = want;
     }
@@ -226,15 +235,8 @@ pub const Scene = struct {
 
 test "a missing voice file gives 0 s: the line waits for a click" {
     const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    // Empty archives: 32-byte header, 0 entries.
-    try tmp.dir.createDirPath(io, "common");
-    const empty: [32]u8 = @splat(0);
-    try tmp.dir.writeFile(io, .{ .sub_path = "common/sound.dat", .data = &empty });
-    try tmp.dir.writeFile(io, .{ .sub_path = "common/voice.dat", .data = &empty });
-    var bank = try sound.Bank.open(io, gpa, tmp.dir);
+    // A bank with no files.
+    var bank: sound.Bank = .init(gpa, .{});
     defer bank.deinit();
     var mixer: Mixer = .init(44100);
     defer mixer.deinit(gpa);

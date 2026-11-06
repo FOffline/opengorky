@@ -6,15 +6,15 @@ const vec = @import("../vec.zig");
 const num = @import("../num.zig");
 const Rand = @import("../crt_rand.zig").Rand;
 const light = @import("light.zig");
-const adjust = @import("../formats.zig").adjust;
+const adjust = @import("../rules.zig").adjust;
 const Object = @import("../script.zig").object.Object;
 
 /// Grenade (0x49c840): attack_grenade_angle and gravity from adjust.kdt.
 fn grenadeAngle() f32 {
-    return adjust.getFloat("attack_grenade_angle", 0.9);
+    return adjust.float("attack_grenade_angle");
 }
 fn gravity() f32 {
-    return adjust.getFloat("gravity", 700);
+    return adjust.float("gravity");
 }
 
 /// What a projectile tick touches besides itself: its trail and the light pool.
@@ -38,6 +38,10 @@ pub const Projectile = struct {
     max_speed: f32 = 0,
     accel: f32 = 0,
     accel_delay: u32 = 0,
+    /// Its weapon's own throw angle and ball scale (attack_grenade_angle,
+    /// attack_ball_ms); null: the game's.
+    angle: ?f32 = null,
+    ball_ms: ?f32 = null,
     /// Arc: flight time T (s), speeds vh, vz, t.
     arc: bool = false,
     /// Arc: floor height (0x592764 — battle grid/level floor); the projectile lands on it at
@@ -90,9 +94,10 @@ pub const Projectile = struct {
     k: f32 = 1,
     /// Ball glow pulse (0x4a5d79…0x4a5e4d); null for other projectiles.
     ball: ?Ball = null,
-    /// Ball: the fighter (+0x384) whose "kula1"/"kula2" midpoint it sits at while held
-    /// (0x4a5cac, `spawn.aimBalls`); null once the fighter is removed (0x4a5c50).
+    /// Ball: the fighter (+0x384) whose `hold_links` ("kula1"/"kula2") midpoint it sits at
+    /// while held (0x4a5cac, `spawn.aimBalls`); null once the fighter is removed (0x4a5c50).
     owner: ?*Object = null,
+    hold_links: [2][]const u8 = .{ "kula1", "kula2" },
     /// Incubus ball (kind 0, +0x3bc): on arrival it lies there glowing as a charge
     /// (`lying`, countdown +0x3b8 set at 0x4a6056) until the battle blows it up (0x4a61d0).
     charge: bool = false,
@@ -123,7 +128,7 @@ pub const Projectile = struct {
 /// attack_ball_ms (0x6c520c): the ball draw (0x4a6280) divides its scale by it for
 /// both the Incubus and the Stinger ball.
 pub fn attackBallMs() f32 {
-    return adjust.getFloat("attack_ball_ms", 0.8);
+    return adjust.float("attack_ball_ms");
 }
 
 /// Ball (0x4a5840) glow state: two triangle waves `a`, `b` in ±0.2 (steps 0.024 and
@@ -188,7 +193,7 @@ pub fn prepare(p: Projectile) Projectile {
         // (0x592764), both in speedScale units: T = √(2(tgθ·D + H)/g), vz = gT/2 − H/T,
         // vh = vz/tgθ. Direction +0x39c is the unit 3D vector to the target with z zeroed
         // (0x49c9c0): in x, y it covers exactly Dxy and lands at floor height.
-        const theta = grenadeAngle();
+        const theta = p.angle orelse grenadeAngle();
         const g = gravity();
         const d = [3]f32{ p.target[0] - p.start[0], p.target[1] - p.start[1], p.target[2] - p.start[2] };
         const l = vec.len(d);
@@ -322,32 +327,66 @@ pub const Trail = struct {
     }
 };
 
+/// A stream's look and life (defaults: the blaster's, 0x4a28e0, drawn 0x4a3000).
+pub const StreamLook = struct {
+    effect: []const u8 = "blaster",
+    /// Point i has moved (n − i)·`step`·aS along the stream.
+    step: f32 = 60,
+    /// Points recorded at most (the exe's 100; an OpenGorky project up to `Stream.cap`).
+    max_points: u32 = 100,
+    life: u32 = 120,
+    /// Jitter of a new point: rand() % z, % x, % y (·aS), in that order (0: no call).
+    jitter: [3]u32 = .{ 10, 4, 4 },
+    /// Half width (·aS).
+    width: f32 = 80,
+    /// The last `taper_n` segments narrow by `taper` each (at least to 0.1).
+    taper_n: u32 = 6,
+    taper: f32 = 0.15,
+    /// Texture shift per segment.
+    uv_step: f32 = 0.08,
+    /// A mod's material (core/effect.zig Material; "": none).
+    material: []const u8 = "",
+};
+
 /// Blaster stream (0x4a28e0): every tick adds a point at the muzzle (with jitter); point i,
-/// recorded i ticks after start, has moved (n − i)·60·aS along `v`; segments draw until a
+/// recorded i ticks after start, has moved (n − i)·step·aS along `v`; segments draw until a
 /// point reaches the target (`len`).
 pub const Stream = struct {
-    const max_points = 100;
+    /// Points an OpenGorky stream may hold (Classic: the exe's 100).
+    pub const cap = 400;
     start: [3]f32,
     v: [3]f32,
     len: f32,
     /// Actor scale at the shot.
     as: f32,
-    pts: [max_points][3]f32 = undefined,
+    look: StreamLook = .{},
+    pts: [cap][3]f32 = undefined,
     n: u32 = 0,
     left: u32 = 120,
+    /// Ticks before it starts.
+    delay: u32 = 0,
 
     /// Offset of point `i` along `v`.
     pub fn dist(self: Stream, i: u32) f32 {
-        return num.toF32(self.n - i) * 60 * self.as;
+        return num.toF32(self.n - i) * self.look.step * self.as;
+    }
+
+    fn maxPoints(self: Stream) u32 {
+        return @min(self.look.max_points, @as(u32, if (@import("../rules.zig").og) cap else 100));
     }
 
     pub fn tick(self: *Stream, rand: *Rand) bool {
+        if (self.delay > 0) {
+            self.delay -= 1;
+            return true;
+        }
         if (self.left > 0) self.left -= 1;
-        if (self.n < max_points) {
+        if (self.n < self.maxPoints()) {
             // Shared rand(): z % 10, then x % 4, y % 4 (0x4a2f22).
-            const jz: f32 = @floatFromInt(rand.below(10));
-            const jx: f32 = @floatFromInt(rand.below(4));
-            const jy: f32 = @floatFromInt(rand.below(4));
+            const j = self.look.jitter;
+            const jz: f32 = @floatFromInt(if (j[0] > 0) rand.below(j[0]) else 0);
+            const jx: f32 = @floatFromInt(if (j[1] > 0) rand.below(j[1]) else 0);
+            const jy: f32 = @floatFromInt(if (j[2] > 0) rand.below(j[2]) else 0);
             self.pts[self.n] = .{ self.start[0] + jx * self.as, self.start[1] + jy * self.as, self.start[2] + jz * self.as };
             self.n += 1;
         }

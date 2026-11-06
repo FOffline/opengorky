@@ -5,27 +5,25 @@ const std = @import("std");
 const vec = @import("../vec.zig");
 const num = @import("../num.zig");
 const Allocator = std.mem.Allocator;
-const mesh = @import("../formats.zig").mesh;
-const Image = @import("../formats.zig").image.Image;
-const zbuffer = @import("../formats.zig").zbuffer;
+const Image = @import("../image.zig").Image;
 const sprite = @import("../formats.zig").sprite;
-const level_mod = @import("../formats.zig").level;
+const backdrop = @import("../core.zig").map;
 const skin = @import("../actor.zig").skin;
 const camera = @import("../actor.zig").camera;
 const model_cache = @import("../actor.zig").model_cache;
 const Model = model_cache.Model;
 const raster = @import("raster.zig");
-const level_files = @import("../formats.zig").level_files;
+const Textures = @import("textures.zig").Textures;
 
 /// Where the background surface depth for actor occlusion comes from.
 pub const DepthSource = union(enum) {
     none,
     /// Orthographic levels: `.zbf` is a height map.
-    heights: struct { z: zbuffer.ZBuffer, cfg: level_mod.OrthoCfg },
+    heights: struct { z: backdrop.Heights, cfg: backdrop.OrthoCfg },
     /// Perspective levels: `.zbf` is a W-buffer, depth `far − v·tl/65536` (level.PerspCfg).
     /// `tol`: the background counts as this much farther (our camera's error against
     /// the rendered background, see depth_fit.fitPerspPoints).
-    persp: struct { z: zbuffer.ZBuffer, far: f32, tl: f32, tol: f32 = 0 },
+    persp: struct { z: backdrop.Heights, far: f32, tl: f32, tol: f32 = 0 },
 };
 
 /// Level light (`.lts`): ambient, directional (direction (1, 0.3, 0.7) hard-coded
@@ -33,7 +31,7 @@ pub const DepthSource = union(enum) {
 const Lighting = struct {
     ambient: [3]f32 = .{ 0.3, 0.3, 0.3 },
     directional: [3]f32 = .{ 0.5, 0.5, 0.5 },
-    omni: []const level_files.Omni = &.{},
+    omni: []const backdrop.Omni = &.{},
 
     /// Vertex color (0x47e1f0): ambient + lamps (color · cosθ · (1 − d²/range²)) +
     /// directional · max(0, N·D); channels capped at 1. `n` is a unit normal.
@@ -62,6 +60,8 @@ const Lighting = struct {
 /// Actor layer for a `w×h` window with top-left `origin` (background pixels).
 pub const Layer = struct {
     canvas: raster.Canvas,
+    /// Model textures (the host's; none: untextured).
+    textures: ?*Textures = null,
     /// Debug: shadow pixels rejected by the depth test are drawn red.
     shadow_debug: bool = false,
     origin: [2]f32 = .{ 0, 0 },
@@ -72,6 +72,9 @@ pub const Layer = struct {
     /// 8×8 layer tiles (0x54b200): floor height of the first actor whose shadow touched
     /// them (its floor plane is the depth of the tile quad's four corners, 0x419e44).
     shadow_tiles: [shadow_grid * shadow_grid]?f32 = @splat(null),
+    /// Mask triangles cast this frame (castShadow, in its arena): compositeShadow
+    /// fills them into `shadow` in row bands on the pool (ones only, so order is free).
+    shadow_tris: std.ArrayList([3][2]f32) = .empty,
     /// Additive passes (ice, shock, materialization glow): drawn over the layer
     /// additively; `glow_used` — whether anything was drawn.
     glow: Image,
@@ -175,7 +178,7 @@ pub const Layer = struct {
                 hi = .{ @max(hi[0], sx), @max(hi[1], sy) };
                 o.* = .{ 1 + sx * kx, 1 + sy * ky };
             }
-            for (part.triangles) |tri| self.shadowTri(.{ proj[tri[0]], proj[tri[1]], proj[tri[2]] });
+            for (part.triangles) |tri| try self.shadow_tris.append(arena, .{ proj[tri[0]], proj[tri[1]], proj[tri[2]] });
         }
         if (hi[0] < 0 or hi[1] < 0 or lo[0] >= w or lo[1] >= h) return;
         const g = shadow_grid;
@@ -190,14 +193,14 @@ pub const Layer = struct {
         };
     }
 
-    /// Fills a mask triangle with ones (0x43e100): pixel centers.
-    fn shadowTri(self: *Layer, v: [3][2]f32) void {
+    /// Fills a mask triangle with ones (0x43e100): pixel centers, mask rows [y_lo, y_hi).
+    fn shadowTri(self: *Layer, v: [3][2]f32, y_lo: i32, y_hi: i32) void {
         const n: i32 = mask_size;
         // In float before the cast: a point behind a perspective camera goes beyond i32.
         const x0: i32 = @intFromFloat(std.math.clamp(@floor(@min(v[0][0], v[1][0], v[2][0])), 0, mask_size));
         const x1: i32 = @intFromFloat(std.math.clamp(@ceil(@max(v[0][0], v[1][0], v[2][0])), -1, mask_size - 1));
-        const y0: i32 = @intFromFloat(std.math.clamp(@floor(@min(v[0][1], v[1][1], v[2][1])), 0, mask_size));
-        const y1: i32 = @intFromFloat(std.math.clamp(@ceil(@max(v[0][1], v[1][1], v[2][1])), -1, mask_size - 1));
+        const y0: i32 = @max(y_lo, @as(i32, @intFromFloat(std.math.clamp(@floor(@min(v[0][1], v[1][1], v[2][1])), 0, mask_size))));
+        const y1: i32 = @min(y_hi - 1, @as(i32, @intFromFloat(std.math.clamp(@ceil(@max(v[0][1], v[1][1], v[2][1])), -1, mask_size - 1))));
         if (x0 > x1 or y0 > y1) return;
         const area = (v[1][0] - v[0][0]) * (v[2][1] - v[0][1]) - (v[2][0] - v[0][0]) * (v[1][1] - v[0][1]);
         if (@abs(area) < 1e-6) return;
@@ -225,90 +228,157 @@ pub const Layer = struct {
     /// 0.002 of the depth range (0x419910, constant 0x508560) — `bias` in layer depth
     /// buffer units. Empty layer pixels (background) get black with
     /// alpha I·coverage.
-    pub fn compositeShadow(self: *Layer, cam: camera.Camera, intensity: f32, bias: f32) void {
-        const ss = self.ss;
-        const cw = self.canvas.img.width;
-        // Tiles are in 640×480 screen pixels; coverage (bilinear sampling of the
-        // 256×256 texture), the floor plane and the depth test are evaluated at the
-        // center of each fine canvas pixel, like the exe's quad drawn at this
-        // resolution. With K = 1 this is the same as screen pixels.
-        const w = cw / ss;
-        const h = self.canvas.img.height / ss;
-        const px = self.canvas.img.pixels;
+    pub fn compositeShadow(self: *Layer, cam: camera.Camera, intensity: f32, bias: f32, pool: ?*raster.Canvas.Pool) void {
+        var fill: MaskJob = .{ .layer = self };
+        if (pool) |p| p.run(&fill) else fill.run();
+        self.shadow_tris = .empty;
         const n = mask_size;
         const tn = n / 2;
-        const g = shadow_grid;
-        const tw = @max(1, w / g);
-        const th = @max(1, h / g);
         var cov: [tn * tn]u8 = undefined;
         for (0..tn) |ty| for (0..tn) |tx| {
             const m = self.shadow[2 * ty * n + 2 * tx ..];
             cov[ty * tn + tx] = m[0] + m[1] + m[n] + m[n + 1];
         };
-        const fw: f32 = @floatFromInt(w);
-        const fh: f32 = @floatFromInt(h);
-        const ssf: f32 = @floatFromInt(ss);
+        const ss = self.ss;
+        const w = self.canvas.img.width / ss;
+        const h = self.canvas.img.height / ss;
+        var job: ShadowJob = .{ .layer = self, .cam = cam, .intensity = intensity, .bias = bias, .cov = &cov, .chunks = (h + ShadowJob.rows - 1) / ShadowJob.rows, .lo = @splat(.{ w, h }), .hi = @splat(.{ 0, 0 }) };
+        if (pool) |p| p.run(&job) else job.run();
+        self.shadow_stat = .{ .lit = job.lit.raw, .cut_bg = job.cut_bg.raw };
         // Darkened screen pixels go into the canvas "drawn" area per tile (shadows of
         // different actors do not merge into one bounding box).
-        self.shadow_stat = .{};
-        var lo: [g * g][2]usize = @splat(.{ w, h });
-        var hi: [g * g][2]usize = @splat(.{ 0, 0 });
-        defer for (lo, hi) |l, hh| if (l[0] < hh[0]) {
+        for (job.lo, job.hi) |l, hh| if (l[0] < hh[0]) {
             self.canvas.beginRegion();
             self.canvas.addDirty(.{ .x0 = @intCast(l[0] * ss), .y0 = @intCast(l[1] * ss), .x1 = @intCast(hh[0] * ss), .y1 = @intCast(hh[1] * ss) });
         };
-        // Only tiles the shadow touched (the last one reaches the layer edge).
-        for (0..g) |tr| for (tr * th..if (tr == g - 1) h else (tr + 1) * th) |y| {
-            if (std.mem.allEqual(?f32, self.shadow_tiles[tr * g ..][0..g], null)) break;
-            for (0..g) |tc| for (tc * tw..if (tc == g - 1) w else (tc + 1) * tw) |x| {
-                const zg = self.shadow_tiles[tr * g + tc] orelse break;
-                var any = false;
-                for (y * ss..y * ss + ss) |hy| {
-                    // Canvas pixel center in screen pixels.
-                    const ey = (num.toF32(hy) + 0.5) / ssf;
-                    // Texture coordinate: screen → mask (bx = 1 + x·510/w), texel = bx/2.
-                    const vy = (1 + ey * 2 * 255 / fh) / 2 - 0.5;
-                    const iy = @floor(vy);
-                    const fy = vy - iy;
-                    const y0: usize = @intFromFloat(std.math.clamp(iy, 0, tn - 1));
-                    const y1: usize = @intFromFloat(std.math.clamp(iy + 1, 0, tn - 1));
-                    for (x * ss..x * ss + ss) |hx| {
-                        const ex = (num.toF32(hx) + 0.5) / ssf;
-                        const vx = (1 + ex * 2 * 255 / fw) / 2 - 0.5;
-                        const ix = @floor(vx);
-                        const fx = vx - ix;
-                        const x0: usize = @intFromFloat(std.math.clamp(ix, 0, tn - 1));
-                        const x1: usize = @intFromFloat(std.math.clamp(ix + 1, 0, tn - 1));
-                        const c00: f32 = @floatFromInt(cov[y0 * tn + x0]);
-                        const c10: f32 = @floatFromInt(cov[y0 * tn + x1]);
-                        const c01: f32 = @floatFromInt(cov[y1 * tn + x0]);
-                        const c11: f32 = @floatFromInt(cov[y1 * tn + x1]);
-                        const sum = (c00 * (1 - fx) + c10 * fx) * (1 - fy) + (c01 * (1 - fx) + c11 * fx) * fy;
-                        if (sum <= 0) continue;
-                        any = true;
-                        self.shadow_stat.lit += 1;
-                        const plane = -cam.planeDepth(ex + self.origin[0], ey + self.origin[1], zg) - bias;
-                        const i = (hy * cw + hx) * 4;
-                        if (plane > self.canvas.depthAt(hy * cw + hx, hx, hy)) {
-                            if (ss > 1 and std.math.isNan(self.canvas.depth[hy * cw + hx])) self.shadow_stat.cut_bg += 1;
-                            if (self.shadow_debug) px[i..][0..4].* = .{ 255, 0, 0, 255 };
-                            continue;
-                        }
-                        const a = std.math.clamp(intensity * sum / 4, 0, 1);
-                        if (px[i + 3] == 0) {
-                            px[i..][0..4].* = .{ 0, 0, 0, @intFromFloat(a * 255) };
-                        } else for (px[i..][0..3]) |*ch| {
-                            ch.* = @intFromFloat(num.toF32(ch.*) * (1 - a));
-                        }
-                    }
-                }
-                if (!any) continue;
-                const ti = tr * g + tc;
-                lo[ti] = .{ @min(lo[ti][0], x), @min(lo[ti][1], y) };
-                hi[ti] = .{ @max(hi[ti][0], x + 1), @max(hi[ti][1], y + 1) };
-            };
-        };
     }
+
+    /// Fills `shadow_tris` into the mask in bands of rows.
+    const MaskJob = struct {
+        layer: *Layer,
+        next: std.atomic.Value(i32) = .init(0),
+
+        const rows = 32;
+
+        pub fn run(job: *MaskJob) void {
+            while (true) {
+                const lo = job.next.fetchAdd(rows, .monotonic);
+                if (lo >= mask_size) return;
+                const flo: f32 = @floatFromInt(lo);
+                for (job.layer.shadow_tris.items) |v| {
+                    if (@max(v[0][1], v[1][1], v[2][1]) < flo - 1 or @min(v[0][1], v[1][1], v[2][1]) > flo + rows + 1) continue;
+                    job.layer.shadowTri(v, lo, lo + rows);
+                }
+            }
+        }
+    };
+
+    /// compositeShadow in bands of screen rows on the raster pool: every pixel is
+    /// computed on its own, so the result equals one thread's; tile bounds and the
+    /// counters merge with atomics.
+    const ShadowJob = struct {
+        layer: *Layer,
+        cam: camera.Camera,
+        intensity: f32,
+        bias: f32,
+        cov: *const [mask_size / 2 * (mask_size / 2)]u8,
+        chunks: usize,
+        next: std.atomic.Value(usize) = .init(0),
+        lit: std.atomic.Value(u32) = .init(0),
+        cut_bg: std.atomic.Value(u32) = .init(0),
+        lo: [shadow_grid * shadow_grid][2]usize,
+        hi: [shadow_grid * shadow_grid][2]usize,
+
+        /// Screen rows per band.
+        const rows = 8;
+
+        pub fn run(job: *ShadowJob) void {
+            const self = job.layer;
+            const ss = self.ss;
+            const cw = self.canvas.img.width;
+            // Tiles are in 640×480 screen pixels; coverage (bilinear sampling of the
+            // 256×256 texture), the floor plane and the depth test are evaluated at the
+            // center of each fine canvas pixel, like the exe's quad drawn at this
+            // resolution. With K = 1 this is the same as screen pixels.
+            const w = cw / ss;
+            const h = self.canvas.img.height / ss;
+            const px = self.canvas.img.pixels;
+            const tn = mask_size / 2;
+            const g = shadow_grid;
+            const tw = @max(1, w / g);
+            const th = @max(1, h / g);
+            const fw: f32 = @floatFromInt(w);
+            const fh: f32 = @floatFromInt(h);
+            const ssf: f32 = @floatFromInt(ss);
+            const cov = job.cov;
+            while (true) {
+                const ci = job.next.fetchAdd(1, .monotonic);
+                if (ci >= job.chunks) return;
+                var lit: u32 = 0;
+                var cut_bg: u32 = 0;
+                var lo: [g * g][2]usize = @splat(.{ w, h });
+                var hi: [g * g][2]usize = @splat(.{ 0, 0 });
+                for (ci * rows..@min(h, ci * rows + rows)) |y| {
+                    // Only tiles the shadow touched (the last one reaches the layer edge).
+                    const tr: usize = @min(y / th, g - 1);
+                    if (std.mem.allEqual(?f32, self.shadow_tiles[tr * g ..][0..g], null)) continue;
+                    for (0..g) |tc| for (tc * tw..if (tc == g - 1) w else (tc + 1) * tw) |x| {
+                        const zg = self.shadow_tiles[tr * g + tc] orelse break;
+                        var any = false;
+                        for (y * ss..y * ss + ss) |hy| {
+                            // Canvas pixel center in screen pixels.
+                            const ey = (num.toF32(hy) + 0.5) / ssf;
+                            // Texture coordinate: screen → mask (bx = 1 + x·510/w), texel = bx/2.
+                            const vy = (1 + ey * 2 * 255 / fh) / 2 - 0.5;
+                            const iy = @floor(vy);
+                            const fy = vy - iy;
+                            const y0: usize = @intFromFloat(std.math.clamp(iy, 0, tn - 1));
+                            const y1: usize = @intFromFloat(std.math.clamp(iy + 1, 0, tn - 1));
+                            for (x * ss..x * ss + ss) |hx| {
+                                const ex = (num.toF32(hx) + 0.5) / ssf;
+                                const vx = (1 + ex * 2 * 255 / fw) / 2 - 0.5;
+                                const ix = @floor(vx);
+                                const fx = vx - ix;
+                                const x0: usize = @intFromFloat(std.math.clamp(ix, 0, tn - 1));
+                                const x1: usize = @intFromFloat(std.math.clamp(ix + 1, 0, tn - 1));
+                                const c00: f32 = @floatFromInt(cov[y0 * tn + x0]);
+                                const c10: f32 = @floatFromInt(cov[y0 * tn + x1]);
+                                const c01: f32 = @floatFromInt(cov[y1 * tn + x0]);
+                                const c11: f32 = @floatFromInt(cov[y1 * tn + x1]);
+                                const sum = (c00 * (1 - fx) + c10 * fx) * (1 - fy) + (c01 * (1 - fx) + c11 * fx) * fy;
+                                if (sum <= 0) continue;
+                                any = true;
+                                lit += 1;
+                                const plane = -job.cam.planeDepth(ex + self.origin[0], ey + self.origin[1], zg) - job.bias;
+                                const i = (hy * cw + hx) * 4;
+                                if (plane > self.canvas.depthAt(hy * cw + hx, hx, hy)) {
+                                    if (ss > 1 and std.math.isNan(self.canvas.depth[hy * cw + hx])) cut_bg += 1;
+                                    if (self.shadow_debug) px[i..][0..4].* = .{ 255, 0, 0, 255 };
+                                    continue;
+                                }
+                                const a = std.math.clamp(job.intensity * sum / 4, 0, 1);
+                                if (px[i + 3] == 0) {
+                                    px[i..][0..4].* = .{ 0, 0, 0, @intFromFloat(a * 255) };
+                                } else for (px[i..][0..3]) |*ch| {
+                                    ch.* = @intFromFloat(num.toF32(ch.*) * (1 - a));
+                                }
+                            }
+                        }
+                        if (!any) continue;
+                        const ti = tr * g + tc;
+                        lo[ti] = .{ @min(lo[ti][0], x), @min(lo[ti][1], y) };
+                        hi[ti] = .{ @max(hi[ti][0], x + 1), @max(hi[ti][1], y + 1) };
+                    };
+                }
+                _ = job.lit.fetchAdd(lit, .monotonic);
+                _ = job.cut_bg.fetchAdd(cut_bg, .monotonic);
+                for (lo, hi, 0..) |l, hh, ti| if (l[0] < hh[0]) for (0..2) |k| {
+                    _ = @atomicRmw(usize, &job.lo[ti][k], .Min, l[k], .monotonic);
+                    _ = @atomicRmw(usize, &job.hi[ti][k], .Max, hh[k], .monotonic);
+                };
+            }
+        }
+    };
 
     /// Clears the layer and fills the depth buffer with the background surface: pixel
     /// (x, y) with height H lies at depth y + 2H/k (see camera.worldToScreen).
@@ -333,12 +403,18 @@ pub const Layer = struct {
         }
         self.canvas.dirty = .empty;
         self.canvas.n_regions = 0;
-        if (self.glow_used) @memset(self.glow.pixels, 0);
+        // The additive images are non-empty only in the rows they drew.
+        const ad = self.canvas.add_dirty;
+        if (!ad.isEmpty()) {
+            if (self.glow_used) @memset(self.glow.pixels[ad.y0 * w * 4 .. ad.y1 * w * 4], 0);
+            if (self.screen_used) @memset(self.screen.pixels[ad.y0 * w * 4 .. ad.y1 * w * 4], 0);
+        }
+        self.canvas.add_dirty = .empty;
         self.glow_used = false;
-        if (self.screen_used) @memset(self.screen.pixels, 0);
         self.screen_used = false;
         @memset(self.shadow, 0);
         self.shadow_tiles = @splat(null);
+        self.shadow_tris = .empty;
         // Background depth by screen rows: the source kind is resolved once per frame.
         const sw = w / ss;
         const ox: i64 = @intFromFloat(origin[0]);
@@ -372,7 +448,7 @@ pub const Layer = struct {
                 .persp => |pz| for (row, 0..) |*d, xx| {
                     const bx = ox + @as(i64, @intCast(xx));
                     d.* = if (bx >= 0 and by >= 0 and bx < pz.z.width and by < pz.z.height)
-                        level_mod.perspDepth(pz.far, pz.tl, pz.z.depth[@as(usize, @intCast(by)) * pz.z.width + @as(usize, @intCast(bx))]) + pz.tol
+                        backdrop.perspDepth(pz.far, pz.tl, pz.z.depth[@as(usize, @intCast(by)) * pz.z.width + @as(usize, @intCast(bx))]) + pz.tol
                     else
                         std.math.inf(f32);
                 },
@@ -396,7 +472,7 @@ pub const Layer = struct {
         return switch (src) {
             .none => std.math.inf(f32),
             .heights => |hm| -(num.toF32(by) + 2 * hm.cfg.height(v) / camera.k),
-            .persp => |pz| level_mod.perspDepth(pz.far, pz.tl, v) + pz.tol,
+            .persp => |pz| backdrop.perspDepth(pz.far, pz.tl, v) + pz.tol,
         };
     }
 
@@ -426,7 +502,7 @@ pub const Layer = struct {
     /// Weapon in hand: model and attachment point on the actor model (0x42b300).
     pub const Attachment = struct {
         model: *const Model,
-        link: mesh.HoldMode,
+        link: @import("../core.zig").model.HoldMode,
         /// Command 0x20 (0x42ac30): offset from the point (exe units — mesh × actor
         /// model scale), rotation (for a row vector) and mesh scale.
         offset: [3]f32 = .{ 0, 0, 0 },
@@ -515,7 +591,8 @@ pub const Layer = struct {
     /// ([0x696ea0] == 0), so this is the combat-level path. `corners` are world
     /// points, clockwise from top-left. Vertex colour (0x45e150): alpha mode (r, g, b, a),
     /// otherwise (a·r, a·g, a·b).
-    pub fn billboard(self: *Layer, cam: camera.Camera, corners: [4][3]f32, tex: Image, alpha: f32, rgb: [3]f32, blend: BillboardBlend) void {
+    /// `program`, `k`: a material's CPU program (raster `Shade.program`, strength `pk`; .none: the exe's).
+    pub fn billboard(self: *Layer, cam: camera.Camera, corners: [4][3]f32, tex: Image, alpha: f32, rgb: [3]f32, blend: BillboardBlend, program: raster.Canvas.Program, pk: f32) void {
         const ssf: f32 = @floatFromInt(self.ss);
         var sp: [4][3]f32 = undefined;
         for (corners, &sp) |p, *s| {
@@ -526,11 +603,13 @@ pub const Layer = struct {
         const k = std.math.clamp(alpha, 0, 1);
         const lit: [3]f32 = if (blend == .alpha) rgb else .{ rgb[0] * k, rgb[1] * k, rgb[2] * k };
         const col = [3][3]f32{ lit, lit, lit };
-        const sh: raster.Canvas.Shade = switch (blend) {
+        var sh: raster.Canvas.Shade = switch (blend) {
             .alpha => .{ .alpha = alpha, .depth_write = false, .tex_alpha = true },
             .add => .{ .add = &self.glow, .depth_write = false },
             .screen => .{ .add = &self.screen, .screen = true, .depth_write = false },
         };
+        sh.program = program;
+        sh.k = pk;
         switch (blend) {
             .alpha => {},
             .add => self.glow_used = true,
@@ -540,8 +619,8 @@ pub const Layer = struct {
         self.canvas.triangleShaded(.{ sp[0], sp[2], sp[3] }, .{ uv[0], uv[2], uv[3] }, tex, col, sh);
     }
 
-    /// Batch billboard blend (0x408ad0 modes 2, 1, 4).
-    pub const BillboardBlend = enum { alpha, add, screen };
+    /// Batch billboard blend (0x408ad0 modes 2, 1, 4): a material's set.
+    pub const BillboardBlend = @import("../effects.zig").material.Blend;
 
     fn drawAttached(self: *Layer, arena: Allocator, cam: camera.Camera, model: *const Model, frame: u32, s: f32, p: Placement, at: Attachment) !void {
         const wpts = try attachedPoints(arena, model, frame, at) orelse return;
@@ -569,6 +648,8 @@ pub const Layer = struct {
         const aspect = cam.aspect();
         const ssf: f32 = @floatFromInt(self.ss);
         for (model.mesh.parts, pts, 0..) |part, ppts, pi| {
+            const mips: []const Image = if (self.textures) |t| t.partMips(model, pi) else &.{};
+            const tex: ?Image = if (mips.len > 0) mips[0] else null;
             const weld = if (pi < model.weld.len) model.weld[pi] else &.{};
             const acc = try arena.alloc([3]f32, ppts.len);
             @memset(acc, .{ 0, 0, 0 });
@@ -605,7 +686,7 @@ pub const Layer = struct {
                     col[i] = cols[t[i]];
                 }
                 if (!model.two_sided and backFacing(sp)) continue;
-                if (!p.hidden) self.canvas.triangleShaded(sp, uv, model.partTexture(pi), col, .{ .alpha = p.alpha, .depth_write = p.depth_write, .mips = model.partMips(pi), .test_bias = p.depth_bias });
+                if (!p.hidden) self.canvas.triangleShaded(sp, uv, tex, col, .{ .alpha = p.alpha, .depth_write = p.depth_write, .mips = mips, .test_bias = p.depth_bias });
                 if (frame_of != null) continue;
                 for (p.overlays) |ov| if (ov) |o| {
                     self.canvas.triangleShaded(sp, uv, o.tex, raster.gray(1), .{ .add = &self.glow, .uv_scale = o.uv_scale, .uv_offset = o.uv_offset, .wrap = o.wrap });
@@ -671,10 +752,10 @@ test "shadow is solid with soft edges and skips what is above the floor plane" {
     // The shadow is a 120×100 mask-texel square (≈150×94 layer pixels).
     const a = [2]f32{ 200, 180 };
     const b = [2]f32{ 320, 280 };
-    layer.shadowTri(.{ a, .{ b[0], a[1] }, b });
-    layer.shadowTri(.{ a, b, .{ a[0], b[1] } });
+    layer.shadowTri(.{ a, .{ b[0], a[1] }, b }, 0, 512);
+    layer.shadowTri(.{ a, b, .{ a[0], b[1] } }, 0, 512);
     for (&layer.shadow_tiles) |*t| t.* = 0;
-    layer.compositeShadow(.ortho, 0.5, 2.8);
+    layer.compositeShadow(.ortho, 0.5, 2.8, null);
     // Inside without holes: every floor pixel is darkened by half.
     const x0: usize = @as(usize, @intFromFloat(@ceil((a[0] - 1) * 640 / 510))) + 2;
     const x1: usize = @as(usize, @intFromFloat(@floor((b[0] - 1) * 640 / 510))) - 2;

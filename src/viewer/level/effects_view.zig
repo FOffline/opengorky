@@ -53,6 +53,8 @@ pub const EffectsView = struct {
     gpa: Allocator,
     renderer: *c.SDL_Renderer,
     models: *model_cache.Cache,
+    /// Effect frame pictures (the renderer's textures over the models' archive).
+    textures: *og.render.textures.Textures,
     cache: std.StringHashMapUnmanaged(?Res) = .empty,
     /// Projectile mesh textures by model.
     mesh_tex: std.AutoHashMapUnmanaged(*const model_cache.Model, ?*c.SDL_Texture) = .empty,
@@ -61,7 +63,7 @@ pub const EffectsView = struct {
     /// Textures `gfx_3d\textures\<name>` by name (disturb.3df etc.).
     named_tex: std.StringHashMapUnmanaged(?*c.SDL_Texture) = .empty,
 
-    pub fn init(gpa: Allocator, r: *c.SDL_Renderer, models: *model_cache.Cache) EffectsView {
+    pub fn init(gpa: Allocator, r: *c.SDL_Renderer, models: *model_cache.Cache, textures: *og.render.textures.Textures) EffectsView {
         const F = c.SDL_BLENDFACTOR_ONE;
         const Z = c.SDL_BLENDFACTOR_ZERO;
         const add = c.SDL_BLENDOPERATION_ADD;
@@ -69,6 +71,7 @@ pub const EffectsView = struct {
             .gpa = gpa,
             .renderer = r,
             .models = models,
+            .textures = textures,
             .modes = .{
                 c.SDL_BLENDMODE_NONE,
                 c.SDL_ComposeCustomBlendMode(F, F, add, Z, F, add),
@@ -103,7 +106,7 @@ pub const EffectsView = struct {
 
     fn textureOf(self: *EffectsView, m: *const model_cache.Model) ?*c.SDL_Texture {
         if (self.mesh_tex.get(m)) |t| return t;
-        const t: ?*c.SDL_Texture = if (m.texture) |img| gfx.textureLinear(self.renderer, img) catch null else null;
+        const t: ?*c.SDL_Texture = if (self.textures.meshTexture(m)) |img| gfx.textureLinear(self.renderer, img) catch null else null;
         self.mesh_tex.put(self.gpa, m, t) catch {};
         return t;
     }
@@ -119,10 +122,9 @@ pub const EffectsView = struct {
     pub fn namedTexture(self: *EffectsView, file: []const u8) ?*c.SDL_Texture {
         if (self.named_tex.get(file)) |t| return t;
         var buf: [96]u8 = undefined;
-        const path = std.fmt.bufPrint(&buf, "gfx_3d\\textures\\{s}", .{file}) catch return null;
+        const path = std.fmt.bufPrint(&buf, "textures/{s}", .{file}) catch return null;
         const t: ?*c.SDL_Texture = blk: {
-            const bytes = self.models.readFile(path) catch break :blk null;
-            var img = og.formats.tex3df.decode(self.gpa, bytes) catch break :blk null;
+            var img = self.textures.texture(self.gpa, path) orelse break :blk null;
             defer img.deinit(self.gpa);
             break :blk gfx.textureLinear(self.renderer, img) catch null;
         };
@@ -243,11 +245,11 @@ pub const EffectsView = struct {
         }
     }
 
-    /// Effect mesh (`chaingun.msh`, two crossed planes along +X) textured with an
+    /// Effect mesh (UiEffects effect_mesh; Classic's `chaingun.msh`, two crossed planes along +X) textured with an
     /// effect frame, +X along `dir` (rocket body and exhaust, 0x49bfb0).
     pub fn drawEffectMesh(self: *EffectsView, f: Frame, effect: []const u8, frame: u32, pos: [3]f32, dir: [3]f32, scale: f32, blend: fx.dsc.Blend) !void {
         const rs = self.res(effect) orelse return;
-        const m = self.models.get("chaingun") orelse return;
+        const m = self.models.get(og.core.modules.ui().effects.effect_mesh) orelse return;
         const tex = rs.tex[frame % rs.tex.len];
         _ = c.SDL_SetTextureBlendMode(tex, self.modes[@backingInt(blend)]);
         defer _ = c.SDL_SetTextureBlendMode(tex, self.modes[@backingInt(rs.blend)]);
@@ -268,7 +270,7 @@ pub const EffectsView = struct {
             }
             const idx = try f.arena.alloc(c_int, part.triangles.len * 3);
             for (part.triangles, 0..) |t, i| for (0..3) |k| {
-                idx[i * 3 + k] = t[k];
+                idx[i * 3 + k] = @intCast(t[k]);
             };
             _ = c.SDL_RenderGeometry(self.renderer, tex, verts.ptr, @intCast(verts.len), idx.ptr, @intCast(idx.len));
         }
@@ -304,11 +306,10 @@ pub const EffectsView = struct {
             for (list.items) |t| c.SDL_DestroyTexture(t);
             list.deinit(self.gpa);
         }
-        for (d.frames.items) |f| {
+        for (d.frames) |f| {
             var buf: [160]u8 = undefined;
-            const path = std.fmt.bufPrint(&buf, "gfx_3d\\effects\\{s}\\{s}", .{ name, f }) catch continue;
-            const bytes = self.models.readFile(path) catch continue;
-            var img = og.formats.tex3df.decode(self.gpa, bytes) catch continue;
+            const path = std.fmt.bufPrint(&buf, "effects/{s}/{s}", .{ name, f }) catch continue;
+            var img = self.textures.texture(self.gpa, path) orelse continue;
             defer img.deinit(self.gpa);
             const t = try gfx.textureLinear(self.renderer, img);
             _ = c.SDL_SetTextureBlendMode(t, self.modes[@backingInt(d.blend)]);
@@ -360,8 +361,8 @@ pub const EffectsView = struct {
     }
 
     /// Ribbon beam (0x4a3c30, 0x4a4f80): strip A→B offset ±`side` across, texture
-    /// coordinate `t0`…`t1` along, 0…1 across; additive.
-    pub fn ribbon(self: *EffectsView, f: Frame, name: []const u8, frame: u32, a: [3]f32, b: [3]f32, side: [3]f32, t0: f32, t1: f32, k: f32) !void {
+    /// coordinate `t0`…`t1` along, 0…1 across; additive, colour `rgb`.
+    pub fn ribbon(self: *EffectsView, f: Frame, name: []const u8, frame: u32, a: [3]f32, b: [3]f32, side: [3]f32, t0: f32, t1: f32, rgb: [3]f32) !void {
         const rs = self.res(name) orelse return;
         const tex = rs.tex[frame % rs.tex.len];
         _ = c.SDL_SetTextureBlendMode(tex, self.modes[@backingInt(fx.dsc.Blend.add)]);
@@ -373,8 +374,7 @@ pub const EffectsView = struct {
             og.vec.sub(a, side),
         };
         const uv = [4][2]f32{ .{ t0, 0 }, .{ t1, 0 }, .{ t1, 1 }, .{ t0, 1 } };
-        const col = [4]f32{ k, k, k, 1 };
-        self.quad(f, tex, corners, uv, col);
+        self.quad(f, tex, corners, uv, .{ rgb[0], rgb[1], rgb[2], 1 });
     }
 
     /// Horizontal "screen right" axis in the world (for camera-facing strips).

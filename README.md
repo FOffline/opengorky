@@ -34,9 +34,9 @@ Prebuilt packages are on the [latest release](../../releases/latest) page:
 
 | Platform | Package | How to run |
 |---|---|---|
-| macOS 13+ (Apple Silicon and Intel) | `OpenGorky-macos-x86_64-arm64.zip` | Unzip and open `OpenGorky.app`. It asks for the game folder once. |
-| Windows 10+ (x86_64) | `opengorky-windows-x86_64.zip` | Unzip and run `OpenGorky.exe`. It asks for the game folder once. SmartScreen may warn: **More info → Run anyway**. |
-| Linux x86_64 / aarch64 (glibc 2.41+) | `opengorky-linux-<arch>.tar.xz` | Unpack and run `./opengorky <game dir>`. An icon and a `.desktop` file are included. |
+| macOS 13+ (Apple Silicon and Intel) | `OpenGorky-macos-x86_64-arm64.zip` | Unzip and open `OpenGorky.app`. Choose the game folder in its launcher window once. |
+| Windows 10+ (x86_64) | `opengorky-windows-x86_64.zip` | Unzip and run `OpenGorky.exe`. Choose the game folder in its launcher window once. SmartScreen may warn: **More info → Run anyway**. |
+| Linux x86_64 / aarch64 (glibc 2.36+: Debian 12, Ubuntu 24.04 and newer) | `opengorky-linux-<arch>.tar.xz` | Unpack and run `./opengorky` (the launcher window) or `./opengorky <game dir>` (straight into the game). Nothing to install on a desktop system: SDL3 is in the package and loads X11 or Wayland and the sound server (PipeWire, PulseAudio or ALSA) the system has. An icon and a `.desktop` file are included. |
 
 The level editor is a separate download: `OpenGorky-Editor-macos-x86_64-arm64.zip`
 (`OpenGorky Editor.app`), `opengorky-editor-windows-x86_64.zip` (`OpenGorkyEditor.exe`),
@@ -76,6 +76,21 @@ case-insensitive and fonts follow the edition language.
 
 ## Configuration
 
+### Launcher
+
+Started without arguments (the macOS app, `OpenGorky.exe`, `./opengorky`), the game first
+shows a launcher window: the game folder (with a check of what was found), the version,
+and the settings below in four tabs — Play, Display, Game, Advanced. **Play** (or Enter)
+saves them to `opengorky.cfg` and starts the game; **Exit** (Esc) quits and leaves the file
+unchanged. With `launcher = 0` it is skipped; hold Shift while starting to see it anyway
+(macOS and Windows), or set the key back to `1`. It always appears while no usable game
+folder is set. Any command-line argument skips it.
+
+The **Game** card on the Play tab chooses what Play starts: the original game, or an
+OpenGorky package (`.ogp`, a project's `dist/<id>.ogp`) found in a `mods` folder — the game
+folder's (`<game>/mods/`) or the settings folder's (below). A package plays over the chosen
+game folder's assets; one made for a newer OpenGorky is listed but cannot be started.
+
 ### Where files live
 
 | | Settings `opengorky.cfg`, mods | Saves |
@@ -103,7 +118,9 @@ pause_background = 1
 log = warn
 debug = 0
 console = 0
+launcher = 1
 game_path = /path/to/Gorky 17
+package =
 ```
 
 | Key | Default | Meaning |
@@ -118,7 +135,9 @@ game_path = /path/to/Gorky 17
 | `log` | `warn` | Terminal messages: `none`, `warn`, `info` |
 | `debug` | `0` | Debug overlays: battle status line, health bars, F1 line |
 | `console` | `0` | Developer console (`` ` `` or F2) with debug commands: heal, win the battle, give items… |
+| `launcher` | `1` | Show the launcher window when started without arguments; `0` — straight into the game (Shift at startup shows it anyway) |
 | `game_path` | empty | The game folder, used when none is given at launch. Set automatically on the first launch with a path or after picking the folder |
+| `package` | empty | The OpenGorky package to play (its file name, e.g. `gorky.ogp`, in the game's or the settings folder's `mods/`), set by the launcher's Game card; empty — the original game. Not found: the original game starts |
 
 On/off keys accept `1`/`0`, `on`/`off` or `true`/`false`.
 
@@ -154,6 +173,36 @@ are looked up before the game archives, so levels, fighters and weapons can be c
 added without touching the original files. Custom fighters use the generic class
 (`classType = 100`): attacks, AI and resistances come from their `.ftr`/`.wpn` fields.
 
+### OpenGorky projects
+
+An OpenGorky project is a folder of OG Script (`docs/og-script.md`): `opengorky.mod`
+(`format = ogs`, the installed game's path in `game`, `$OPENGORKY_GAME` over it), `src/` (the
+texts and the project's own assets) and `dist/` (what players get). The game's own assets
+are read from the installed game, never copied. `gorky-tool convert <game> <out>` converts
+a Classic game into a new project (the game is not changed); `gorky-tool build <project>`
+checks it and packs `dist/<id>.ogp`; `gorky-tool play <project> --start location:<level>`
+plays it. Among its texts:
+
+- `src/rules/*.ogs` — the engine's rules (what the original keeps in its code) as rows over
+  empty tables; `Campaign(…)` is the campaign: the location and heroes a new game starts
+  with, the arrival area and scene, intro videos, the videos before the menu, the menu logo
+  and music, the credits. The main menu shows the manifest's `title`.
+- `src/game.ogs` — the game's hooks, components `for game`: `OnDamage(attacker, target,
+  weapon, amount)`, `OnResist(target, kind, amount)`, `OnTurnStart(side, turn)`,
+  `OnBattleEnd(won)`, `OnItemUse(user, item, target)`, `OnLevelEnter(level)`.
+- `src/texts/*.ogs` — the texts (`UiText`, `Examine`, `AreaExamine`), UTF-8.
+
+A package (`dist/<id>.ogp`) handed to players goes into `<game>/mods/` or the settings
+folder's `mods/` and is chosen on the launcher's Play tab (or passed as the first argument:
+`opengorky-viewer gorky.ogp --play`). It finds the installed game in the game folder chosen
+in the launcher (or `$OPENGORKY_GAME`), not the author's `game` path; without one the
+viewer says so. Saves of a project restore its objects from their blocks and archetypes,
+with the values their vars had in play: lists, records and references too (to another
+location's objects as well), its components' vars and its event subscriptions
+(`docs/og-script.md` §4.2).
+
+The editor opens a project read-only for now.
+
 ## Building
 
 Requirements: [Zig 0.17.0](https://ziglang.org/download/), SDL3 and `pkg-config`
@@ -165,17 +214,21 @@ as the packages do). With `-Dffmpeg=false` videos play through an external `ffmp
 in `PATH` and the editor cannot import.
 
 ```sh
-zig build                             # zig-out/bin/opengorky-viewer, zig-out/bin/gorky-tool
+zig build                                # Debug: zig-out/bin/opengorky-viewer, opengorky-editor, gorky-tool
+zig build -Drelease                      # optimized, for playing and the checks
 zig build test
-zig build viewer -- <game dir> --play # build and play
+zig build viewer -Drelease -- <game dir> --play # build and play
 ```
 
-- The viewer builds ReleaseFast with debug info by default (`-Dviewer-optimize=safe|debug`).
-  ReleaseSmall is avoided: LLVM's MachineOutliner miscompiles on arm64 with Zig 0.17.
-- gorky-tool builds ReleaseSafe (`-Dtool-optimize=debug`). `-Dstrip=true` drops debug info.
+- Plain `zig build` builds everything Debug: fast to rebuild while working, but the viewer
+  (software model rendering) and gorky-tool's game runs are ~10× slower.
+- `-Drelease`: the viewer and the editor ReleaseFast with debug info, gorky-tool ReleaseSafe
+  (`-Dviewer-optimize=…`, `-Dtool-optimize=…` set either). ReleaseSmall is avoided: LLVM's
+  MachineOutliner miscompiles on arm64 with Zig 0.17. `-Dstrip=true` drops debug info.
 - Gameplay does not depend on the build mode or the CPU (no `@setFloatMode`).
 
-Regression checks with the game data: `scripts/regress.sh <game dir>`,
+Regression checks with the game data (they build `-Drelease` into `zig-out/release` and use
+it, unless `$GORKY_TOOL` names a tool): `scripts/regress.sh <game dir>`,
 `scripts/fullgame.sh <game dir>` (full playthrough), `scripts/linux/check.sh <game dir>`
 (everything in a Linux container).
 
@@ -197,13 +250,15 @@ Editor.app` + `OpenGorky-Editor-macos-<arch>.zip`, `opengorky-editor-linux-<arch
   them into the viewer and the editor: videos play and imports convert in-process
   (`src/editor/transcode.zig`), no FFmpeg files or programs are shipped. Sources are
   checked by SHA-256.
-- **SDL3**: macOS uses its own universal build (`scripts/build-sdl3.sh`), Linux Debian's,
-  Windows the official mingw release.
+- **SDL3**: macOS and Linux use their own build (`scripts/build-sdl3.sh`; on Linux X11,
+  Wayland, ALSA, PulseAudio and PipeWire are dlopened, so the package hard-depends only on
+  glibc), Windows the official mingw release.
 - **macOS**: ad-hoc signed; set `SIGN_IDENTITY` and `NOTARY_PROFILE` for Developer ID
   signing and notarization. An ad-hoc build downloaded from the internet is blocked by
   Gatekeeper ("Apple could not verify…"): open it via System Settings → Privacy & Security →
   **Open Anyway**, or `xattr -dr com.apple.quarantine OpenGorky.app`.
-- **Linux**: built on Debian trixie, libraries in `lib/` with an `$ORIGIN/lib` rpath.
+- **Linux**: built on Debian 12 bookworm (`scripts/linux/dist.Dockerfile`; glibc 2.36),
+  SDL3 in `lib/` with an `$ORIGIN/lib` rpath.
 - **Windows**: the viewer is cross-built with Zig, FFmpeg with mingw-w64.
 - **CI**: `.github/workflows/release.yml` builds all packages; pushing a `v*` tag, or
   running it manually with a tag (`gh workflow run release.yml -f tag=v0.1.1`), publishes
@@ -219,7 +274,8 @@ zig build viewer -- <game dir> [01_port/sprite.dat] [--image N] [--shot out.png]
 
 Without `--play`: `[` `]` archive, `↑` `↓` resource, `←` `→` frame, Space animate, `L` level
 mode. `--shot` renders one frame and exits (`--level`, `--scroll X,Y`, `--time MS`,
-`--hide-objects`).
+`--hide-objects`). `--launcher-shot out.png [--launcher-tab play|display|game|advanced]`
+renders the launcher window instead (an optional game dir argument fills its folder).
 
 ### gorky-tool
 
@@ -243,11 +299,14 @@ zig build editor -- [<game dir>] [--level NAME] [--lang en|ru] [--shot out.png]
 
 The interface is in English or Russian (Settings tab, or `--lang`). Without a game folder
 the editor starts empty; choose one in the Settings tab ("Choose…"), which reopens the
-editor on it. The language and the folder (chosen there or given on the command line) are
-kept in `editor.cfg` in the settings folder.
+editor on it. The language, the folder (chosen there or given on the command line), the
+program Play runs, the interface scale and the pane sizes are kept in `editor.cfg` in the
+settings folder.
 
-Edits the game folder in place (its `.dat` archives), so work on a copy. Every edit in every
-tab goes into one undo stack (`Ctrl+Z`) and one save (`Ctrl+S`); only the numbers and lines
+Edits a Classic game folder in place (its `.dat` archives), so work on a copy; an OpenGorky
+project opens read-only. Every edit in every
+tab goes into one undo stack (`Ctrl+Z`); a save (`Ctrl+S`) writes the shown tab's edits (closing
+a tab with edits (its × or `Ctrl+W` / `Cmd+W`) or the editor asks to save them); only the numbers and lines
 an edit touches change, the rest of every script stays byte for byte.
 
 - **Battles / Locations**: the level with its battle grid and objects (wheel zooms, drag empty
@@ -331,13 +390,12 @@ right click on one shows its own script and every block of the level's scripts n
 each can be turned off and on. Boxes have a right-click menu (edit contents, delete; also on
 the object list). The History tab lists every edit of the session, saved ones too (the last save marked): a
 click shows what a step changed, "Return here" (on a second click) undoes the steps after
-it, also past a save — the next save writes the files back. One Save writes everything,
-the code window's text included.
+it, also past a save — the next save writes the files back.
 Any script (level, area, object, class, hero, scene) opens in a code window with
 highlighting, completion and a syntax check by the engine's parser. A function taken from
 the completion list comes with sample arguments, Tab moving through them; inside a call its
-parameters show above the line. "Functions (F1)" lists all 109 the engine runs (every one
-the game's scripts call) with parameters and what each does, a click inserting it; Save (Ctrl+S, also in the window) puts it into the edits and
+parameters show above the line. "Functions (F1)" lists all 119 the engine runs (every one
+the game's scripts call) with parameters and what each does, a click inserting it; Save (Ctrl+S) puts its tab's text into the edits and
 writes it, keeping the file's encoding. Boxes
 on locations can be dragged (their `.var` position and walk point). Heroes have a starting
 inventory window. Closing the editor with unsaved edits asks first.

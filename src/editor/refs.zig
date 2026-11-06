@@ -28,6 +28,8 @@ pub fn anim(name: []const u8) bool {
 /// archive's (read into `a`); null if it is not there or deleted.
 pub fn read(app: *App, a: Allocator, path: []const u8, name: []const u8) ?[]const u8 {
     if (app.store.find(path, name)) |i| return if (app.store.gone(i)) null else app.store.text(i);
+    // OpenGorky: the Store reads the project's own asset first (store.zig ownAsset).
+    if (app.store.root != null) return if (app.store.file(path, name)) |i| app.store.text(i) else |_| null;
     var ar = og.formats.archive.Archive.open(app.io, app.gpa, app.dat, path) catch return null;
     defer ar.close(app.io, app.gpa);
     const e = ar.find(name) orelse return null;
@@ -37,19 +39,12 @@ pub fn read(app: *App, a: Allocator, path: []const u8, name: []const u8) ?[]cons
 /// The files of archive `path` that `keep` takes (texts in `a`).
 pub fn files(app: *App, a: Allocator, path: []const u8, keep: *const fn ([]const u8) bool) []const File {
     var out: std.ArrayList(File) = .empty;
-    if (og.formats.archive.Archive.open(app.io, app.gpa, app.dat, path)) |ar_open| {
-        var ar = ar_open;
-        defer ar.close(app.io, app.gpa);
-        for (ar.entries) |*e| {
-            if (!keep(e.name)) continue;
-            const text = if (app.store.find(path, e.name)) |i| (if (app.store.gone(i)) continue else app.store.text(i)) else ar.readAlloc(app.io, a, e) catch continue;
-            out.append(a, .{ .name = a.dupe(u8, e.name) catch continue, .text = text }) catch {};
-        }
-    } else |_| {}
-    // Added in the editor, not in the archive yet.
-    for (app.store.files.items, 0..) |f, i| {
-        if (f.on_disk or app.store.gone(i) or !std.mem.eql(u8, f.archive, path) or !keep(f.entry)) continue;
-        out.append(a, .{ .name = f.entry, .text = f.text }) catch {};
+    var ar = og.formats.archive.Archive.open(app.io, app.gpa, app.dat, path) catch null;
+    defer if (ar) |*x| x.close(app.io, app.gpa);
+    const base: []const og.formats.archive.Entry = if (ar) |x| x.entries else &.{};
+    for (app.store.listingOver(a, path, base, keep, false)) |n| {
+        const text = if (app.store.find(path, n)) |i| app.store.text(i) else (ar.?.readAlloc(app.io, a, ar.?.find(n).?) catch continue);
+        out.append(a, .{ .name = n, .text = text }) catch {};
     }
     return out.items;
 }

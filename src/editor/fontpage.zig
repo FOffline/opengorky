@@ -12,31 +12,29 @@ const og = @import("opengorky");
 const c = @import("sdl");
 const fnt = og.formats.font;
 const clay = @import("clay.zig");
+const gui = @import("widgets.zig");
+const frame = @import("frame.zig");
+const lay = @import("layout.zig");
 const font_mod = @import("font.zig");
 const tx = @import("text.zig");
-const icons = @import("icons.zig");
-const main = @import("app.zig");
-const App = main.App;
-const theme = main.theme;
-const txt = main.txt;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
+const theme = app_mod.theme;
 const common_archive = @import("store.zig").common_archive;
 
 /// The Fonts tab's state (`app.fonts`): the font shown and its glyphs being edited.
 pub const State = struct {
-    sel: main.Name(64) = .{},
+    sel: app_mod.Name(64) = .{},
     edit: ?Edit = null,
 };
 
 /// The fonts with bitmaps (texture fonts `3d_*` are drawn from a 3D texture: not here).
 pub fn names(app: *App, a: Allocator) []const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    var ar = og.formats.archive.Archive.open(app.io, app.gpa, app.dat, common_archive) catch return out.items;
-    defer ar.close(app.io, app.gpa);
-    for (ar.entries) |e| {
-        if (!std.ascii.endsWithIgnoreCase(e.name, ".fnt") or std.ascii.startsWithIgnoreCase(e.name, "3d_")) continue;
-        out.append(a, a.dupe(u8, e.name) catch continue) catch {};
-    }
-    return out.items;
+    return app.store.listing(a, common_archive, struct {
+        fn f(e: []const u8) bool {
+            return std.ascii.endsWithIgnoreCase(e, ".fnt") and !std.ascii.startsWithIgnoreCase(e, "3d_");
+        }
+    }.f, false);
 }
 
 /// The font being edited: its glyphs (pixels owned), colours, the picked character, a
@@ -107,7 +105,7 @@ fn commit(app: *App, e: *Edit, what: []const u8) void {
     const bytes = fnt.encode(app.gpa, &gs) catch return;
     app.store.replaceLabeled(e.file, bytes, std.fmt.allocPrint(app.frame.allocator(), "{s}: {s}", .{ app.store.files.items[e.file].entry, what }) catch what) catch |err| {
         app.gpa.free(bytes);
-        app.setStatus(tx.st_set_failed, .{err});
+        app.failed(err);
     };
 }
 
@@ -138,44 +136,46 @@ pub fn page(app: *App, a: Allocator) void {
     if (name.len == 0) return;
     open(app, name) catch |err| return app.setStatus(tx.st_open_failed, .{ name, err });
     const e = &app.fonts.edit.?;
-    clay.openScroll(.{ .id = clay.id("font_page"), .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = .{ .left = 20, .right = 20, .top = 16, .bottom = 16 }, .childGap = 12 } });
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .childGap = 12, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-    icons.leaf(app.r, app.gpa, .file_text, 28, theme.accent_hover);
-    txt(name, 20, theme.text, font_mod.bold);
+    frame.stage(app);
+    clay.openScroll(.{ .id = clay.id("font_page"), .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = gui.pad(lay.space.xl, lay.space.lg), .childGap = lay.space.md } });
+    gui.row(lay.space.md);
+    gui.icon(app, .file_text, lay.icon.xl, theme.accent_hover);
+    gui.txt(name, .heading, theme.text, font_mod.bold);
     clay.close();
-    clay.open(.{ .layout = .{ .childGap = 20 } });
+    clay.open(.{ .layout = .{ .childGap = lay.space.xl } });
     grid(app, a, e);
     glyphEditor(app, a, e);
     clay.close();
     clay.close();
-    main.propsOpen(app, "font_props");
-    main.propsTitle(tx.get(tx.props), true);
-    main.propRow(tx.get(tx.p_file), name);
+    frame.props(app, "font_props");
+    gui.groupTitle(tx.get(tx.props), true);
+    gui.propRow(tx.get(tx.p_file), name);
     var n: usize = 0;
     for (e.glyphs) |g| n += @intFromBool(g != null);
-    main.propRow(tx.get(tx.fn_glyphs), std.fmt.allocPrint(a, "{d} / 256", .{n}) catch "");
-    main.propNote(tx.get(tx.fn_hint));
-    main.propsTitle(tx.get(tx.p_actions), false);
-    if (main.toolButton(app, "font_ttf", .plus, tx.get(tx.fn_from_ttf), false, false)) app.askFile(.{ .kind = .ttf, .run = onTtf });
-    clay.close();
+    gui.propRow(tx.get(tx.fn_glyphs), std.fmt.allocPrint(a, "{d} / 256", .{n}) catch "");
+    gui.note(tx.get(tx.fn_hint));
+    gui.groupTitle(tx.get(tx.p_actions), false);
+    if (gui.toolButton(app, "font_ttf", .plus, tx.get(tx.fn_from_ttf), false, false)) app.askFile(.{ .kind = .ttf, .run = onTtf });
+    gui.propsEnd();
 }
 
 /// The 256 characters, 16 to a row; a click picks one.
 fn grid(app: *App, a: Allocator, e: *Edit) void {
-    clay.open(.{ .layout = .{ .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .childGap = 2 } });
+    clay.open(.{ .layout = .{ .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .childGap = lay.space.xs } });
     for (0..16) |row| {
-        clay.open(.{ .layout = .{ .childGap = 2 } });
+        clay.open(.{ .layout = .{ .childGap = lay.space.xs } });
         for (0..16) |col| {
             const ch: u8 = @intCast(row * 16 + col);
             const cid = clay.idi("fn_cell", ch);
             const sel = ch == e.sel;
-            if (main.clickable(app, .{ .id = cid, .layout = .{ .sizing = .{ .width = clay.fixed(34), .height = clay.fixed(40) }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .childAlignment = .{ .x = ui.CLAY_ALIGN_X_CENTER, .y = ui.CLAY_ALIGN_Y_CENTER }, .childGap = 1 }, .backgroundColor = theme.field, .cornerRadius = clay.radius(3) }, sel)) e.sel = ch;
+            if (gui.clickable(app, .{ .id = cid, .layout = .{ .sizing = .{ .width = clay.fixed(lay.height.small + lay.space.md), .height = clay.fixed(lay.height.tab) }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .childAlignment = .{ .x = ui.CLAY_ALIGN_X_CENTER, .y = ui.CLAY_ALIGN_Y_CENTER }, .childGap = lay.space.xs }, .backgroundColor = theme.field, .cornerRadius = clay.radius(lay.radius.sm) }, sel)) e.sel = ch;
             if (texture(app, e, ch)) |t| {
                 const g = e.glyphs[ch].?;
-                const k = @min(2.0, 26.0 / @as(f32, @floatFromInt(@max(g.h, 1))));
+                // At most twice its size, within the cell.
+                const k = @min(2.0, (lay.height.small + lay.border.mark) / @as(f32, @floatFromInt(@max(g.h, 1))));
                 clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(@as(f32, @floatFromInt(g.w)) * k), .height = clay.fixed(@as(f32, @floatFromInt(g.h)) * k) } }, .image = .{ .imageData = t } });
-            } else txt("·", 13, theme.line, font_mod.regular);
-            txt(std.fmt.allocPrint(a, "{X:0>2}", .{ch}) catch "", 9, theme.dim, font_mod.regular);
+            } else gui.txt("·", .body, theme.line, font_mod.regular);
+            gui.txt(std.fmt.allocPrint(a, "{X:0>2}", .{ch}) catch "", .caption, theme.dim, font_mod.regular);
             clay.close();
         }
         clay.close();
@@ -186,23 +186,23 @@ fn grid(app: *App, a: Allocator, e: *Edit) void {
 /// The picked character zoomed: a press paints (pencil or eraser) cell by cell, the
 /// stroke written on release; its width −/+, the character made empty or removed.
 fn glyphEditor(app: *App, a: Allocator, e: *Edit) void {
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .childGap = 10 } });
-    txt(tx.alloc(a, tx.fn_char, .{ e.sel, e.sel }), 15, theme.text, font_mod.bold);
-    clay.open(.{ .layout = .{ .childGap = 6 } });
-    if (main.toolButton(app, "fn_pencil", .pencil, tx.get(tx.spr_pencil), !e.erase, false)) e.erase = false;
-    if (main.toolButton(app, "fn_eraser", .x, tx.get(tx.spr_eraser), e.erase, false)) e.erase = true;
-    if (main.toolButton(app, "fn_narrow", .chevron_right, tx.get(tx.fn_narrower), false, false)) resize(app, e, -1);
-    if (main.toolButton(app, "fn_wide", .plus, tx.get(tx.fn_wider), false, false)) resize(app, e, 1);
+    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .childGap = lay.space.sm } });
+    gui.txt(tx.alloc(a, tx.fn_char, .{ e.sel, e.sel }), .title, theme.text, font_mod.bold);
+    gui.rowFit(lay.space.sm);
+    if (gui.toolButton(app, "fn_pencil", .pencil, tx.get(tx.spr_pencil), !e.erase, false)) e.erase = false;
+    if (gui.toolButton(app, "fn_eraser", .x, tx.get(tx.spr_eraser), e.erase, false)) e.erase = true;
+    if (gui.toolButton(app, "fn_narrow", .chevron_right, tx.get(tx.fn_narrower), false, false)) resize(app, e, -1);
+    if (gui.toolButton(app, "fn_wide", .plus, tx.get(tx.fn_wider), false, false)) resize(app, e, 1);
     clay.close();
     const g = e.glyphs[e.sel] orelse {
-        if (main.toolButton(app, "fn_make", .plus, tx.get(tx.fn_make), false, true)) makeGlyph(app, e);
+        if (gui.toolButton(app, "fn_make", .plus, tx.get(tx.fn_make), false, true)) makeGlyph(app, e);
         clay.close();
         return;
     };
     // The canvas: 16 points a pixel (smaller for big glyphs).
-    const k: f32 = @min(16, 480 / @as(f32, @floatFromInt(@max(g.w, g.h, 1))));
+    const k: f32 = @min(2 * lay.unit, 60 * lay.unit / @as(f32, @floatFromInt(@max(g.w, g.h, 1))));
     const cv = clay.id("fn_canvas");
-    clay.open(.{ .id = cv, .layout = .{ .sizing = .{ .width = clay.fixed(@as(f32, @floatFromInt(g.w)) * k), .height = clay.fixed(@as(f32, @floatFromInt(g.h)) * k) } }, .backgroundColor = theme.viewport, .border = .{ .color = theme.line, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } } });
+    clay.open(.{ .id = cv, .layout = .{ .sizing = .{ .width = clay.fixed(@as(f32, @floatFromInt(g.w)) * k), .height = clay.fixed(@as(f32, @floatFromInt(g.h)) * k) } }, .backgroundColor = theme.viewport, .border = .{ .color = theme.line, .width = gui.edges(lay.border.line) } });
     if (texture(app, e, e.sel)) |t| clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() } }, .image = .{ .imageData = t } });
     clay.close();
     // Painting by last frame's box.
@@ -223,7 +223,7 @@ fn glyphEditor(app: *App, a: Allocator, e: *Edit) void {
         e.stroke = false;
         commit(app, e, std.fmt.allocPrint(a, "{c}", .{e.sel}) catch "glyph");
     }
-    txt(tx.alloc(a, tx.fn_size, .{ g.w, g.h }), 12, theme.dim, font_mod.regular);
+    gui.txt(tx.alloc(a, tx.fn_size, .{ g.w, g.h }), .caption, theme.dim, font_mod.regular);
     clay.close();
 }
 
@@ -326,6 +326,6 @@ fn codepoint(b: u8, cyrillic: bool) u21 {
 }
 
 /// File dialog answer (app.askFile).
-fn onTtf(app: *App, _: main.FileAsk, path: []const u8) !void {
+fn onTtf(app: *App, _: app_mod.FileAsk, path: []const u8) !void {
     try fromTtf(app, path);
 }

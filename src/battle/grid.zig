@@ -3,8 +3,8 @@
 //! AI wave to a target (0x49a630). Pure functions over the grid.
 
 const std = @import("std");
-const patterns = @import("patterns.zig");
-const WeaponClass = @import("weapon_class.zig").WeaponClass;
+const rules = @import("../rules.zig");
+const weaponKind = @import("../core.zig").modules.weaponKind;
 
 pub const Tile = [2]i32;
 
@@ -194,12 +194,12 @@ pub const Target = struct {
 /// Only the ray tile is an aim; striking it covers both (the hit set is relative
 /// to it); the neighbour is added only with `with_side`, for highlighting the area
 /// (wrapper 0x4ce3c0); aims are searched without it (0x4ce710).
-pub fn targets(grid: Grid, w: *const patterns.Weapon, from: Tile, who: u16, stop_at_fighter: bool, with_side: bool, out: []Target) []Target {
+pub fn targets(grid: Grid, w: *const rules.Pattern, from: Tile, who: u16, stop_at_fighter: bool, with_side: bool, out: []Target) []Target {
     var n: usize = 0;
     // Satellite (class 8: laser 1038, lightning 1039, rocket 1040): tile check
     // +0x104 = 0x4b8e90 is always 0, so any tile of the field, 100 % (+0x108 =
     // 0x4b8ea0); the hit area is 7×7 around it.
-    if (WeaponClass.from(w.class) == .satellite) {
+    if (weaponKind(w.classic_id) == .satellite) {
         var y: i32 = 0;
         while (y < grid.height) : (y += 1) {
             var x: i32 = 0;
@@ -214,7 +214,7 @@ pub fn targets(grid: Grid, w: *const patterns.Weapon, from: Tile, who: u16, stop
     }
     // Time bomb (class 9, +0x100 = 0x4b9200): placed on a neighbouring tile (below,
     // above, right, left) that is walkable and free, 100 %.
-    if (WeaponClass.from(w.class) == .time_bomb) {
+    if (weaponKind(w.classic_id) == .time_bomb) {
         for ([_]Tile{ .{ 0, 1 }, .{ 0, -1 }, .{ 1, 0 }, .{ -1, 0 } }) |d| {
             const t: Tile = .{ from[0] + d[0], from[1] + d[1] };
             if (!grid.open(t) or grid.at(t) != Grid.none or n == out.len) continue;
@@ -225,7 +225,7 @@ pub fn targets(grid: Grid, w: *const patterns.Weapon, from: Tile, who: u16, stop
     }
     var cut = false;
     var side: Tile = .{ 0, 0 };
-    for (w.rays) |r| {
+    for (w.rays.items) |r| {
         switch (r.kind) {
             .side_x => {
                 side = .{ 1, 0 };
@@ -274,10 +274,10 @@ fn occupiedByOther(grid: Grid, t: Tile, who: u16) bool {
 
 /// Hit tiles of a strike on `target` (0x4ce7b0): the set from the ray entry that
 /// hit this tile, shifted onto it; open tiles only.
-pub fn effectTiles(grid: Grid, w: *const patterns.Weapon, aim: Target, out: []Tile) []Tile {
+pub fn effectTiles(grid: Grid, w: *const rules.Pattern, aim: Target, out: []Tile) []Tile {
     var n: usize = 0;
-    if (aim.effect >= w.effects.len) return out[0..0];
-    for (w.effects[aim.effect]) |d| {
+    if (aim.effect >= w.effects.sets.len) return out[0..0];
+    for (w.effects.sets[aim.effect]) |d| {
         const t: Tile = .{ aim.tile[0] + d[0], aim.tile[1] + d[1] };
         if (!grid.open(t) or n == out.len) continue;
         out[n] = t;
@@ -391,7 +391,7 @@ test "targets: a pistol ray stops at a fighter and an obstacle" {
     const g = testGrid(&.{"........"}, &occ, &blk);
     g.place(.{ 3, 0 }, 1, 5);
     var buf: [64]Target = undefined;
-    const pistol = patterns.find(1).?;
+    const pistol = rules.pattern(1).?;
     const t = targets(g, pistol, .{ 0, 0 }, 0, true, false, &buf);
     // Right: tiles 1, 2, 3 (fighter), then the ray stops.
     var last: i32 = 0;
@@ -404,11 +404,11 @@ test "grenade: any tile in a 7×7 square, through obstacles" {
     var blk: [81]bool = undefined;
     const g = testGrid(&.{ ".........", ".........", ".........", "...OOO...", "...O.O...", "...OOO...", ".........", ".........", "........." }, &occ, &blk);
     var buf: [64]Target = undefined;
-    const t = targets(g, patterns.find(11).?, .{ 4, 4 }, 0, true, false, &buf);
+    const t = targets(g, rules.pattern(11).?, .{ 4, 4 }, 0, true, false, &buf);
     // 49 tiles minus 8 taken by the wall.
     try std.testing.expectEqual(41, t.len);
-    const rollsToHit = @import("rules.zig").rollsToHit;
-    try std.testing.expect(rollsToHit(1) and !rollsToHit(11) and !rollsToHit(10));
+    const wc = rules.weaponClass;
+    try std.testing.expect(wc(1).rolls_to_hit and !wc(11).rolls_to_hit and !wc(10).rolls_to_hit);
 }
 
 fn hasTile(ts: []const Tile, t: Tile) bool {
@@ -429,7 +429,7 @@ test "Garcia's wide chaingun ray (102) from a 2×2 fighter: a band as wide as th
     // Garcia 2×2 at (5,5)..(6,6), the hero above in column 6, in the band's second tile.
     g.place(.{ 5, 5 }, 2, 1);
     g.place(.{ 6, 2 }, 1, 2);
-    const w = patterns.find(102).?;
+    const w = rules.pattern(102).?;
     var buf: [64]Target = undefined;
     const aims = targets(g, w, .{ 5, 5 }, 1, true, false, &buf);
     // Aims are only ray tiles (column 5 up, row 5 right, etc.).
@@ -462,14 +462,14 @@ test "wide ray: an obstacle in the band's second tile stops the ray" {
     g.place(.{ 2, 4 }, 2, 1);
     var buf: [64]Target = undefined;
     // Right from (2,4): rows 4 and 5 are free, the band runs to the edge.
-    const aims = targets(g, patterns.find(102).?, .{ 2, 4 }, 1, true, false, &buf);
+    const aims = targets(g, rules.pattern(102).?, .{ 2, 4 }, 1, true, false, &buf);
     try std.testing.expect(findAim(aims, .{ 7, 4 }) != null);
     // Up: columns 2 and 3 are free; obstacle (6,2) doesn't block.
     try std.testing.expect(findAim(aims, .{ 2, 0 }) != null);
     // Move the fighter so wall (6,2) falls into the band's second tile going up.
     g.remove(.{ 2, 4 }, 2);
     g.place(.{ 5, 4 }, 2, 1);
-    const a2 = targets(g, patterns.find(102).?, .{ 5, 4 }, 1, true, false, &buf);
+    const a2 = targets(g, rules.pattern(102).?, .{ 5, 4 }, 1, true, false, &buf);
     try std.testing.expect(findAim(a2, .{ 5, 3 }) != null);
     try std.testing.expect(findAim(a2, .{ 5, 2 }) == null and findAim(a2, .{ 5, 1 }) == null);
 }
@@ -481,7 +481,7 @@ test "Garcia's melee (101): tiles around 2×2 without a second tile" {
     const g = testGrid(&rows, &occ, &blk);
     g.place(.{ 3, 3 }, 2, 1);
     var buf: [64]Target = undefined;
-    const w = patterns.find(101).?;
+    const w = rules.pattern(101).?;
     const aims = targets(g, w, .{ 3, 3 }, 1, true, true, &buf);
     // Eight side neighbours, none of our own and none diagonal.
     try std.testing.expectEqual(8, aims.len);

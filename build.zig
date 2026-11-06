@@ -11,15 +11,23 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     addCDeps(b, lib);
+    addFoundation(b, lib);
+
+    // Plain `zig build` builds everything with -Doptimize (default Debug): one engine
+    // copy, ~20 s after a one-line change. `-Drelease` is the optimized setup for checks
+    // and play: the viewer and the editor ReleaseFast, gorky-tool ReleaseSafe (three
+    // engine copies through LLVM, 2–10 min). -Dviewer-optimize / -Dtool-optimize override
+    // either. The packages (scripts/dist-*.sh) pass -Doptimize=ReleaseSafe and
+    // -Dviewer-optimize themselves.
+    const release = b.option(bool, "release", "Optimized build: viewer and editor ReleaseFast, gorky-tool ReleaseSafe") orelse false;
 
     // gorky-tool runs the whole game in checks (scripts/fullgame.sh, linux/check.sh):
-    // a debug build takes ~1 min, mostly in the debug allocator. So without
-    // -Dtool-optimize it (and its engine copy) builds ReleaseSafe — bounds and overflow
-    // checks stay. The game run does not depend on the mode: logic has no @setFloatMode
-    // (no FMA or reordering), Debug/ReleaseSafe/ReleaseSmall runs give the same
-    // log. `-Dtool-optimize=debug` — a debug build of the tool.
-    const tool_optimize = b.option(std.builtin.OptimizeMode, "tool-optimize", "gorky-tool optimization (default safe in a debug build)") orelse
-        if (optimize == .debug) .safe else optimize;
+    // a debug build takes ~1 min, mostly in the debug allocator; with -Drelease it (and
+    // its engine copy) builds ReleaseSafe — bounds and overflow checks stay. The game run
+    // does not depend on the mode: logic has no @setFloatMode (no FMA or reordering),
+    // Debug/ReleaseSafe/ReleaseSmall runs give the same log.
+    const tool_optimize = b.option(std.builtin.OptimizeMode, "tool-optimize", "gorky-tool optimization (default: -Doptimize; safe with -Drelease)") orelse
+        if (release and optimize == .debug) .safe else optimize;
     const tool_lib = if (tool_optimize == optimize) lib else engineModule(b, target, tool_optimize);
     const tool = b.addExecutable(.{
         .name = "gorky-tool",
@@ -30,7 +38,9 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "opengorky", .module = tool_lib }},
         }),
     });
-    b.installArtifact(tool);
+    // `-Dtool=false` — packages (scripts/dist-*.sh) ship only the viewer and the editor:
+    // gorky-tool (a developer's console tool) is not built for them.
+    if (b.option(bool, "tool", "Install gorky-tool (default true)") orelse true) b.installArtifact(tool);
 
     const run_tool = b.addRunArtifact(tool);
     run_tool.step.dependOn(b.getInstallStep());
@@ -111,8 +121,8 @@ pub fn build(b: *std.Build) void {
     // macOS frameworks libavutil.pc lists go unused without VideoToolbox.
     if (use_ffmpeg and ff_prefix != null and target.result.os.tag == .windows) ffmpeg_mod.linkSystemLibrary("bcrypt", .{});
 
-    // The viewer renders models in software: a debug build is ~10× slower, so
-    // without -Dviewer-optimize it (and its engine copy) builds ReleaseFast. Not
+    // The viewer renders models in software: a debug build is ~10× slower, so with
+    // -Drelease it (and its engine copy) builds ReleaseFast. Not
     // ReleaseSmall: there LLVM (Zig 0.17, arm64) outlines repeated code
     // (MachineOutliner) and clobbers registers — in combat.devices.destroyBarrel the
     // return address saved in x2 was taken by an outlined chunk as argument `v`, and
@@ -124,8 +134,8 @@ pub fn build(b: *std.Build) void {
     // `-Dstrip` drops debug info (smaller binary; for distribution in
     // scripts/dist-*.sh; during development it gives crash stacks).
     const strip = b.option(bool, "strip", "Strip debug info from the viewer") orelse false;
-    const viewer_optimize = b.option(std.builtin.OptimizeMode, "viewer-optimize", "Viewer optimization (default fast in a debug build)") orelse
-        if (optimize == .debug) .fast else optimize;
+    const viewer_optimize = b.option(std.builtin.OptimizeMode, "viewer-optimize", "Viewer and editor optimization (default: -Doptimize; fast with -Drelease)") orelse
+        if (release and optimize == .debug) .fast else optimize;
     const viewer_lib = if (viewer_optimize == optimize) lib else if (viewer_optimize == tool_optimize) tool_lib else engineModule(b, target, viewer_optimize);
     const viewer = b.addExecutable(.{
         .name = "opengorky-viewer",
@@ -160,6 +170,40 @@ pub fn build(b: *std.Build) void {
     viewer.root_module.addAnonymousImport("icon_png", .{ .root_source_file = b.path("assets/icon-256.png") });
     // `scaling = adaptive`: the riveted plate beside the 640-wide panel.
     viewer.root_module.addAnonymousImport("panel_plate_png", .{ .root_source_file = b.path("assets/panel-plate.png") });
+    // The launcher window (src/viewer/app/launcher.zig): the editor's Clay and text kit,
+    // PT Sans and Oswald (OFL), icons (scripts/launcher-icons.swift), the metal texture
+    // (the concept's dark-metal.png at 640 px, JPEG).
+    const ui = b.addTranslateC(.{
+        .root_source_file = b.path("src/editor/ui.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ui.addIncludePath(b.path("third_party/clay"));
+    ui.addIncludePath(b.path("third_party/stb"));
+    const ui_mod = ui.createModule();
+    const kit = b.createModule(.{ .root_source_file = b.path("src/editor/kit.zig"), .target = target, .optimize = viewer_optimize });
+    kit.addImport("sdl", sdl_mod);
+    kit.addImport("ui", ui_mod);
+    kit.addImport("opengorky", viewer_lib);
+    viewer.root_module.addImport("kit", kit);
+    viewer.root_module.addImport("ui", ui_mod);
+    viewer.root_module.addCSourceFile(.{ .file = b.path("third_party/clay/clay.c"), .flags = &.{"-O2"} });
+    viewer.root_module.addCSourceFile(.{ .file = b.path("third_party/stb/stb_truetype.c"), .flags = &.{"-O2"} });
+    viewer.root_module.addAnonymousImport("font_regular", .{ .root_source_file = b.path("assets/fonts/PTSans-Regular.ttf") });
+    viewer.root_module.addAnonymousImport("font_bold", .{ .root_source_file = b.path("assets/fonts/PTSans-Bold.ttf") });
+    viewer.root_module.addAnonymousImport("font_heading", .{ .root_source_file = b.path("assets/fonts/Oswald-Bold.ttf") });
+    for ([_][]const u8{ "home", "display", "game", "advanced", "check", "warning", "play", "close" }) |n| {
+        viewer.root_module.addAnonymousImport(b.fmt("launcher_{s}", .{n}), .{ .root_source_file = b.path(b.fmt("assets/launcher/icons/{s}.png", .{n})) });
+    }
+    viewer.root_module.addAnonymousImport("launcher_metal", .{ .root_source_file = b.path("assets/launcher/textures/dark-metal.jpg") });
+    // Version shown by the launcher: `-Dversion` (the dist scripts pass theirs), else
+    // `git describe` as the packages' Info.plist.
+    var git_exit: u8 = 0;
+    const version = b.option([]const u8, "version", "Version shown in the launcher (default: git describe)") orelse
+        if (b.runAllowFail(&.{ "git", "-C", b.root.toString(b.allocator) catch ".", "describe", "--always", "--dirty" }, &git_exit, .ignore)) |out| std.mem.trim(u8, out, " \r\n") else |_| "dev";
+    const version_opts = b.addOptions();
+    version_opts.addOption([]const u8, "version", version);
+    viewer.root_module.addImport("version", version_opts.createModule());
     b.installArtifact(viewer);
 
     const run_viewer = b.addRunArtifact(viewer);
@@ -169,13 +213,6 @@ pub fn build(b: *std.Build) void {
 
     // Level editor: the engine and SDL as in the viewer, UI layout by Clay, text by
     // stb_truetype with the embedded PT Sans.
-    const ui = b.addTranslateC(.{
-        .root_source_file = b.path("src/editor/ui.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    ui.addIncludePath(b.path("third_party/clay"));
-    ui.addIncludePath(b.path("third_party/stb"));
     const editor = b.addExecutable(.{
         .name = "opengorky-editor",
         .root_module = b.createModule(.{
@@ -186,7 +223,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "opengorky", .module = viewer_lib },
                 .{ .name = "sdl", .module = sdl_mod },
-                .{ .name = "ui", .module = ui.createModule() },
+                .{ .name = "ui", .module = ui_mod },
             },
         }),
     });
@@ -214,7 +251,7 @@ pub fn build(b: *std.Build) void {
         editor.root_module.addAnonymousImport(b.fmt("icon_{s}", .{n}), .{ .root_source_file = b.path(b.fmt("assets/icons/{s}.png", .{n})) });
     }
     // UI icons (the same script, white, tinted when drawn): names as src/editor/icons.zig's Icon.
-    for ([_][]const u8{ "save", "check", "play", "settings", "history", "search", "folder", "chevron_right", "chevron_down", "map_pin", "swords", "user", "package", "clapperboard", "volume_2", "plus", "file_text", "mouse_pointer_2", "hand", "paintbrush", "pipette", "lightbulb", "square_dashed", "log_out", "crosshair", "camera", "pencil", "code", "message_square", "maximize", "x", "undo_2", "redo_2", "eye", "eye_off", "lock", "lock_open", "layers", "trash_2", "copy", "image", "grid_3x3", "box", "pause", "skip_back", "skip_forward" }) |n| {
+    for ([_][]const u8{ "save", "check", "play", "settings", "history", "search", "folder", "chevron_right", "chevron_down", "map_pin", "swords", "user", "package", "clapperboard", "volume_2", "plus", "file_text", "mouse_pointer_2", "hand", "paintbrush", "pipette", "lightbulb", "square_dashed", "log_out", "crosshair", "camera", "pencil", "code", "message_square", "maximize", "x", "undo_2", "redo_2", "eye", "eye_off", "lock", "lock_open", "layers", "trash_2", "copy", "image", "box", "pause", "skip_back", "skip_forward" }) |n| {
         editor.root_module.addAnonymousImport(b.fmt("ui_{s}", .{n}), .{ .root_source_file = b.path(b.fmt("assets/icons/ui_{s}.png", .{n})) });
     }
     // Window icon (assets/icon-editor.png at 256 px), as the viewer's.
@@ -236,14 +273,21 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&lib_tests.step);
     // Viewer and editor files without SDL: settings, icon shadow, background pause, level script edits.
-    for ([_][]const u8{ "src/viewer/app/config.zig", "src/viewer/media/shadow.zig", "src/viewer/app/pause.zig", "src/editor/placement.zig", "src/editor/vars.zig", "src/editor/settings.zig", "src/editor/box.zig", "src/editor/search.zig", "src/editor/scenes.zig", "src/editor/code.zig", "src/editor/api.zig", "src/editor/trigger.zig", "src/editor/newlevel.zig", "src/editor/cli.zig", "src/editor/texts.zig", "src/editor/modpack.zig", "src/editor/adjusttext.zig", "src/editor/adjustdoc.zig", "src/editor/savelog.zig", "src/editor/zone.zig", "src/editor/catalog.zig" }) |p| {
+    for ([_][]const u8{ "src/viewer/app/config.zig", "src/viewer/app/packages.zig", "src/viewer/media/shadow.zig", "src/viewer/app/pause.zig", "src/editor/placement.zig", "src/editor/model.zig", "src/editor/model_write.zig", "src/editor/settings.zig", "src/editor/box.zig", "src/editor/search.zig", "src/editor/scenes.zig", "src/editor/code.zig", "src/editor/callscan.zig", "src/editor/api.zig", "src/editor/rulesapi.zig", "src/editor/callbacks.zig", "src/editor/rulescheck.zig", "src/editor/trigger.zig", "src/editor/newlevel.zig", "src/editor/texts.zig", "src/editor/modpack.zig", "src/editor/project.zig", "src/editor/adjusttext.zig", "src/editor/adjustdoc.zig", "src/editor/refdata.zig", "src/editor/savelog.zig", "src/editor/zone.zig", "src/editor/catalog.zig", "src/editor/store.zig", "src/editor/entry_anims.zig", "src/editor/layout.zig", "src/editor/doctab.zig", "src/editor/rules_rows.zig", "src/editor/entry_tables.zig", "src/editor/fxmaterial.zig", "src/editor/postpage.zig", "src/editor/freename.zig", "src/editor/uses.zig", "src/editor/preview.zig", "src/editor/entry_attacks.zig", "src/editor/testkit.zig", "src/editor/traitinfo.zig", "src/editor/model_og.zig", "src/editor/projconvert.zig", "src/editor/completion.zig" }) |p| {
         const m = b.createModule(.{ .root_source_file = b.path(p), .target = target, .optimize = optimize });
         // The weapon patterns (zone.zig) and the class files (catalog.zig) are the engine's.
         m.addImport("opengorky", lib);
         // api.zig's test checks its entries against the builtins the port registers.
         m.addAnonymousImport("builtins_src", .{ .root_source_file = b.path("src/builtins.zig") });
+        // settings.zig keeps its paths in the viewer config's buffers.
+        if (std.mem.endsWith(u8, p, "/settings.zig")) m.addAnonymousImport("config", .{ .root_source_file = b.path("src/viewer/app/config.zig") });
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     }
+    // The editor's glyph atlas (stb_truetype and the embedded PT Sans; no renderer).
+    const font_test = b.createModule(.{ .root_source_file = b.path("src/editor/font.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "sdl", .module = sdl_mod }, .{ .name = "ui", .module = ui_mod } } });
+    font_test.addCSourceFile(.{ .file = b.path("third_party/stb/stb_truetype.c"), .flags = &.{"-O2"} });
+    inline for (.{ "regular", "bold", "italic" }) |n| font_test.addAnonymousImport("font_" ++ n, .{ .root_source_file = b.path("assets/fonts/PTSans-" ++ [_]u8{std.ascii.toUpper(n[0])} ++ n[1..] ++ ".ttf") });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = font_test })).step);
     // The editor's import transcoding through the linked FFmpeg.
     const transcode = b.createModule(.{ .root_source_file = b.path("src/editor/transcode.zig"), .target = target, .optimize = optimize, .link_libc = true });
     transcode.addImport("build_options", options_mod);
@@ -251,6 +295,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = transcode })).step);
     // Unformatted code fails the test (`zig fmt src build.zig` fixes it).
     test_step.dependOn(&b.addFmt(.{ .paths = &.{ b.path("src"), b.path("build.zig") }, .check = true }).step);
+}
+
+/// The language's own declarations (foundation/*.ogs: the built-in traits, the types, the
+/// block kinds' fields), as the engine reads them (`@embedFile("foundation_traits")`).
+fn addFoundation(b: *std.Build, m: *std.Build.Module) void {
+    inline for (.{ "traits", "types", "hosts" }) |n| m.addAnonymousImport("foundation_" ++ n, .{ .root_source_file = b.path("foundation/" ++ n ++ ".ogs") });
 }
 
 /// Third-party engine decoders (stb_image, dr_libs).
@@ -272,5 +322,6 @@ fn engineModule(b: *std.Build, target: std.Build.ResolvedTarget, opt: std.builti
         .link_libc = true,
     });
     addCDeps(b, m);
+    addFoundation(b, m);
     return m;
 }

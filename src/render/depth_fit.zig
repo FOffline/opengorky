@@ -3,21 +3,19 @@
 
 const std = @import("std");
 const num = @import("../num.zig");
-const zbuffer = @import("../formats.zig").zbuffer;
-const level_files = @import("../formats.zig").level_files;
-const level = @import("../formats.zig").level;
+const core_map = @import("../core.zig").map;
 const camera = @import("../actor.zig").camera;
 
 /// W-buffer `z = far − v·tl/65536` (0x41cf07) fitted on free battle-grid cells
 /// (floor is visible there) so background depth agrees with our camera.
 /// Returns (far, tl, tolerance).
-pub fn fitPersp(cam: camera.Persp, cm: level_files.CombatMap, z: zbuffer.ZBuffer) ?[3]f32 {
+pub fn fitPersp(cam: camera.Persp, cm: core_map.CombatMap, z: core_map.Heights) ?[3]f32 {
     var pts: [fit.max_points][3]f32 = undefined;
     return fitPerspPoints(cam, gridPoints(cm, &pts), z);
 }
 
 /// Floor points of a battle grid: centres of the free cells.
-pub fn gridPoints(cm: level_files.CombatMap, pts: [][3]f32) [][3]f32 {
+pub fn gridPoints(cm: core_map.CombatMap, pts: [][3]f32) [][3]f32 {
     var n: usize = 0;
     for (0..cm.height) |j| for (0..cm.width) |i| {
         if (cm.blocked[j * cm.width + i] or n == pts.len) continue;
@@ -47,7 +45,7 @@ pub const fit = struct {
     const zbf_step = 256;
 
     /// `.zbf` value under the projection of world point `wp` and its depth; null outside.
-    fn sample(cam: camera.Persp, wp: [3]f32, z: zbuffer.ZBuffer) ?struct { v: u16, depth: f32 } {
+    fn sample(cam: camera.Persp, wp: [3]f32, z: core_map.Heights) ?struct { v: u16, depth: f32 } {
         const p = cam.project(wp);
         if (p.x < 0 or p.y < 0 or p.x >= num.toF32(z.width) or p.y >= num.toF32(z.height)) return null;
         return .{ .v = z.depth[@as(usize, @intFromFloat(p.y)) * z.width + @as(usize, @intFromFloat(p.x))], .depth = -p.depth };
@@ -65,7 +63,7 @@ pub const fit = struct {
 /// Same from world floor points (exploration levels without `.cfg`: centers of
 /// walkable `.wm` cells at floor height). Tolerance is the 90th percentile of floor
 /// residuals, at least one .zbf step (see `fit`).
-pub fn fitPerspPoints(cam: camera.Persp, pts: []const [3]f32, z: zbuffer.ZBuffer) ?[3]f32 {
+pub fn fitPerspPoints(cam: camera.Persp, pts: []const [3]f32, z: core_map.Heights) ?[3]f32 {
     // (v, depth) pairs at floor points; where the background is not floor (objects,
     // awnings) they are outliers, hence fitting with rejection.
     var vs: [fit.max_points]f32 = undefined;
@@ -123,7 +121,7 @@ pub fn fitPerspPoints(cam: camera.Persp, pts: []const [3]f32, z: zbuffer.ZBuffer
 /// Background depth tolerance for given far and tl (exe formula without fitting):
 /// 90th percentile of floor residuals after outlier rejection, at least one
 /// .zbf step (see `fit`). null when fewer than `fit.min_points` points.
-pub fn perspTolerance(cam: camera.Persp, pts: []const [3]f32, z: zbuffer.ZBuffer, far: f32, tl: f32) ?f32 {
+pub fn perspTolerance(cam: camera.Persp, pts: []const [3]f32, z: core_map.Heights, far: f32, tl: f32) ?f32 {
     var res: [fit.max_points]f32 = undefined;
     const n = residuals(cam, pts, z, far, tl, &res);
     if (n < fit.min_points) return null;
@@ -138,7 +136,7 @@ pub fn perspTolerance(cam: camera.Persp, pts: []const [3]f32, z: zbuffer.ZBuffer
 /// floor strays from our camera's beyond the tolerance (a raised platform, rejected
 /// as an outlier against a flat floor's median, still lies within it; residuals
 /// beyond are objects). Shadow planes need it, see the viewer's depth.shadowBias.
-pub fn perspSpread(cam: camera.Persp, pts: []const [3]f32, z: zbuffer.ZBuffer, far: f32, tl: f32, tol: f32) f32 {
+pub fn perspSpread(cam: camera.Persp, pts: []const [3]f32, z: core_map.Heights, far: f32, tl: f32, tol: f32) f32 {
     var res: [fit.max_points]f32 = undefined;
     var m: f32 = 0;
     for (res[0..residuals(cam, pts, z, far, tl, &res)]) |r| if (r <= 2 * tol) {
@@ -148,12 +146,12 @@ pub fn perspSpread(cam: camera.Persp, pts: []const [3]f32, z: zbuffer.ZBuffer, f
 }
 
 /// Floor residuals |depth − W(v)| into `res`; their count.
-fn residuals(cam: camera.Persp, pts: []const [3]f32, z: zbuffer.ZBuffer, far: f32, tl: f32, res: *[fit.max_points]f32) usize {
+fn residuals(cam: camera.Persp, pts: []const [3]f32, z: core_map.Heights, far: f32, tl: f32, res: *[fit.max_points]f32) usize {
     var n: usize = 0;
     for (pts) |wp| {
         if (n == res.len) break;
         const sm = fit.sample(cam, wp, z) orelse continue;
-        res[n] = @abs(sm.depth - level.perspDepth(far, tl, sm.v));
+        res[n] = @abs(sm.depth - core_map.perspDepth(far, tl, sm.v));
         n += 1;
     }
     return n;

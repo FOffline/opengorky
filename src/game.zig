@@ -5,35 +5,39 @@
 
 const std = @import("std");
 const state_groups = @import("state.zig").groups;
+const rules = @import("rules.zig");
 const fields = @import("fields.zig");
+const entity = @import("core.zig").entity;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const world_mod = @import("state.zig").world;
 const World = world_mod.World;
 const levels = @import("world.zig").levels;
 const spawn = @import("world.zig").spawn;
+const hooks = @import("state.zig").hooks;
+const Value = @import("script.zig").value.Value;
+const queue = @import("world.zig").queue;
 pub const life = @import("game/life.zig");
 const bi_level = @import("builtins.zig").level;
 const bi_actors = @import("builtins.zig").actors;
 const scenes = @import("scene.zig").scenes;
 const crt_rand = @import("crt_rand.zig");
 const Party = @import("world.zig").party.Party;
-const save_mod = @import("save.zig");
+const save_mod = @import("world.zig").saved;
 const save_apply = @import("game/save_apply.zig");
 const immunity = @import("battle.zig").immunity;
 const turns = @import("combat.zig").turns;
+const natives = @import("combat.zig").natives;
 const battle_tick = @import("combat.zig").tick;
 const control = @import("combat.zig").control;
 const model_cache = @import("actor.zig").model_cache;
 const audio_scene = @import("audio.zig").scene;
-const font = @import("formats.zig").font;
-const lang = @import("formats.zig").lang;
-const archive = @import("formats.zig").archive;
 
 pub const Game = struct {
     io: Io,
     gpa: Allocator,
-    dat: Io.Dir,
+    /// Opens a location's files (the client's: loaders/world.zig `Opener`).
+    worlds: @import("core.zig").source.Factory,
     models: ?*model_cache.Cache,
     world: ?*World = null,
     /// Left locations by name (battles are not cached: rebuilt on next entry).
@@ -45,38 +49,21 @@ pub const Game = struct {
     /// The exe's "battle" save (0x41f0ee → 0x472020): the game as it entered the last
     /// battle (`battle_level`; the exe's header line), loaded by game over "Yes" outside
     /// battle (0x4542c0). Like the exe's file it outlives new game and load.
-    battle_save: ?[]u8 = null,
+    battle_save: ?save_mod.Save = null,
     battle_level: ?[]u8 = null,
     /// Loaded save: its locations load with saved state on first entry.
     saved: ?save_mod.Save = null,
     /// Saved locations already built for GO_RunFun after a load; entered like a saved one.
     prebuilt: std.StringHashMapUnmanaged(*World) = .empty,
     immunity: immunity.Known = .{},
-    /// Dialog font (`02_dialog` + language set): subtitle pages for every world.
-    /// Glyphs point into `dialog_font_bytes`; the Game must not move after loading.
-    dialog_font: ?font.Font = null,
-    dialog_font_bytes: ?[]u8 = null,
 
     pub fn deinit(self: *Game) void {
         self.reset();
         self.cache.deinit(self.gpa);
         self.prebuilt.deinit(self.gpa);
         if (self.entry_party) |*p| p.deinit();
-        if (self.battle_save) |b| self.gpa.free(b);
+        if (self.battle_save) |*b| b.deinit();
         if (self.battle_level) |b| self.gpa.free(b);
-        if (self.dialog_font_bytes) |b| self.gpa.free(b);
-    }
-
-    /// Load the dialog font from `common/other.dat`; missing font — one page per line.
-    pub fn loadDialogFont(self: *Game) void {
-        var arc = archive.Archive.open(self.io, self.gpa, self.dat, "common/other.dat") catch return;
-        defer arc.close(self.io, self.gpa);
-        const bytes = lang.readFont(self.io, self.gpa, &arc, "02_dialog", lang.language(self.io, self.gpa, self.dat)) orelse return;
-        self.dialog_font = font.parse(bytes) catch {
-            self.gpa.free(bytes);
-            return;
-        };
-        self.dialog_font_bytes = bytes;
     }
 
     /// New game or load: worlds, cache, battle party, save, immunities.
@@ -111,13 +98,12 @@ pub const Game = struct {
         self.prev = copy;
     }
 
-    /// World options every game world gets: lookup of other locations, the game's
-    /// immunities and dialog font.
+    /// World options every game world gets: lookup of other locations and the game's
+    /// immunities.
     fn worldOptions(self: *Game, opts: life.Options) life.Options {
         var o = opts;
         o.resolver = .{ .ctx = self, .find = findCached };
         o.immunity = &self.immunity;
-        o.dialog_font = if (self.dialog_font) |*f| f else null;
         return o;
     }
 
@@ -125,7 +111,7 @@ pub const Game = struct {
     /// come from it). `ws`: its saved state, applied and marked loaded.
     pub fn open(self: *Game, name: []const u8, opts: life.Options, ws: ?*save_mod.WorldState) !*World {
         self.closeWorld();
-        const w = try life.create(self.io, self.gpa, self.dat, name, self.models, self.worldOptions(opts));
+        const w = try life.create(self.io, self.gpa, self.worlds, name, self.models, self.worldOptions(opts));
         self.world = w;
         if (ws) |st| {
             try save_apply.apply(st, w);
@@ -137,6 +123,19 @@ pub const Game = struct {
         return w;
     }
 
+    /// New game (0x413386): the campaign's location (rules campaign.ss; the exe's 01_port)
+    /// with its leader selected; OpenGorky: the party put at its area's points and its
+    /// scene started.
+    pub fn newGame(self: *Game) !*World {
+        const c = rules.campaign();
+        const w = try self.open(c.level, .{ .hero = c.leader }, null);
+        if (c.area.len > 0) for (w.party().slice(), 0..) |o, i| {
+            queue.placeAtPoint(w, o, c.area, c.point + @as(i32, @intCast(i)), 0);
+        };
+        if (c.scene.len > 0) try scenes.startScriptlet(w, c.scene);
+        return w;
+    }
+
     /// Retry after a loss: the same battle with the party as it entered. The exe's game
     /// over "Yes" reloads the "battle" save here too (0x4542c0 → 0x472400 reads table
     /// 0x6d2070): immunities discovered in the lost battle are forgotten.
@@ -144,19 +143,15 @@ pub const Game = struct {
         const w = self.world orelse return error.NoWorld;
         const name = try self.gpa.dupe(u8, w.level_name);
         defer self.gpa.free(name);
-        if (self.battle_save) |bytes| {
-            var sv = try save_mod.Save.parse(self.gpa, bytes);
-            defer sv.deinit();
-            self.immunity = .{ .table = sv.imm };
-        }
+        if (self.battle_save) |*sv| self.immunity = .{ .table = sv.imm };
         return self.open(name, .{ .party = if (self.entry_party) |*p| p else null }, null);
     }
 
     /// Game over "Yes" (0x4542c0): load the "battle" save, then LEVEL_Load its battle
     /// (0x41f090) with the party it entered with; the load leaves no previous level (0x411890).
     pub fn reloadBattle(self: *Game) !*World {
-        const bytes = self.battle_save orelse return error.NoBattleSave;
-        const sv = try save_mod.Save.parse(self.gpa, bytes);
+        const bs = &(self.battle_save orelse return error.NoBattleSave);
+        const sv = try bs.clone(self.gpa);
         self.reset();
         self.saved = sv;
         const s = &self.saved.?;
@@ -194,17 +189,16 @@ pub const Game = struct {
 
     fn saveBattle(self: *Game, battle: []const u8) !void {
         var sv: save_mod.Save = .init(self.gpa);
-        defer sv.deinit();
+        errdefer sv.deinit();
         try self.snapshot(&sv);
-        var text: Io.Writer.Allocating = .init(self.gpa);
-        defer text.deinit();
-        try sv.write(&text.writer);
         const name = try self.gpa.dupe(u8, battle);
         errdefer self.gpa.free(name);
-        const bytes = try text.toOwnedSlice();
-        if (self.battle_save) |b| self.gpa.free(b);
+        // Kept as the file would give it back.
+        const kept = try sv.clone(self.gpa);
+        sv.deinit();
+        if (self.battle_save) |*b| b.deinit();
         if (self.battle_level) |b| self.gpa.free(b);
-        self.battle_save = bytes;
+        self.battle_save = kept;
         self.battle_level = name;
     }
 
@@ -295,6 +289,7 @@ pub const Game = struct {
             // list, so the level restore()'s PlaceHeroes places them too (0x411cd0).
             try party.apply(w, true);
             try levels.reenter(w);
+            try hooks.levelEnter(w);
         } else if (self.prebuilt.fetchRemove(next_key)) |kv| {
             // Built from the save for GO_RunFun: entered like a saved location.
             self.gpa.free(kv.key);
@@ -302,6 +297,7 @@ pub const Game = struct {
             kv.value.setSelectedHero(hero);
             try party.apply(kv.value, true);
             try levels.reenter(kv.value);
+            try hooks.levelEnter(kv.value);
         } else if (if (self.saved) |*sv| sv.find(next) else null) |ws| {
             // A location left before the save is a stored one, entered as from the cache
             // (0x411cd0): its saved state, the party, then restore() — PlaceActor(
@@ -377,7 +373,7 @@ pub const Game = struct {
         if (self.prebuilt.get(key)) |w| return w;
         const ws = (if (self.saved) |*sv| sv.find(name) else null) orelse return null;
         if (ws.level.len == 0) return null;
-        const w = try life.create(self.io, self.gpa, self.dat, name, self.models, self.worldOptions(.{}));
+        const w = try life.create(self.io, self.gpa, self.worlds, name, self.models, self.worldOptions(.{}));
         errdefer w.destroy();
         try save_apply.apply(ws, w);
         ws.level = "";
@@ -389,19 +385,17 @@ pub const Game = struct {
 };
 
 /// After a location starts (0x431961 → 0x481ce0): the party list is the enabled, living
-/// heroes without avoidEnumerate, by nameID; the selected hero stays if he is in it, else
+/// heroes without avoidEnumerate, by classic_id; the selected hero stays if he is in it, else
 /// the first one is selected — Medusa picked in a battle is disabled on the location.
-/// Medusa's nameID (0x77).
-const medusa_id = 119;
-
 fn keepSelectable(w: *World) void {
     var first: ?*@import("script.zig").object.Object = null;
     for (w.rt.objects.items) |o| {
         const n = World.nativeOf(o);
-        if (!n.hero or n.kind != .actor or n.deleted or !o.enabled or o.getInt("avoidEnumerate") != 0) continue;
-        if (w.battle == null and fields.nameId(o) == medusa_id) continue;
+        if (!n.hero or n.kind != .actor or n.deleted or !o.enabled or o.getInt("outside_party") != 0) continue;
+        if (w.battle == null and !w.canSelect(o)) continue;
         if (std.ascii.eqlIgnoreCase(o.name, w.selected_hero)) return;
-        if (first == null or fields.nameId(o) < fields.nameId(first.?)) first = o;
+        // The party's order (OpenGorky: the `game` block's party_order; Classic: classic_id).
+        if (first == null or entity.heroRank(rules.who(o)) < entity.heroRank(rules.who(first.?))) first = o;
     }
     if (first) |o| w.selected_hero = o.name;
 }
@@ -412,12 +406,13 @@ fn keepSelectable(w: *World) void {
 /// it is 0 in adjust.kdt.)
 pub fn selectHero(w: *World, name: []const u8) void {
     const o = w.actorObject(name) orelse return;
-    if (o.getInt("avoidEnumerate") == 1) return;
-    // Medusa fights in battles only: outside one she is never picked (0x4b2761…0x4b2775).
-    if (w.battle == null and fields.nameId(o) == medusa_id) return;
+    if (o.getInt("outside_party") == 1) return;
+    // One whose CanSelect says no (native BattleOnly: Medusa) is never picked outside a
+    // battle (0x4b2761…0x4b2775).
+    if (w.battle == null and !w.canSelect(o)) return;
     w.selected_hero = o.name;
     if (w.battle) |*b| control.select(b, w, o);
-    w.out.sound(w.gpa, "selecthero", null);
+    w.out.sound(w.gpa, @import("core.zig").modules.ui().sounds.select_hero, null);
 }
 
 /// Level music input for `audio.scene.Scene.startMusic`.
@@ -455,10 +450,20 @@ pub fn tick(w: *World) !void {
     // GUI_GAMEOVER: the defeat element counts 90 ticks, then "gameover" (0x454380).
     if (w.flow.defeat_ticks) |*t| {
         t.* += 1;
-        if (t.* == 90) try w.out.music_events.append(w.gpa, .{ .name = "gameover", .once = true });
+        if (t.* == 90) try w.out.music_events.append(w.gpa, .{ .name = @import("core.zig").modules.ui().music.game_over, .once = true });
     }
     try life.tickObjects(w);
     try life.tickPresentation(w);
+    try uiFlags(w);
+}
+
+/// Every actor's answers for the interface (state/object.zig `ui`): CanPush (native
+/// NoPush, the push button), CanSelect (native BattleOnly, the grey portrait).
+fn uiFlags(w: *World) !void {
+    for (w.rt.objects.items) |o| {
+        const n = World.nativeOf(o);
+        if (n.kind == .actor) n.ui = .{ .can_push = try natives.canPush(w, o), .can_select = w.canSelect(o) };
+    }
 }
 
 /// Run calls deferred until entering this location, then free them. A LEVEL_Load among
@@ -484,8 +489,8 @@ fn runLoadSteps(self: *World, steps: []const state_groups.LoadStep) !void {
     }
 }
 
-/// Idle line (0x451110): a party of two or more, 1800 ticks without input — the
-/// selected hero says `idle_<su|ov|tr>_01.dlg` (Ovitz first plays "medicine").
+/// Idle line (0x451110): a party of two or more, 1800 ticks (rules idle_ticks) without
+/// input — the selected hero's IdleChatter row.
 /// `idle` is the host's counter of ticks without input; scenes and battles reset it.
 pub fn idleChatter(w: *World, idle: *u64, ticks: u64) !void {
     if (w.battle != null or w.scene.runner != null or w.scene.cutscene) {
@@ -495,17 +500,12 @@ pub fn idleChatter(w: *World, idle: *u64, ticks: u64) !void {
     const members = w.party();
     if (members.slice().len < 2) return;
     idle.* += ticks;
-    if (idle.* < 1800) return;
+    if (idle.* < @as(u64, @intCast(@max(0, rules.value(.idle_ticks))))) return;
     idle.* = 0;
     const hero = w.selectedHero() orelse return;
-    const file: []const u8 = switch (fields.nameId(hero)) {
-        20 => "idle_su_01.dlg",
-        21 => "idle_ov_01.dlg",
-        22 => "idle_tr_01.dlg",
-        else => return,
-    };
-    if (fields.nameId(hero) == 21) world_mod.actorOf(hero).play("medicine", false, true);
-    try scenes.startDialog(w, hero.name, file);
+    const ic = @import("core.zig").entity.hero(hero).idle orelse return;
+    if (ic.anim.len > 0) world_mod.actorOf(hero).play(ic.anim, false, true);
+    try scenes.startDialog(w, hero.name, ic.dialog);
 }
 
 /// After winning battle `name`: the level's AfterBattle(name) (0x41fb44).
@@ -513,7 +513,10 @@ fn afterBattle(w: *World, name: []const u8) !void {
     const l = w.level orelse return;
     // The script may keep the argument in a variable (assignment stores the
     // slice); the caller's buffer dies after the switch.
-    _ = try w.rt.callIfExists(l, "AfterBattle", &.{.{ .string = try w.rt.arena().dupe(u8, name) }});
+    const battle: Value = .{ .string = try w.rt.arena().dupe(u8, name) };
+    _ = try w.rt.callIfExists(l, "AfterBattle", &.{battle});
+    var args = [_]Value{battle};
+    _ = try hooks.on(w, l, "Level.OnAfterBattle", &args);
 }
 
 /// Where to return after battle: the battle level's `backLevel` (park → silos).

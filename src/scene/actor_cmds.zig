@@ -10,7 +10,8 @@ const walk = @import("../world.zig").walk;
 const floor = @import("../world.zig").floor;
 const queue = @import("../world.zig").queue;
 const bitmap_anim = @import("../world.zig").bitmap_anim;
-const scriptlet = @import("../formats.zig").scriptlet;
+const scriptlet = @import("../core.zig").scene;
+const og_entity = @import("../core.zig").entity;
 const fx_mod = @import("../fx.zig");
 const world_mod = @import("../state.zig").world;
 const World = world_mod.World;
@@ -59,7 +60,7 @@ pub fn execActor(self: *Runner, w: *World, c: scriptlet.Command, n: []const u8) 
         if (eq(n, "USEANIMATION")) {
             const it = w.rt.findObject(name) orelse return true;
             if (!world_mod.isItem(it)) return true;
-            const v = it.getVar("useAnim");
+            const v = it.getVar("use_anim");
             name = if (v != null and v.?.value == .string) v.?.value.string else "n/a";
         } else if (c.args.len == 3 and c.args[2] == .number) count = @intCast(std.math.clamp(c.arg(2).int(), 1, 255));
         try enqueue(w, o, .{ .scene_anim = .{ .name = try w.arena_state.allocator().dupe(u8, name), .count = count, .logical = true } });
@@ -162,12 +163,12 @@ pub fn execActor(self: *Runner, w: *World, c: scriptlet.Command, n: []const u8) 
     }
     if (eq(n, "ASSIGN_ITEM")) {
         // Item to an actor (0x477d4d): ammo (type 10) is added to its first pack of the
-        // same nameID (0x47d880 searches before the owner changes, so the item itself is
+        // same classic_id (0x47d880 searches before the owner changes, so the item itself is
         // never found wherever it is in the list) and the item is deleted (+0x60);
         // anything else goes into the backpack (place 1) with the owner (0x4adad0).
         const o = w.rt.findObject(c.arg(1).str()) orelse return true;
         if (inventory.item.typeOf(o) == .ammo) {
-            if (inventory.ammo.heroAmmo(w, c.arg(0).str(), fields.nameId(o), o)) |pack| fields.setCounter(pack, fields.counter(pack) + fields.counter(o));
+            if (inventory.ammo.heroAmmo(w, c.arg(0).str(), fields.classicId(o), o)) |pack| fields.setCounter(pack, fields.counter(pack) + fields.counter(o));
             World.nativeOf(o).deleted = true;
             o.enabled = false;
             return true;
@@ -189,9 +190,11 @@ pub fn execActor(self: *Runner, w: *World, c: scriptlet.Command, n: []const u8) 
         return true;
     }
     if (eq(n, "ROCKET")) {
-        // ROCKET(actor, x, y, z) (0x476e9f): rocket from the actor's hands to a world point.
+        // ROCKET(actor, x, y, z[, weapon]) (0x476e9f): rocket from the actor's hands to a
+        // world point; OpenGorky: the weapon whose launch it is, by its path.
         const o = w.actorObject(c.arg(0).str()) orelse return true;
-        try launchRocket(w, o, .{ c.arg(1).num(), c.arg(2).num(), c.arg(3).num() });
+        const weapon: ?i32 = if (c.args.len > 4) (if (c.args[4] == .string) og_entity.idOf(c.args[4].string) orelse -1 else @intFromFloat(c.arg(4).num())) else null;
+        try launchRocket(w, o, .{ c.arg(1).num(), c.arg(2).num(), c.arg(3).num() }, weapon);
         return true;
     }
     if (eq(n, "WEAPON")) {
@@ -254,7 +257,7 @@ pub fn execActor(self: *Runner, w: *World, c: scriptlet.Command, n: []const u8) 
 /// ROCKET(actor, x, y, z) (0x476e9f): launcher rocket (0x49d8d0, like hero code
 /// 23 at 0x48781c) from the actor's hands to world point x, y, z; no weapon or
 /// target. The command has no sound; "bazooka.wav" is in the g_bazooka animation.
-fn launchRocket(self: *World, from: *Object, target: [3]f32) !void {
-    const id = fx_mod.launch.sceneRocket(self, from, target);
+fn launchRocket(self: *World, from: *Object, target: [3]f32, weapon: ?i32) !void {
+    const id = fx_mod.launch.sceneRocket(self, from, target, weapon);
     if (id != 0) try self.scene.rockets.append(self.gpa, .{ .id = id, .target = target });
 }

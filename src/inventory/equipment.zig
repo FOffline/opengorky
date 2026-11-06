@@ -47,7 +47,7 @@ pub fn setHoldState(w: *World, hero: *Object, weapon: ?*Object) void {
     const a = world.actorOf(hero);
     const combat = w.isCombat();
     const two = if (weapon) |wp| wp.getInt("two_handed") != 0 and
-        weaponVisible(fields.nameId(hero), fields.nameId(wp)) else false;
+        weaponVisible(hero, wp) else false;
     if (!a.holdState()) return; // keep special states (boat, defend, sleep)
     a.weapon_detached = false; // 0x42b305/0x42ac30: reattach
     const was = a.state;
@@ -110,16 +110,15 @@ pub fn armorProtects(w: *World, hero: *Object, code: @import("../battle.zig").im
     return a.getIntDyn(@import("../battle.zig").immunity.pr_fields[code.index()]) != 0;
 }
 
-/// Weapons a fighter doesn't draw in hand (table 0x5270a0, 0x481f50): fighter nameID →
-/// weapon nameIDs.
-const hidden_weapons = [_]struct { actor: i32, weapons: []const i32 }{
-    .{ .actor = 29, .weapons = &.{ 34, 98, 1022, 1023, 1024, 1025, 1026, 1037, 1028, 1029 } },
-    .{ .actor = 24, .weapons = &.{ 34, 1022, 1024, 1025, 1026, 1037, 1028, 1029 } },
-};
-
-pub fn weaponVisible(actor: i32, weapon: i32) bool {
-    for (hidden_weapons) |h| if (h.actor == actor) {
-        return std.mem.indexOfScalar(i32, h.weapons, weapon) == null;
-    };
+/// Weapons a fighter doesn't draw in hand (table 0x5270a0, 0x481f50; rules party.ss).
+pub fn weaponVisible(actor: *Object, weapon: *Object) bool {
+    const entity = @import("../core.zig").entity;
+    const h = entity.hero(actor).hidden orelse return true;
+    const id = fields.classicId(weapon);
+    for (h.weapons, 0..) |n, k| {
+        // A weapon archetype in that place (an OpenGorky project's): the core's number of it.
+        const x = if (k < h.weapons_class.len and h.weapons_class[k].len > 0) entity.idOf(h.weapons_class[k]) orelse 0 else n;
+        if (x == id) return false;
+    }
     return true;
 }

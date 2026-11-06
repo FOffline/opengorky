@@ -11,7 +11,7 @@ const resource = og.formats.resource;
 
 /// Walks `<game-dir>/dat`, decodes every known resource and reports errors.
 pub fn check(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8) !void {
-    var root = try common.openDat(io, game_dir, .{ .iterate = true });
+    var root = try common.openDat(io, game_dir);
     defer root.close(io);
     const paths = try og.formats.archive.listArchives(io, gpa, root);
     defer og.formats.archive.freeList(gpa, paths);
@@ -132,7 +132,7 @@ fn checkOne(gpa: Allocator, kind: resource.Kind, data: []const u8) !void {
             if (!std.mem.eql(u16, z.depth, z2.depth)) return error.ZBufferRewriteDiffers;
         },
         .audio => {
-            var s = try og.audio.decode.decode(gpa, data);
+            var s = try og.formats.sound.decode(gpa, data);
             s.deinit(gpa);
         },
         .texture => {

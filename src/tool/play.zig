@@ -9,8 +9,8 @@ const og = @import("opengorky");
 /// Headless playthrough: commands `wait:N`, `scene`, `goto:AREA`,
 /// `click:X,Y`, `hero:NAME`, `use:ITEM:TARGET`. Level transitions, auto-battle
 /// and the AfterBattle return work as in the viewer. `goto:`/`click:` go through
-/// `actions.click` (clickAction): only the selected hero walks, companions stay —
-/// not the viewer's party walk (`clickPlay` → `partyWalk`).
+/// `actions.actAt`: only the selected hero walks, companions stay — not the viewer's
+/// party walk (`playAt` → `partyWalk`).
 pub const PlayGame = struct {
     io: Io,
     gpa: Allocator,
@@ -65,9 +65,21 @@ pub const PlayGame = struct {
     /// and load it back at the first idle moment (as a player saving everywhere).
     autosaveload: bool = false,
     want_saveload: bool = false,
+    /// `battlereload`: in every battle, on its second turn, the game-over "Yes" once (the
+    /// "battle" save loaded, game.reloadBattle): the battle again, then back to the save's
+    /// location, restored from the save.
+    battle_reload: bool = false,
+    /// The last battle reloaded (each once).
+    reloaded: []const u8 = "",
     /// Ticks without input for the idle line (game.idleChatter); every script command
     /// and level switch is input, like a click in the viewer.
     idle_ticks: u64 = 0,
+    /// The input layer's GUI modes ("Use … on …" of `use:`, the console's `pick`/`aim`) of
+    /// world `mouse_of` (`mouseOf`).
+    /// shortcut: one set, reset when the world changes (the viewer keeps one per level view,
+    /// cached with it); a mode left on in a level is not found again on return to it.
+    mouse: og.input.mouse.Mouse = .{},
+    mouse_of: ?*World = null,
 
     const World = og.state.world.World;
 
@@ -76,13 +88,22 @@ pub const PlayGame = struct {
         return self.game.world.?;
     }
 
+    /// The GUI modes of world `w` (fresh for a world not seen last).
+    pub fn mouseOf(self: *PlayGame, w: *World) *og.input.mouse.Mouse {
+        if (self.mouse_of != w) {
+            self.mouse = .{};
+            self.mouse_of = w;
+        }
+        return &self.mouse;
+    }
+
     /// Run flags (`noautorefill` — battle-entry health as a player has it, regress.sh).
     pub fn setFlag(self: *PlayGame, cmd: []const u8) bool {
         inline for (.{
             .{ "godmode", "godmode", true },   .{ "nogodmode", "godmode", false },        .{ "passive", "passive", true },
             .{ "counters", "counters", true }, .{ "autoequip", "autoequip", true },       .{ "autolevel", "autolevel", true },
             .{ "blog", "battle_log", true },   .{ "autorefill", "autorefill", true },     .{ "noautorefill", "autorefill", false },
-            .{ "oncecheck", "once", true },    .{ "autosaveload", "autosaveload", true },
+            .{ "oncecheck", "once", true },    .{ "autosaveload", "autosaveload", true }, .{ "battlereload", "battle_reload", true },
         }) |f| if (std.mem.eql(u8, cmd, f[0])) {
             @field(self, f[1]) = f[2];
             return true;
@@ -167,6 +188,15 @@ pub const PlayGame = struct {
                     f.obj.name, f.side, f.hp(), og.fields.walkRange(f.obj), if (f.weapon) |o| o.name else "-",
                 });
             }
+            if (self.battle_reload and b.turn >= 2 and !std.ascii.eqlIgnoreCase(self.reloaded, w.level_name)) {
+                self.reloaded = try self.names.allocator().dupe(u8, w.level_name);
+                _ = try self.game.reloadBattle();
+                // Back to the save's location after it (the load leaves no previous level).
+                try self.game.setPrev(self.game.saved.?.current);
+                self.mouse_of = null;
+                try self.out.print("[{d:>6}] battle reload {s}\n", .{ self.ticks, self.reloaded });
+                return;
+            }
             b.auto_heroes = !self.passive;
             if (self.passive and b.idle()) {
                 if (b.phase == .player or (b.phase == .counter and !self.counters)) {
@@ -216,6 +246,7 @@ pub const PlayGame = struct {
         try self.collectMissing(w);
         const sw = try self.game.switchTo(next);
         self.idle_ticks = 0;
+        self.mouse_of = null;
         const moved = sw.moving != null;
         const nw = self.cur();
         if (self.autolevel and nw.isCombat()) spendPoints(nw);
@@ -242,13 +273,13 @@ pub const PlayGame = struct {
         if (w.scene.runner != null or w.scene.cutscene or w.scene.queue.items.len > 0 or w.battle != null or
             w.flow.pending_level != null or w.act.interaction != null or w.act.exploring != null) return;
         self.want_saveload = false;
-        var sv: og.save.Save = .init(self.gpa);
+        var sv: og.world.saved.Save = .init(self.gpa);
         defer sv.deinit();
         try self.game.snapshot(&sv);
         var text: Io.Writer.Allocating = .init(self.gpa);
         defer text.deinit();
-        try sv.write(&text.writer);
-        const nw = try self.game.load(try og.save.Save.parse(self.gpa, text.written()));
+        try og.compose.save.write(&sv, &text.writer);
+        const nw = try self.game.load(try og.compose.save.parse(self.gpa, text.written()));
         try self.out.print("[{d:>6}] saveload {s}\n", .{ self.ticks, nw.level_name });
         self.last_scene = "";
     }
@@ -293,7 +324,7 @@ pub const PlayGame = struct {
                 const owner = w.rt.findObject(og.fields.owner(o)) orelse continue;
                 if (!World.nativeOf(owner).hero) continue;
                 var score = og.fields.getF(o, "armor");
-                for ([_][]const u8{ "prFire", "prFreeze", "prGas", "prTranq", "prElect", "prEnergy", "prDist" }) |pr|
+                for ([_][]const u8{ "resist_fire", "resist_freeze", "resist_gas", "resist_sleep", "resist_electricity", "resist_energy", "resist_decoy" }) |pr|
                     score += 10 * (o.getVarDyn(pr) orelse continue).value.toFloat();
                 if (score > best_score) {
                     best = o;
@@ -318,10 +349,29 @@ pub const PlayGame = struct {
         }
     }
 
-    /// Auto-battle: full hero health and at least 30 ammo in each of their packs.
+    /// Auto-battle: full hero health and, for each weapon a party hero carries, at least 30
+    /// of its ammo in his pack of that kind (made when he has none, inventory/ammo.zig
+    /// ammoPackOf): by what he carries, not by the packs he happens to have (the exe's .hro
+    /// gives every hero empty packs of all kinds; an OpenGorky project none), so both play alike.
     fn refill(w: *World) void {
         og.console.hero.healHeroes(w, null);
-        _ = og.console.hero.addAmmo(w, 30, true);
+        const party = w.party();
+        for (party.slice()) |h| {
+            var i: usize = 0;
+            while (i < w.rt.objects.items.len) : (i += 1) {
+                const wpn = w.rt.objects.items[i];
+                const nat = World.nativeOf(wpn);
+                if (nat.kind != .weapon or nat.deleted or !og.fields.ownerIs(wpn, h.name)) continue;
+                const id = wpn.getInt("ammo");
+                if (id <= 0) continue;
+                // An ammo item of that kind to make the pack of (any owner's, a box's).
+                const like = for (w.rt.objects.items) |o| {
+                    if (og.state.world.isItem(o) and og.inventory.item.typeOf(o) == .ammo and og.fields.classicId(o) == id) break o;
+                } else continue;
+                const pack = og.inventory.ammo.ammoPackOf(w, h, like) orelse continue;
+                og.fields.setCounter(pack, @max(og.fields.counter(pack), 30));
+            }
+        }
     }
 
     /// Ticks until `done` returns true (battles always finish).

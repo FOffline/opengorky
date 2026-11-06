@@ -27,7 +27,7 @@ const DevConsole = @import("dev_console.zig").DevConsole;
 pub var log_level: config.Log = .warn;
 
 const archive = og.formats.archive;
-const Image = og.formats.image.Image;
+const Image = og.image.Image;
 
 pub const screen_w = og.state.world.screen_w;
 pub const screen_h = og.state.world.screen_h;
@@ -109,6 +109,8 @@ pub const Viewer = struct {
     sound: ?level_view.SoundContext = null,
     menu_music: ?og.audio.mixer.VoiceId = null,
     menu_music_name: []const u8 = "",
+    /// The campaign's credits video was queued for the credits now open.
+    credits_video_played: bool = false,
     /// Actor shadows: adjust.kdt disable_shadows == 0 (settings take priority).
     shadows: bool = true,
     /// Gamma × 100 (0x4065e0): the frame goes through the table (i/255)^(1/g).
@@ -116,6 +118,8 @@ pub const Viewer = struct {
     gamma_lut: [256]u8 = undefined,
     gamma_lut_for: f32 = -1,
     gamma_tex: ?*c.SDL_Texture = null,
+    /// The world after a project's post-processing (frame.applyPost).
+    post_tex: ?*c.SDL_Texture = null,
     /// `*-blur` scaling: the frame shrunk twice (the blurred borders).
     blur_tex: [2]?*c.SDL_Texture = .{ null, null },
     /// 640×480 frame: everything draws here, then stretches to the window per `scaling`.
@@ -135,6 +139,8 @@ pub const Viewer = struct {
     cfg_dir: ?[]const u8 = null,
     cfg_path: ?[]const u8 = null,
     models: ?*og.actor.model_cache.Cache = null,
+    /// The models' textures (renderer side, over the same files).
+    textures: ?*og.render.textures.Textures = null,
     /// Effect drawing (frame textures), shared by levels.
     fx: ?*EffectsView = null,
     /// Music before the points allocation window.
@@ -191,6 +197,7 @@ pub const Viewer = struct {
         self.video_queue.deinit(self.gpa);
         if (self.zoom_tex) |t| c.SDL_DestroyTexture(t);
         if (self.gamma_tex) |t| c.SDL_DestroyTexture(t);
+        if (self.post_tex) |t| c.SDL_DestroyTexture(t);
         for (self.blur_tex) |b| if (b) |t| c.SDL_DestroyTexture(t);
         if (self.thumb) |*t| t.deinit(self.gpa);
         self.console.deinit(self.gpa);
@@ -255,13 +262,12 @@ pub const Viewer = struct {
             std.log.err("level {s}: {t}", .{ name, err });
             return;
         };
-        self.level = level_compose.load(self.io, self.gpa, self.renderer, self.dat, w, self.sound, self.models) catch |err| {
+        self.level = level_compose.load(self.io, self.gpa, self.renderer, self.dat, w, self.sound, self.models, self.textures) catch |err| {
             std.log.err("level {s}: {t}", .{ name, err });
             self.game.closeWorld();
             return;
         };
         self.level.?.font = self.font;
-        if (self.inventory) |inv| self.level.?.world.strings = &inv.strings;
         self.level.?.world.examine_menus = self.inventory != null;
         self.scroll = .{ 0, 0 };
     }
@@ -271,7 +277,7 @@ pub const Viewer = struct {
         const m = self.menu orelse return;
         if (m.select_sound) {
             m.select_sound = false;
-            self.uiSound("menu1");
+            self.uiSound(og.core.modules.ui().sounds.menu_open);
         }
         if (m.sound) |name| {
             m.sound = null;

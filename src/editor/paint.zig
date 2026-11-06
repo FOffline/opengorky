@@ -8,22 +8,20 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const c = @import("sdl");
-const ui = @import("ui");
 const og = @import("opengorky");
-const Image = og.formats.image.Image;
+const Image = og.image.Image;
 const ZBuffer = og.formats.zbuffer.ZBuffer;
-const lf = og.formats.level_files;
-const clay = @import("clay.zig");
-const font_mod = @import("font.zig");
+const map_io = og.loaders.map;
+const core_map = og.core.map;
 const tx = @import("text.zig");
-const main = @import("app.zig");
-const App = main.App;
-const theme = main.theme;
-const txt = main.txt;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
+const areas = @import("areas.zig");
 const art = @import("art.zig");
 const Doc = @import("level.zig").Doc;
 const trigger = @import("trigger.zig");
 const newlevel = @import("newlevel.zig");
+const common_archive = @import("store.zig").common_archive;
 
 pub const Layer = enum(u8) { picture, depth, walk, walk2, grid };
 pub const Tool = enum { objects, move, brush, picker, area, exit, points, paths, light, camera };
@@ -41,7 +39,7 @@ pub const Paint = struct {
     jpg: bool = false,
     depth: ?ZBuffer = null,
     depth_file: ?usize = null,
-    walk: [2]?lf.WalkMap = .{ null, null },
+    walk: [2]?core_map.WalkMap = .{ null, null },
     walk_file: [2]?usize = .{ null, null },
     tex: [4]?*c.SDL_Texture = .{ null, null, null, null },
     show: [5]bool = .{ true, false, true, false, true },
@@ -50,7 +48,7 @@ pub const Paint = struct {
     /// The walk grids' overlay opacity over the picture (0…1).
     overlay: f32 = 1,
     /// A battle's grid (`.cm`): its cells painted free/blocked, its placement edited.
-    grid: ?lf.CombatMap = null,
+    grid: ?core_map.CombatMap = null,
     grid_file: ?usize = null,
     /// The level shown (its camera maps the background onto the grid).
     doc: ?*const Doc = null,
@@ -73,15 +71,15 @@ pub const Paint = struct {
     poly: std.ArrayList([2]i32) = .empty,
     /// The exit tool's outline closed before a level is picked: it waits for one.
     poly_closed: bool = false,
-    /// The area picked with the hand (its name), the new name being typed, delete asked once.
+    /// The area picked with the hand (its name), the new name it is renamed to (`pending`).
     area: [48]u8 = undefined,
     area_len: usize = 0,
     name: [48]u8 = undefined,
     name_len: usize = 0,
-    renaming: bool = false,
-    confirm_delete: bool = false,
     /// The points tool lists every scene, not only the level's.
     all_scenes: bool = false,
+    /// The points tool's scene (its own pick: the Scenes tab's scene when the mode opens).
+    scene: app_mod.Name(64) = .{},
     /// A panel button's action, run at the next frame's start (it reloads the level,
     /// this Paint included — not while the panel lays itself out).
     pending: enum { none, finish, rename, delete, reload } = .none,
@@ -153,12 +151,12 @@ pub fn open(app: *App, d: *Doc) !*Paint {
     } else |_| {}
     for ([_][]const u8{ "wm", "wm2" }, 0..) |ext, k| {
         const f = app.store.file(d.level_archive, try std.fmt.bufPrint(&eb, "{s}.{s}", .{ d.name, ext })) catch continue;
-        p.walk[k] = try lf.parseWalkMap(gpa, app.store.text(f));
+        p.walk[k] = try map_io.parseWalkMap(gpa, app.store.text(f));
         p.walk_file[k] = f;
     }
     p.doc = d;
     if (d.isBattle()) if (app.store.file(d.level_archive, try std.fmt.bufPrint(&eb, "{s}.cm", .{d.name}))) |f| {
-        p.grid = try lf.parseCombatMap(gpa, app.store.text(f));
+        p.grid = try map_io.parseCombatMap(gpa, app.store.text(f));
         p.grid_file = f;
     } else |_| {};
     if (p.pic == null) p.layer = if (p.grid != null) .grid else .walk;
@@ -248,7 +246,7 @@ pub fn draw(app: *App, p: *Paint, d: *Doc, rect: c.SDL_FRect) void {
         var tw: f32 = 0;
         var th: f32 = 0;
         _ = c.SDL_GetTextureSize(t, &tw, &th);
-        const k: f32 = if (l == .walk or l == .walk2) lf.WalkMap.cell_size else 1;
+        const k: f32 = if (l == .walk or l == .walk2) core_map.WalkMap.cell_size else 1;
         // The walk grids at the overlay opacity (the concept's slider).
         _ = c.SDL_SetTextureAlphaModFloat(t, if (l == .walk or l == .walk2) p.overlay else 1);
         _ = c.SDL_RenderTexture(r, t, null, &.{ .x = o[0], .y = o[1], .w = tw * k * d.zoom, .h = th * k * d.zoom });
@@ -271,7 +269,7 @@ pub fn draw(app: *App, p: *Paint, d: *Doc, rect: c.SDL_FRect) void {
     // The brush: a square of its size (a cell's multiple on the walk grids).
     if (p.tool != .move and p.tool != .camera and p.tool != .objects) if (p.hover) |h| {
         const s: f32 = brushPixels(p);
-        const cell: f32 = if (p.layer == .walk or p.layer == .walk2) lf.WalkMap.cell_size else 1;
+        const cell: f32 = if (p.layer == .walk or p.layer == .walk2) core_map.WalkMap.cell_size else 1;
         const x0 = @floor((h[0] - s / 2) / cell) * cell;
         const y0 = @floor((h[1] - s / 2) / cell) * cell;
         const a = screen(d, rect, .{ x0, y0 });
@@ -289,8 +287,6 @@ fn pickedIndex(p: *const Paint, d: *const Doc) ?usize {
 /// A hand press on the map: the area under it picked and its drag started (true),
 /// or none picked (false: the hand drags the map).
 pub fn pickAt(p: *Paint, d: *const Doc, v: c.SDL_FRect, s: [2]f32) bool {
-    p.renaming = false;
-    p.confirm_delete = false;
     p.area_len = 0;
     const i = d.pick(v, s) orelse return false;
     const o = d.objects.items[i];
@@ -325,7 +321,7 @@ pub fn areaRelease(app: *App, p: *Paint) void {
     var nb: [48]u8 = undefined;
     const name = nb[0..p.area_len];
     @memcpy(name, p.area[0..p.area_len]);
-    app.moveArea(name, off);
+    areas.moveArea(app, name, off);
 }
 
 /// The dragged area's outline where it would go.
@@ -357,31 +353,12 @@ pub fn runPending(app: *App, p: *Paint) void {
             var ob: [48]u8 = undefined;
             const old = ob[0..p.area_len];
             @memcpy(old, p.area[0..p.area_len]);
-            app.deleteArea(old);
+            areas.deleteArea(app, old);
         },
     }
 }
 
-/// Typing into the new name.
-pub fn typeName(p: *Paint, s: []const u8) void {
-    for (s) |ch| {
-        if (p.name_len == p.name.len or !(std.ascii.isAlphanumeric(ch) or ch == '_')) continue;
-        p.name[p.name_len] = ch;
-        p.name_len += 1;
-    }
-}
-
-/// A key while the name is typed: Backspace, Enter (rename), Esc (stop).
-pub fn nameKey(app: *App, p: *Paint, k: c.SDL_Keycode) void {
-    switch (k) {
-        c.SDLK_BACKSPACE => p.name_len -|= 1,
-        c.SDLK_RETURN, c.SDLK_KP_ENTER => rename(app, p),
-        else => p.renaming = false,
-    }
-}
-
 fn rename(app: *App, p: *Paint) void {
-    p.renaming = false;
     var ob: [48]u8 = undefined;
     var nb: [48]u8 = undefined;
     const old = ob[0..p.area_len];
@@ -390,38 +367,31 @@ fn rename(app: *App, p: *Paint) void {
     @memcpy(new, p.name[0..p.name_len]);
     if (std.mem.eql(u8, old, new)) return;
     // The mode opens anew over the reloaded level: this Paint is gone after.
-    app.renameArea(old, new);
+    areas.renameArea(app, old, new);
 }
 
-const points = @import("paint_points.zig").points;
 const drawPoints = @import("paint_points.zig").drawPoints;
 pub const pointClick = @import("paint_points.zig").pointClick;
 pub const dropPoint = @import("paint_points.zig").dropPoint;
-const pointsPanel = @import("paint_points.zig").pointsPanel;
 
-const lights = @import("paint_lights.zig").lights;
 pub const dropLight = @import("paint_lights.zig").dropLight;
 const drawLights = @import("paint_lights.zig").drawLights;
 pub const lightPress = @import("paint_lights.zig").lightPress;
 pub const lightDrag = @import("paint_lights.zig").lightDrag;
 pub const lightRelease = @import("paint_lights.zig").lightRelease;
-pub const stepper = @import("paint_lights.zig").stepper;
-const lightsPanel = @import("paint_lights.zig").lightsPanel;
 
 const drawPoly = @import("paint_areas.zig").drawPoly;
 pub const areaClick = @import("paint_areas.zig").areaClick;
 pub const finishArea = @import("paint_areas.zig").finishArea;
-const exitPanel = @import("paint_areas.zig").exitPanel;
-const areaPanel = @import("paint_areas.zig").areaPanel;
 
 pub fn screen(d: *const Doc, rect: c.SDL_FRect, b: [2]f32) [2]f32 {
     return .{ rect.x + (b[0] - d.origin[0]) * d.zoom, rect.y + (b[1] - d.origin[1]) * d.zoom };
 }
 
 /// The brush side in background pixels (walk grids: whole cells).
-fn brushPixels(p: *const Paint) f32 {
+pub fn brushPixels(p: *const Paint) f32 {
     const s: f32 = @floatFromInt(p.size);
-    return if (p.layer == .walk or p.layer == .walk2) @max(lf.WalkMap.cell_size, @round(s / 8) * 8) else s;
+    return if (p.layer == .walk or p.layer == .walk2) @max(core_map.WalkMap.cell_size, @round(s / 8) * 8) else s;
 }
 
 /// Pressed on the map at background point `b`: the eyedropper, or a stroke begins.
@@ -471,8 +441,8 @@ pub fn release(app: *App, p: *Paint) void {
 fn cellAt(p: *const Paint, b: [2]f32) ?usize {
     const m = p.walk[@backingInt(p.layer) - 2] orelse return null;
     if (b[0] < 0 or b[1] < 0) return null;
-    const x: usize = @intFromFloat(b[0] / lf.WalkMap.cell_size);
-    const y: usize = @intFromFloat(b[1] / lf.WalkMap.cell_size);
+    const x: usize = @intFromFloat(b[0] / core_map.WalkMap.cell_size);
+    const y: usize = @intFromFloat(b[1] / core_map.WalkMap.cell_size);
     if (x >= m.width or y >= m.height) return null;
     return y * m.width + x;
 }
@@ -550,9 +520,9 @@ fn dab(app: *App, p: *Paint, b: [2]f32) void {
         },
         .walk, .walk2 => {
             const m = &p.walk[@backingInt(p.layer) - 2].?;
-            const cells: i64 = @intFromFloat(s / lf.WalkMap.cell_size);
-            const cx: i64 = @intFromFloat(@floor(b[0] / lf.WalkMap.cell_size));
-            const cy: i64 = @intFromFloat(@floor(b[1] / lf.WalkMap.cell_size));
+            const cells: i64 = @intFromFloat(s / core_map.WalkMap.cell_size);
+            const cx: i64 = @intFromFloat(@floor(b[0] / core_map.WalkMap.cell_size));
+            const cy: i64 = @intFromFloat(@floor(b[1] / core_map.WalkMap.cell_size));
             const x0 = cx - @divFloor(cells - 1, 2);
             const y0 = cy - @divFloor(cells - 1, 2);
             const ax: u32 = @intCast(std.math.clamp(x0, 0, m.width));
@@ -586,6 +556,30 @@ fn keep(app: *App, p: *Paint, i: u32, old: u32) void {
     p.stroke.append(app.gpa, .{ .idx = i, .old = old }) catch {};
 }
 
+/// An `.ap` link end moved: walk grid mark `bit` (2: start, 4: end — what the route
+/// search tests to take a path, exe 0x4ac454…0x4ac5aa; the game marks both grids)
+/// cleared at cell `from` unless `keep_from`, set at `to`; one undo step a grid.
+pub fn linkMark(app: *App, p: *Paint, bit: u8, from: ?[2]f32, keep_from: bool, to: ?[2]f32) void {
+    for (&p.walk, 0..) |*wm, k| if (wm.*) |*m| {
+        var changes: [2]Change = undefined;
+        var n: usize = 0;
+        for ([_]?[2]f32{ if (keep_from) null else from, to }, [_]bool{ false, true }) |cell, set| {
+            const at = cell orelse continue;
+            if (at[0] < 0 or at[1] < 0 or at[0] >= @as(f32, @floatFromInt(m.width)) or at[1] >= @as(f32, @floatFromInt(m.height))) continue;
+            const i: u32 = @intFromFloat(at[1] * @as(f32, @floatFromInt(m.width)) + at[0]);
+            const c0 = &m.cells[i];
+            const kind = if (set) c0.kind | bit else c0.kind & ~bit;
+            if (kind == c0.kind) continue;
+            changes[n] = .{ .idx = i, .old = @as(u32, c0.kind) | @as(u32, @as(u16, @bitCast(c0.height))) << 8 };
+            n += 1;
+            c0.kind = kind;
+        }
+        if (n == 0) continue;
+        const own = app.gpa.dupe(Change, changes[0..n]) catch return;
+        p.undo.append(app.gpa, .{ .layer = @fromBackingInt(@intCast(2 + k)), .changes = own }) catch app.gpa.free(own);
+    };
+}
+
 /// The last stroke (or loaded PNG) undone.
 pub fn undo(app: *App, p: *Paint) bool {
     const s = p.undo.pop() orelse return false;
@@ -595,7 +589,7 @@ pub fn undo(app: *App, p: *Paint) bool {
             .picture => @memcpy(p.pic.?.pixels, w),
             .depth => @memcpy(std.mem.sliceAsBytes(p.depth.?.depth), w),
             // The grid's placement or size changed: its `.cm` text before.
-            .grid => if (lf.parseCombatMap(app.gpa, w)) |g| {
+            .grid => if (map_io.parseCombatMap(app.gpa, w)) |g| {
                 p.grid.?.deinit(app.gpa);
                 p.grid = g;
             } else |_| {},
@@ -628,19 +622,41 @@ pub fn commit(app: *App, p: *Paint) !void {
     camCommit(app, p);
     if (changed(p, .picture)) if (p.pic_file) |f| {
         const bytes = if (p.jpg) try og.formats.jpeg.encode(gpa, p.pic.?, 92) else try og.formats.background.encode(gpa, p.pic.?);
-        try app.store.replaceLabeled(f, bytes, tx.get(tx.lp_step_picture));
+        try app.store.replaceLabeled(f, bytes, tx.both(app.frame.allocator(), tx.lp_step_picture, .{}));
     };
-    if (changed(p, .grid)) if (p.grid_file) |f| try app.store.replaceLabeled(f, try lf.encodeCombatMap(gpa, p.grid.?), tx.get(tx.lp_step_grid));
-    if (changed(p, .depth)) if (p.depth_file) |f| try app.store.replaceLabeled(f, try og.formats.zbuffer.encode(gpa, p.depth.?), tx.get(tx.lp_step_depth));
+    if (changed(p, .grid)) if (p.grid_file) |f| {
+        var was = try map_io.parseCombatMap(gpa, app.store.text(f));
+        defer was.deinit(gpa);
+        const g = p.grid.?;
+        try app.store.replaceLabeled(f, try map_io.encodeCombatMap(gpa, g), tx.both(app.frame.allocator(), tx.lp_step_grid, .{}));
+        // Cells more or fewer: the placements follow (the grid's own heights went with
+        // its cells, paint_camera.zig). The same floor span: cut finer or coarser.
+        const span = @abs(was.cell_size[0] * @as(f32, @floatFromInt(was.width)) - g.cell_size[0] * @as(f32, @floatFromInt(g.width))) < 0.01;
+        if (was.width != g.width or was.height != g.height) if (app.doc) |d| {
+            const placement = @import("placement.zig");
+            var calls = try placement.scan(app, gpa, d.lev);
+            defer calls.deinit(gpa);
+            if (try placement.remapTiles(gpa, app.store.text(d.lev), calls, .{ was.width, was.height }, .{ g.width, g.height }, span)) |r| {
+                app.store.replace(d.lev, r.text) catch |err| {
+                    gpa.free(r.text);
+                    return err;
+                };
+                if (r.moved > 0) app.setStatus(tx.lp_tiles_clamped, .{ r.moved, r.first });
+            }
+        };
+    };
+    if (changed(p, .depth)) if (p.depth_file) |f| try app.store.replaceLabeled(f, try og.formats.zbuffer.encode(gpa, p.depth.?), tx.both(app.frame.allocator(), tx.lp_step_depth, .{}));
     for (0..2) |k| if (changed(p, @fromBackingInt(@intCast(2 + k)))) if (p.walk_file[k]) |f| {
-        try app.store.replaceLabeled(f, try lf.encodeWalkMap(gpa, p.walk[k].?), tx.get(if (k == 0) tx.lp_step_walk else tx.lp_step_walk2));
+        try app.store.replaceLabeled(f, try map_io.encodeWalkMap(gpa, p.walk[k].?), if (k == 0) tx.both(app.frame.allocator(), tx.lp_step_walk, .{}) else tx.both(app.frame.allocator(), tx.lp_step_walk2, .{}));
     };
 }
 
-/// Layer `l` from a PNG (fitted to its size; the depth from the grey); one step.
-fn importLayer(app: *App, p: *Paint, l: Layer, path: []const u8) !void {
+/// Layer `l` from a PNG (fitted to its size; the depth from the grey); one step. A
+/// location's picture of another size resizes the level instead (resizeLevel).
+pub fn importLayer(app: *App, p: *Paint, l: Layer, path: []const u8) !void {
     var img = try art.readPng(app, path);
     defer img.deinit(app.gpa);
+    if (l == .picture and (img.width != p.pic.?.width or img.height != p.pic.?.height)) if (app.doc) |d| if (!d.isBattle()) return resizeLevel(app, p, d, img);
     const w = if (l == .picture) p.pic.?.width else p.depth.?.width;
     const h = if (l == .picture) p.pic.?.height else p.depth.?.height;
     var fit = try art.resize(app.gpa, img, w, h);
@@ -654,6 +670,114 @@ fn importLayer(app: *App, p: *Paint, l: Layer, path: []const u8) !void {
         p.depth.?.depth[i] = @as(u16, fit.pixels[i * 4]) << 8;
     }
     try textures(app, p);
+}
+
+/// Location `d` takes picture `img` at its size (sizes vary in the game: 1280×960 to
+/// 2600×1916, the exe reads it from the `.bkg`/`.jpg`): the depth and both walk grids
+/// resampled onto it (cells of 8 pixels, w/8 × h/8 as the game's), the `.ar` corners
+/// scaled. A perspective camera spans the background width (initBank), so the world
+/// scales with it. The path nodes (`.ap`, their links' walk marks set on the new grids)
+/// and the points of the scenes its scripts start scale too. Written into the Store as
+/// the mode closes; the level reloads.
+/// shortcut: a scene started from two levels gets this one's scale, rare in the game.
+fn resizeLevel(app: *App, p: *Paint, d: *Doc, img: Image) !void {
+    const gpa = app.gpa;
+    const w = img.width;
+    const h = img.height;
+    // The exe's screen: a smaller picture leaves the view outside it.
+    if (w < 640 or h < 480) return error.PictureTooSmall;
+    // The port reads no larger `.bkg` (formats/background.zig).
+    if (!p.jpg and (w > og.formats.background.max_side or h > og.formats.background.max_side)) return error.PictureTooLarge;
+    const old: [2]u32 = .{ p.pic.?.width, p.pic.?.height };
+    var pic = try Image.init(gpa, w, h);
+    errdefer pic.deinit(gpa);
+    for (0..w * h) |i| pic.pixels[i * 4 ..][0..4].* = .{ img.pixels[i * 4], img.pixels[i * 4 + 1], img.pixels[i * 4 + 2], 255 };
+    const depth: ?[]u16 = if (p.depth) |z| try resample(u16, gpa, z.depth, z.width, z.height, w, h) else null;
+    errdefer if (depth) |x| gpa.free(x);
+    var cells: [2]?[]core_map.WalkMap.Cell = .{ null, null };
+    errdefer for (cells) |x| if (x) |m| gpa.free(m);
+    const cs = core_map.WalkMap.cell_size;
+    for (p.walk, 0..) |m, k| if (m) |x| {
+        cells[k] = try resample(core_map.WalkMap.Cell, gpa, x.cells, x.width, x.height, w / cs, h / cs);
+    };
+    try p.undo.ensureUnusedCapacity(gpa, 4);
+    if (app.store.file(d.level_archive, try std.fmt.allocPrint(app.frame.allocator(), "{s}.ar", .{d.name}))) |f| {
+        const t = try newlevel.scaleAr(gpa, app.store.text(f), .{ @as(f32, @floatFromInt(w)) / @as(f32, @floatFromInt(old[0])), @as(f32, @floatFromInt(h)) / @as(f32, @floatFromInt(old[1])) });
+        app.store.replaceLabeled(f, t, tx.both(app.frame.allocator(), tx.lp_step_resize, .{ w, h })) catch |err| {
+            gpa.free(t);
+            return err;
+        };
+    } else |_| {}
+    const k: [2]f32 = .{ @as(f32, @floatFromInt(w)) / @as(f32, @floatFromInt(old[0])), @as(f32, @floatFromInt(h)) / @as(f32, @floatFromInt(old[1])) };
+    const label = tx.alloc(app.frame.allocator(), tx.lp_step_resize, .{ w, h });
+    if (app.store.file(d.level_archive, try std.fmt.allocPrint(app.frame.allocator(), "{s}.ap", .{d.name}))) |f| {
+        const r = try newlevel.scaleAp(gpa, app.store.text(f), k);
+        defer gpa.free(r.links);
+        app.store.replaceLabeled(f, r.text, label) catch |err| {
+            gpa.free(r.text);
+            return err;
+        };
+        // The route search takes a path at its link cells' marks (2 start, 4 end; linkMark).
+        // A mark the old grid had at a link's cell is on its new cell (resampling may drop it).
+        for (cells, p.walk) |m, was| if (m) |x| for (r.links) |l| for ([_]u8{ 2, 4 }, 0..) |bit, e| {
+            const ox: usize = @intFromFloat(@max(0, l[0][e * 2]));
+            const oy: usize = @intFromFloat(@max(0, l[0][e * 2 + 1]));
+            if (ox >= was.?.width or oy >= was.?.height or was.?.at(ox, oy).kind & bit == 0) continue;
+            const cx: u32 = @intFromFloat(std.math.clamp(l[1][e * 2], 0, @as(f32, @floatFromInt(w / cs - 1))));
+            const cy: u32 = @intFromFloat(std.math.clamp(l[1][e * 2 + 1], 0, @as(f32, @floatFromInt(h / cs - 1))));
+            x[cy * (w / cs) + cx].kind |= bit;
+        };
+    } else |_| {}
+    for (app.catalog.scenes.items) |sc| if (startedIn(app, d, sc.name)) {
+        const f = app.store.file(common_archive, try std.fmt.allocPrint(app.frame.allocator(), "scriptlets\\{s}.pts", .{sc.name})) catch continue;
+        const t = try newlevel.scalePts(gpa, app.store.text(f), k);
+        app.store.replaceLabeled(f, t, label) catch |err| {
+            gpa.free(t);
+            return err;
+        };
+    };
+    // Nothing fails past here: the layers swapped, each marked changed for commit().
+    p.pic.?.deinit(gpa);
+    p.pic = pic;
+    if (p.depth) |*z| {
+        gpa.free(z.depth);
+        z.* = .{ .width = w, .height = h, .depth = depth.? };
+    }
+    for (&p.walk, cells) |*m, x| if (m.*) |*wm| {
+        gpa.free(wm.cells);
+        wm.* = .{ .width = w / cs, .height = h / cs, .cells = x.? };
+    };
+    for (&p.tex) |*t| if (t.*) |x| {
+        c.SDL_DestroyTexture(x);
+        t.* = null;
+    };
+    for ([_]Layer{ .picture, .depth, .walk, .walk2 }) |l| if (has(p, l)) p.undo.appendAssumeCapacity(.{ .layer = l });
+    textures(app, p) catch {};
+    p.pending = .reload;
+}
+
+/// Scene `name` is started by a script of level `d` (its `.lev` or another of its archive).
+fn startedIn(app: *App, d: *const Doc, name: []const u8) bool {
+    const a = app.frame.allocator();
+    for (app.store.files.items) |f| if (!f.deleted and std.mem.eql(u8, f.archive, d.level_archive)) {
+        if ((@import("scenes.zig").calls(a, f.text, name) catch continue).len > 0) return true;
+    };
+    return false;
+}
+
+/// `src` (sw×sh) on a dw×dh grid, the nearest value each.
+fn resample(comptime T: type, gpa: Allocator, src: []const T, sw: u32, sh: u32, dw: u32, dh: u32) ![]T {
+    const out = try gpa.alloc(T, @as(usize, dw) * dh);
+    for (0..dh) |y| for (0..dw) |x| {
+        out[y * dw + x] = src[(y * sh / dh) * sw + x * sw / dw];
+    };
+    return out;
+}
+
+test resample {
+    const out = try resample(u8, std.testing.allocator, &.{ 1, 2, 3, 4 }, 2, 2, 4, 1);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 2, 2 }, out);
 }
 
 /// The depth layer put on the exe's scale. A depth made elsewhere (a render, a depth
@@ -671,9 +795,16 @@ pub fn fitDepth(app: *App, p: *Paint, d: *Doc) !f32 {
         .ortho => return error.NotPerspective,
     };
     var cb: [160]u8 = undefined;
-    if (app.store.find(try std.fmt.bufPrint(&cb, "{s}/sprite.dat", .{d.name}), try std.fmt.bufPrint(cb[80..], "background\\{s}.cfg", .{d.name})) != null) return error.HasCfg;
     const l = d.world.level orelse return error.NoLevel;
-    const tl = og.fields.getF(l, "frontPlane") - og.fields.getF(l, "backPlane");
+    // Without a `.cfg` far = tl = the planes' span; with one (a perspective one) its own.
+    var tl = og.fields.getF(l, "near_plane") - og.fields.getF(l, "far_plane");
+    var far = tl;
+    if (app.store.find(try std.fmt.bufPrint(&cb, "{s}/sprite.dat", .{d.name}), try std.fmt.bufPrint(cb[80..], "background\\{s}.cfg", .{d.name}))) |f| {
+        const cfg = og.formats.level.parsePerspCfg(app.store.text(f)) orelse return error.HasCfg;
+        tl = cfg.tl;
+        const e: [3]f32 = .{ cfg.eye[0] - cfg.target[0], cfg.eye[1] - cfg.target[1], cfg.eye[2] - cfg.target[2] };
+        far = @sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]) + tl;
+    }
     if (tl <= 0) return error.NoPlanes;
     const a = app.frame.allocator();
     // Floor points: walkable cells of a location, free cells of a battle grid.
@@ -684,7 +815,7 @@ pub fn fitDepth(app: *App, p: *Paint, d: *Doc) !f32 {
             var x: usize = 0;
             while (x < m.width) : (x += 2) {
                 if (!m.at(x, y).walkable()) continue;
-                const cs = lf.WalkMap.cell_size;
+                const cs = core_map.WalkMap.cell_size;
                 const bg: [2]f32 = .{ @as(f32, @floatFromInt(x * cs)) + cs / 2, @as(f32, @floatFromInt(y * cs)) + cs / 2 };
                 try floor.append(a, og.world.floor.groundAt(d.world, bg));
             }
@@ -701,7 +832,7 @@ pub fn fitDepth(app: *App, p: *Paint, d: *Doc) !f32 {
         const q = cam.project(fp);
         if (q.x < 0 or q.y < 0 or q.x >= @as(f32, @floatFromInt(z.width)) or q.y >= @as(f32, @floatFromInt(z.height))) continue;
         const g: f32 = @floatFromInt(z.depth[@as(usize, @intFromFloat(q.y)) * z.width + @as(usize, @intFromFloat(q.x))]);
-        try pts.append(a, .{ g, (tl + q.depth) * 65536 / tl });
+        try pts.append(a, .{ g, (far + q.depth) * 65536 / tl });
     }
     var miss = try a.alloc(f32, pts.items.len);
     for (pts.items, 0..) |pt, i| miss[i] = @abs(pt[0] - pt[1]) / 256;
@@ -718,7 +849,7 @@ pub fn fitDepth(app: *App, p: *Paint, d: *Doc) !f32 {
 }
 
 /// Layer `l` as a PNG (the depth as grey: its high byte, the low one is 0 in the game).
-fn exportLayer(app: *App, p: *Paint, l: Layer, path: []const u8) !void {
+pub fn exportLayer(app: *App, p: *Paint, l: Layer, path: []const u8) !void {
     if (l == .picture) return art.writePng(app, p.pic.?, path);
     const z = p.depth.?;
     var img = try Image.init(app.gpa, z.width, z.height);
@@ -730,227 +861,12 @@ fn exportLayer(app: *App, p: *Paint, l: Layer, path: []const u8) !void {
     try art.writePng(app, img, path);
 }
 
-/// The right-hand panel of the mode: layers, the tool and its setting, PNG, done.
-pub fn panel(app: *App, a: Allocator, p: *Paint) void {
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(app.split(.objects)), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM }, .backgroundColor = theme.panel, .border = .{ .color = theme.line, .width = .{ .left = 1 } } });
-    if (@import("main.zig").inspectorTabs(app)) {
-        @import("main.zig").inspectorHistory(app, a);
-        return clay.close();
-    }
-    // Everything scrolls (a battle's grid and camera are taller than a window).
-    clay.openScroll(.{ .id = clay.id("lp_scroll"), .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM } });
-    main.panelHeader(tx.get(tx.lp_title));
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .childGap = 4 } });
-    const names = [_]tx.Msg{ tx.lp_picture, tx.lp_depth, tx.lp_walk, tx.lp_walk2, tx.lp_grid };
-    for ([_]Layer{ .picture, .depth, .walk, .walk2, .grid }, 0..) |l, k| {
-        if (!has(p, l)) continue;
-        const r = layerRow(app, @intCast(k), tx.get(names[k]), p.show[k], p.locked[k], p.layer == l, changed(p, l));
-        if (r.eye) p.show[k] = !p.show[k] else if (r.lock) p.locked[k] = !p.locked[k] else if (r.row) {
-            p.layer = l;
-            p.show[k] = true;
-        }
-    }
-    // The level's objects: shown or not, never painted.
-    if (layerRow(app, 9, tx.get(tx.lp_objects), p.show_objects, null, false, false).any()) p.show_objects = !p.show_objects;
-    if (p.jpg) clay.text(tx.get(tx.lp_jpg), .{ .textColor = theme.dim, .fontSize = 11, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
-    actorScaleRow(app, a);
-    if (p.layer == .depth) backgroundCfg(app, a);
-    clay.close();
-
-    main.panelHeader(tx.get(switch (p.tool) {
-        .objects => tx.lp_objects_tool,
-        .move => tx.lp_move,
-        .brush => tx.lp_brush,
-        .picker => tx.spr_picker,
-        .light => tx.lp_lights,
-        .area => tx.lp_area,
-        .exit => tx.lp_exit,
-        .points => tx.lp_points,
-        .paths => tx.lp_paths,
-        .camera => tx.lp_cam_tool,
-    }));
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .childGap = 8 } });
-    if (p.tool == .objects) {
-        @import("main.zig").objectsBlock(app, a);
-    } else if (p.tool == .brush or p.tool == .picker) {
-        clay.open(.{ .layout = .{ .childGap = 6, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-        clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(140) } } });
-        txt(tx.get(tx.lp_brush_size), 13, theme.text, font_mod.regular);
-        clay.close();
-        if (main.button(app, "lp_smaller", "-", false)) p.size = @max(1, p.size / 2);
-        if (numBox(app, a, "lp_size_box", "px", brushPixels(p), 90)) |v| p.size = @intFromFloat(std.math.clamp(@round(v), 1, 256));
-        if (main.button(app, "lp_bigger", "+", false)) p.size = @min(256, p.size * 2);
-        clay.close();
-    }
-    if (p.tool == .objects) {} else if (p.tool == .points) {
-        pointsPanel(app, a, p);
-    } else if (p.tool == .paths) {
-        if (app.doc) |d| @import("paths.zig").panel(app, a, d);
-    } else if (p.tool == .light) {
-        lightsPanel(app, a, p);
-    } else if (p.tool == .camera) {
-        clay.text(tx.get(tx.lp_cam_tool_hint), .{ .textColor = theme.text, .fontSize = 12, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
-        cameraPanel(app, a, p, false);
-    } else if (p.tool == .exit) {
-        exitPanel(app, a, p);
-    } else if (p.tool == .area) {
-        clay.text(tx.get(tx.lp_area_hint), .{ .textColor = theme.text, .fontSize = 12, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
-        if (p.poly.items.len >= 3) if (main.button(app, "lp_area_done", tx.get(tx.lp_area_done), true)) {
-            p.pending = .finish;
-        };
-    } else switch (p.layer) {
-        .picture => {
-            clay.open(.{ .layout = .{ .childGap = 8, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-            txt(tx.get(tx.lp_color), 13, theme.text, font_mod.regular);
-            clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(28), .height = clay.fixed(20) } }, .backgroundColor = .{ .r = @floatFromInt(p.color[0]), .g = @floatFromInt(p.color[1]), .b = @floatFromInt(p.color[2]), .a = 255 }, .cornerRadius = clay.radius(3) });
-            clay.close();
-        },
-        .depth => {
-            clay.open(.{ .layout = .{ .childGap = 6, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-            txt(tx.alloc(a, tx.lp_depth_value, .{p.depth_value}), 13, theme.text, font_mod.regular);
-            if (main.button(app, "lp_d_m", "-8", false)) p.depth_value -|= 8;
-            if (main.button(app, "lp_d_p", "+8", false)) p.depth_value +|= 8;
-            clay.close();
-            clay.text(tx.get(tx.lp_depth_fit_hint), .{ .textColor = theme.dim, .fontSize = 12, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
-            if (main.button(app, "lp_depth_fit", tx.get(tx.lp_depth_fit), false)) if (app.doc) |d| {
-                if (fitDepth(app, p, d)) |before| app.setStatus(tx.st_depth_fit, .{before}) else |err| app.setStatus(tx.st_set_failed, .{err});
-            };
-        },
-        .walk, .walk2 => {
-            // As the concept's: the brush mode as two halves, the overlay's opacity.
-            clay.open(.{ .layout = .{ .childGap = 8, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-            clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(140) } } });
-            txt(tx.get(tx.lp_brush_mode), 13, theme.text, font_mod.regular);
-            clay.close();
-            if (main.segmented(app, "lp_mode", &.{ tx.get(tx.lp_walk_on), tx.get(tx.lp_walk_off) }, if (p.walk_on) 0 else 1)) |k| p.walk_on = k == 0;
-            clay.close();
-            clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .childGap = 18, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-            clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(130) } } });
-            txt(tx.get(tx.lp_overlay), 13, theme.text, font_mod.regular);
-            clay.close();
-            if (main.slider(app, "lp_overlay", p.overlay)) |v| p.overlay = v;
-            txt(std.fmt.allocPrint(a, "{d:.0}%", .{p.overlay * 100}) catch "", 13, theme.dim, font_mod.regular);
-            clay.close();
-        },
-        .grid => gridPanel(app, a, p),
-    }
-    if (p.area_len > 0) areaPanel(app, a, p);
-    // Painting's hint and the layer's PNG out / in: with the painting tools.
-    const painting = p.tool == .move or p.tool == .brush or p.tool == .picker;
-    if (painting) clay.text(tx.get(tx.lp_hint), .{ .textColor = theme.dim, .fontSize = 11, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
-    if (painting and (p.layer == .picture or p.layer == .depth)) {
-        clay.open(.{ .layout = .{ .childGap = 6 } });
-        if (main.button(app, "lp_export", tx.get(tx.spr_to_png), false)) app.askFile(.{ .kind = .png_out, .run = onLayerOut, .entry = @backingInt(p.layer) });
-        if (main.button(app, "lp_import", tx.get(tx.spr_from_png), false)) app.askFile(.{ .kind = .png, .run = onLayerIn, .entry = @backingInt(p.layer) });
-        clay.close();
-    }
-    clay.close();
-    clay.close();
-    clay.close();
-}
-
-/// The edit mode's tools over the view (as the concept's toolbar): objects, the hand,
-/// painting, lights, then what belongs to the level kind; Done on the right.
-pub fn toolbar(app: *App, p: *Paint) void {
-    const Btn = struct { t: Tool, ic: @import("icons.zig").Icon, label: tx.Msg };
-    if (app.doc == null) return;
-    const all = [_]Btn{
-        .{ .t = .objects, .ic = .mouse_pointer_2, .label = tx.lp_objects_tool },
-        .{ .t = .move, .ic = .hand, .label = tx.lp_move },
-        .{ .t = .brush, .ic = .paintbrush, .label = tx.lp_brush },
-        .{ .t = .picker, .ic = .pipette, .label = tx.spr_picker },
-        .{ .t = .light, .ic = .lightbulb, .label = tx.lp_lights },
-        .{ .t = .area, .ic = .square_dashed, .label = tx.lp_area },
-        .{ .t = .exit, .ic = .log_out, .label = tx.lp_exit },
-        .{ .t = .points, .ic = .crosshair, .label = tx.lp_points },
-        .{ .t = .paths, .ic = .redo_2, .label = tx.lp_paths },
-        .{ .t = .camera, .ic = .camera, .label = tx.lp_cam_tool },
-    };
-    // Every tool named when the view is wide (as the concept), else only the one in use.
-    const named = if (App.viewportRect()) |v| v.w >= 980 else false;
-    inline for (all) |b| {
-        // Triggers, exits and scene points belong to locations; the camera to perspective levels.
-        const shown = !((b.t == .area or b.t == .exit or b.t == .points or b.t == .paths) and p.grid != null);
-        if (shown and main.toolButton(app, "lp_tool_" ++ @tagName(b.t), b.ic, if (named or p.tool == b.t) tx.get(b.label) else "", p.tool == b.t, false)) p.tool = b.t;
-    }
-}
-
-const RowHit = struct {
-    eye: bool = false,
-    lock: bool = false,
-    row: bool = false,
-
-    fn any(self: RowHit) bool {
-        return self.eye or self.lock or self.row;
-    }
-};
-
-/// A layer's row (as the concept's): the eye (shown), the lock (no painting; null —
-/// none), its name, whether changed.
-fn layerRow(app: *App, k: u32, label: []const u8, shown: bool, locked: ?bool, sel: bool, edited: bool) RowHit {
-    const icons = @import("icons.zig");
-    var hit: RowHit = .{};
-    const rid = clay.idi("lp_layer", k);
-    _ = main.clickable(app, .{ .id = rid, .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.fixed(34) }, .padding = .{ .left = 8, .right = 10 }, .childGap = 10, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } }, .backgroundColor = theme.panel, .cornerRadius = clay.radius(theme.radius) }, sel);
-    const row_over = clay.hovered();
-    const eid = clay.idi("lp_eye", k);
-    clay.open(.{ .id = eid, .layout = .{ .sizing = .{ .width = clay.fixed(24), .height = clay.fixed(24) }, .childAlignment = .{ .x = ui.CLAY_ALIGN_X_CENTER, .y = ui.CLAY_ALIGN_Y_CENTER } } });
-    hit.eye = clay.hovered() and app.clicked;
-    icons.leaf(app.r, app.gpa, if (shown) .eye else .eye_off, 17, if (shown) (if (sel) theme.text else theme.accent_hover) else theme.dim);
-    clay.close();
-    if (locked) |lk| {
-        const lid = clay.idi("lp_lock", k);
-        clay.open(.{ .id = lid, .layout = .{ .sizing = .{ .width = clay.fixed(24), .height = clay.fixed(24) }, .childAlignment = .{ .x = ui.CLAY_ALIGN_X_CENTER, .y = ui.CLAY_ALIGN_Y_CENTER } } });
-        hit.lock = clay.hovered() and app.clicked;
-        icons.leaf(app.r, app.gpa, if (lk) .lock else .lock_open, 15, if (lk) theme.warn else theme.dim);
-        clay.close();
-    } else clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(24) } } });
-    txt(label, 14, theme.text, if (sel) font_mod.bold else font_mod.regular);
-    if (edited) txt(tx.get(tx.lp_changed), 11, theme.warn, font_mod.regular);
-    clay.close();
-    hit.row = row_over and app.clicked and !hit.eye and !hit.lock;
-    return hit;
-}
-
-const backgroundCfg = @import("paint_camera.zig").backgroundCfg;
-const gridPanel = @import("paint_camera.zig").gridPanel;
 pub const cameraStep = @import("paint_camera.zig").cameraStep;
 pub const gridSplitTo = @import("paint_camera.zig").gridSplitTo;
-const cameraPanel = @import("paint_camera.zig").cameraPanel;
-const numBox = @import("paint_camera.zig").numBox;
 pub const gizmo_r = @import("paint_camera.zig").gizmo_r;
-const ringAt = @import("paint_camera.zig").ringAt;
 const drawGizmo = @import("paint_camera.zig").drawGizmo;
 pub const cameraPress = @import("paint_camera.zig").cameraPress;
 pub const cameraDrag = @import("paint_camera.zig").cameraDrag;
 pub const cameraRelease = @import("paint_camera.zig").cameraRelease;
 pub const cameraWheel = @import("paint_camera.zig").cameraWheel;
 pub const camCommit = @import("paint_camera.zig").camCommit;
-
-/// The size of characters on this level (`actorScale` in initCamera(); the exe's
-/// default 0.15 when unset, 0x421907): a new picture drawn at another scale needs it.
-fn actorScaleRow(app: *App, a: Allocator) void {
-    const d = app.doc orelse return;
-    const lev = app.store.text(d.lev);
-    const set = newlevel.cameraVar(lev, "actorScale");
-    const v = if (set) |x| (if (x > 0) x else default_actor_scale) else default_actor_scale;
-    const step = stepper(app, a, "lp_ascale", tx.alloc(a, tx.lp_actor_scale, .{ v, v / default_actor_scale * 100 }), v, 0.01);
-    if (step == 0) return;
-    const t = newlevel.setCameraVar(app.gpa, lev, "actorScale", std.math.clamp(v + step, 0.03, 1)) catch |err| return app.setStatus(tx.st_set_failed, .{err});
-    app.store.replaceLabeled(d.lev, t, tx.alloc(a, tx.lp_actor_scale, .{ v + step, (v + step) / default_actor_scale * 100 })) catch |err| {
-        app.gpa.free(t);
-        app.setStatus(tx.st_set_failed, .{err});
-    };
-}
-
-const default_actor_scale = og.actor.model_cache.default_actor_scale;
-
-// File dialog answers (app.askFile): `ask.entry` is the layer.
-fn onLayerIn(app: *App, ask: main.FileAsk, path: []const u8) !void {
-    try importLayer(app, app.paint orelse return, @fromBackingInt(@intCast(ask.entry)), path);
-    app.setStatus(tx.st_layer_set, .{});
-}
-fn onLayerOut(app: *App, ask: main.FileAsk, path: []const u8) !void {
-    try exportLayer(app, app.paint orelse return, @fromBackingInt(@intCast(ask.entry)), path);
-    app.setStatus(tx.st_layer_saved, .{path});
-}

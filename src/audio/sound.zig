@@ -1,11 +1,9 @@
 //! Engine sound logic (no output device): sound bank, volume and pan by screen
-//! position, ambients, music choice. Reconstructed from gorky17.exe.
+//! position, ambients, music choice. Reconstructed from gorky17.exe. The core reads no
+//! files: the bank asks its `Source` (composition, compose/sounds.zig) for decoded sounds.
 
 const std = @import("std");
-const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const archive = @import("../formats.zig").archive;
-const decode = @import("decode.zig");
 
 /// Parameters from adjust.kdt (defaults from the game file).
 pub const Params = struct {
@@ -39,34 +37,62 @@ pub fn positional(pos: [2]f32, center: [2]f32, p: Params) Positional {
 }
 
 /// Music candidates for a level in check order (0x41f9b0):
-/// `<level>.mp3`, then the district's shared music for sublevels.
+/// `<level>.mp3`, then the district's shared music for sublevels (rules DistrictMusic).
 pub fn musicCandidates(level: []const u8, buf: *[2][]const u8) [][]const u8 {
     buf[0] = level;
-    var n: usize = 1;
-    if (std.mem.indexOf(u8, level, "03_museum_") != null) {
-        buf[1] = "03_museum";
-        n = 2;
-    } else if (std.mem.indexOf(u8, level, "01_port_") != null) {
-        buf[1] = "01_port";
-        n = 2;
-    }
-    return buf[0..n];
+    const district = @import("../core.zig").modules.districtMusic(level) orelse return buf[0..1];
+    buf[1] = district;
+    return buf[0..2];
 }
 
-/// Sounds by name from `common/sound.dat` (effects) and `common/voice.dat` (music, speech).
+/// A decoded sound: s16 PCM (composition decodes the files, compose/sounds.zig).
+pub const Sound = struct {
+    channels: u32,
+    rate: u32,
+    /// Interleaved samples, `frames * channels` of them.
+    samples: []i16,
+
+    pub fn frames(self: Sound) usize {
+        return self.samples.len / self.channels;
+    }
+
+    pub fn deinit(self: *Sound, gpa: Allocator) void {
+        gpa.free(self.samples);
+        self.* = undefined;
+    }
+};
+
+/// The archive a sound is in: effects (`common/sound.dat`) or music and speech (`voice.dat`).
+pub const Which = enum { sounds, voices };
+
+/// Where sounds come from (composition: compose/sounds.zig). Null functions: nothing there.
+pub const Source = struct {
+    ctx: ?*anyopaque = null,
+    /// Size in bytes of file `name` (case-insensitive); null: no such file.
+    size: ?*const fn (ctx: ?*anyopaque, which: Which, name: []const u8) ?u32 = null,
+    /// File `name` decoded, its samples in `gpa`.
+    load: ?*const fn (ctx: ?*anyopaque, gpa: Allocator, which: Which, name: []const u8) anyerror!Sound = null,
+    /// Release what composition holds (the bank's deinit).
+    close: ?*const fn (ctx: ?*anyopaque) void = null,
+
+    fn sizeOf(self: Source, which: Which, name: []const u8) ?u32 {
+        return (self.size orelse return null)(self.ctx, which, name);
+    }
+};
+
+/// Longest file name asked (an archive entry name).
+const name_max = 112;
+
+/// Sounds by name from `common/sound.dat` (effects) and `common/voice.dat` (music,
+/// speech), decoded at first use and kept.
 pub const Bank = struct {
     gpa: Allocator,
-    io: Io,
-    sounds: archive.Archive,
-    voices: archive.Archive,
+    source: Source,
     /// Name (lowercase) → sound; null if missing or undecodable.
-    cache: std.StringHashMapUnmanaged(?*decode.Sound) = .empty,
+    cache: std.StringHashMapUnmanaged(?*Sound) = .empty,
 
-    pub fn open(io: Io, gpa: Allocator, dat: Io.Dir) !Bank {
-        var sounds = try archive.Archive.open(io, gpa, dat, "common/sound.dat");
-        errdefer sounds.close(io, gpa);
-        const voices = try archive.Archive.open(io, gpa, dat, "common/voice.dat");
-        return .{ .gpa = gpa, .io = io, .sounds = sounds, .voices = voices };
+    pub fn init(gpa: Allocator, source: Source) Bank {
+        return .{ .gpa = gpa, .source = source };
     }
 
     pub fn deinit(self: *Bank) void {
@@ -79,44 +105,43 @@ pub const Bank = struct {
             self.gpa.free(e.key_ptr.*);
         }
         self.cache.deinit(self.gpa);
-        self.voices.close(self.io, self.gpa);
-        self.sounds.close(self.io, self.gpa);
+        if (self.source.close) |f| f(self.source.ctx);
     }
 
     /// Effect: `name` or `name.wav` (as the engine looks it up, 0x432627).
-    pub fn effect(self: *Bank, name: []const u8) ?*const decode.Sound {
-        return self.get(self.sounds, name, ".wav");
+    pub fn effect(self: *Bank, name: []const u8) ?*const Sound {
+        return self.get(.sounds, name, ".wav");
     }
 
-    pub fn music(self: *Bank, name: []const u8) ?*const decode.Sound {
-        return self.get(self.voices, name, ".mp3");
+    pub fn music(self: *Bank, name: []const u8) ?*const Sound {
+        return self.get(.voices, name, ".mp3");
     }
 
     /// Speech: a `voice.dat` file by full name (`port_arriving_ov_00.wav`).
-    pub fn voice(self: *Bank, name: []const u8) ?*const decode.Sound {
-        return self.get(self.voices, name, "");
+    pub fn voice(self: *Bank, name: []const u8) ?*const Sound {
+        return self.get(.voices, name, "");
     }
 
     /// Voice file size in `voice.dat` (bytes; 0 if missing).
     pub fn voiceBytes(self: *Bank, name: []const u8) u32 {
-        return if (self.voices.find(name)) |e| e.size else 0;
+        return self.source.sizeOf(.voices, name) orelse 0;
     }
 
     pub fn hasMusic(self: *Bank, name: []const u8) bool {
-        var buf: [archive.name_size]u8 = undefined;
+        var buf: [name_max]u8 = undefined;
         const file = std.fmt.bufPrint(&buf, "{s}.mp3", .{name}) catch return false;
-        return self.voices.find(file) != null;
+        return self.source.sizeOf(.voices, file) != null;
     }
 
-    fn get(self: *Bank, arc: archive.Archive, name: []const u8, ext: []const u8) ?*const decode.Sound {
-        var key_buf: [archive.name_size]u8 = undefined;
+    fn get(self: *Bank, which: Which, name: []const u8, ext: []const u8) ?*const Sound {
+        var key_buf: [name_max]u8 = undefined;
         if (name.len + ext.len > key_buf.len) return null;
         const key = std.ascii.lowerString(&key_buf, name);
         if (self.cache.get(key)) |s| return s;
 
-        var file_buf: [archive.name_size]u8 = undefined;
-        const entry = arc.find(name) orelse arc.find(std.fmt.bufPrint(&file_buf, "{s}{s}", .{ name, ext }) catch return null);
-        const snd: ?*decode.Sound = if (entry) |e| self.load(arc, e) catch |err| blk: {
+        var file_buf: [name_max]u8 = undefined;
+        const file = if (self.source.sizeOf(which, name) != null) name else if (std.fmt.bufPrint(&file_buf, "{s}{s}", .{ name, ext })) |f| (if (self.source.sizeOf(which, f) != null) f else null) else |_| return null;
+        const snd: ?*Sound = if (file) |f| self.load(which, f) catch |err| blk: {
             std.log.warn("sound {s}: {t}", .{ name, err });
             break :blk null;
         } else blk: {
@@ -128,12 +153,11 @@ pub const Bank = struct {
         return snd;
     }
 
-    fn load(self: *Bank, arc: archive.Archive, e: *const archive.Entry) !*decode.Sound {
-        const data = try arc.readAlloc(self.io, self.gpa, e);
-        defer self.gpa.free(data);
-        const s = try self.gpa.create(decode.Sound);
+    fn load(self: *Bank, which: Which, name: []const u8) !*Sound {
+        const f = self.source.load orelse return error.NotFound;
+        const s = try self.gpa.create(Sound);
         errdefer self.gpa.destroy(s);
-        s.* = try decode.decode(self.gpa, data);
+        s.* = try f(self.source.ctx, self.gpa, which, name);
         return s;
     }
 };

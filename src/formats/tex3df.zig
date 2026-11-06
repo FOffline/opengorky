@@ -6,9 +6,28 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Image = @import("image.zig").Image;
+const Image = @import("../image.zig").Image;
 
-const Format = enum { p8, argb4444, yiq, rgb565, argb1555, i8, a8, ai88 };
+const Format = enum { p8, argb4444, yiq, rgb565, argb1555, i8, a8, ai88, argb8888 };
+
+/// Who has to read what the editor writes: the original exe and the port, or the port
+/// only (larger models and textures, `argb8888`; the exe can't load them).
+pub const Target = enum { both, port };
+
+/// Formats the exe's 3df loader knows (string table at 0x523844, compared at 0x43f296):
+/// any other is "Unsupported texture format" (0x43f2b5).
+pub fn exeReads(f: Format) bool {
+    return switch (f) {
+        .argb4444, .a8, .p8, .i8, .rgb565, .yiq => true,
+        else => false,
+    };
+}
+
+/// Largest side `encode` writes: the exe's 256 (its textures, modcheck), the port's 4096
+/// (argb8888 with mips: 4096² is 85 MB in the file and in memory once decoded).
+pub fn maxSide(t: Target) u32 {
+    return if (t == .both) 256 else 4096;
+}
 
 const Error = error{ BadHeader, UnsupportedFormat, Truncated } || Allocator.Error;
 
@@ -76,6 +95,7 @@ pub fn decodeMips(gpa: Allocator, bytes: []const u8) Error![]Image {
     var h = hdr.height;
     const bpp: usize = switch (hdr.format) {
         .argb4444, .rgb565, .argb1555, .ai88 => 2,
+        .argb8888 => 4,
         else => 1,
     };
     for (0..hdr.levels) |_| {
@@ -151,6 +171,14 @@ fn decodeLevel(gpa: Allocator, format: Format, tables: *const Tables, bytes: []c
                 };
             }
         },
+        .argb8888 => {
+            if (pos + n * 4 > bytes.len) return error.Truncated;
+            // Glide's GR_TEXFMT_ARGB_8888, big-endian words as the 16-bit ones: A R G B.
+            for (0..n) |i| {
+                const p = bytes[pos + i * 4 ..][0..4];
+                img.pixels[i * 4 ..][0..4].* = .{ p[1], p[2], p[3], p[0] };
+            }
+        },
         .i8, .a8 => {
             if (pos + n > bytes.len) return error.Truncated;
             for (bytes[pos..][0..n], 0..) |v, i| {
@@ -222,18 +250,30 @@ test "p8 texture" {
 /// An `argb4444` texture with every mip level (box-filtered) from an RGBA image
 /// whose sides are powers of two up to 256, aspect at most 8:1.
 pub fn encodeArgb4444(gpa: Allocator, img: Image) (Allocator.Error || error{BadSize})![]u8 {
+    return encode(gpa, img, .both);
+}
+
+/// The texture `img` for `target`: `argb4444` up to 256 for both, else (port only)
+/// `argb8888` up to 4096, so detail above 4 bits a channel survives. Every mip level
+/// (box-filtered); sides powers of two, aspect at most 8:1.
+pub fn encode(gpa: Allocator, img: Image, target: Target) (Allocator.Error || error{BadSize})![]u8 {
     const w = img.width;
     const h = img.height;
-    if (!std.math.isPowerOfTwo(w) or !std.math.isPowerOfTwo(h) or @max(w, h) > 256 or @max(w, h) / @min(w, h) > 8) return error.BadSize;
+    if (!std.math.isPowerOfTwo(w) or !std.math.isPowerOfTwo(h) or @max(w, h) > maxSide(target) or @max(w, h) / @min(w, h) > 8) return error.BadSize;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    try out.print(gpa, "3df v1.1\nargb4444\nlod range: 1 {d}\naspect ratio: {d} {d}\n", .{ @max(w, h), @max(1, w / h), @max(1, h / w) });
+    const fmt: Format = if (target == .both) .argb4444 else .argb8888;
+    try out.print(gpa, "3df v1.1\n{t}\nlod range: 1 {d}\naspect ratio: {d} {d}\n", .{ fmt, @max(w, h), @max(1, w / h), @max(1, h / w) });
     var level = try Image.init(gpa, w, h);
     defer level.deinit(gpa);
     @memcpy(level.pixels, img.pixels);
     while (true) {
         for (0..@as(usize, level.width) * level.height) |i| {
             const p = level.pixels[i * 4 ..][0..4];
+            if (fmt == .argb8888) {
+                try out.appendSlice(gpa, &.{ p[3], p[0], p[1], p[2] });
+                continue;
+            }
             const v: u16 = @as(u16, p[3] >> 4) << 12 | @as(u16, p[0] >> 4) << 8 | @as(u16, p[1] >> 4) << 4 | p[2] >> 4;
             var b: [2]u8 = undefined;
             std.mem.writeInt(u16, &b, v, .big);
@@ -264,6 +304,50 @@ pub fn half(gpa: Allocator, img: Image) Allocator.Error!Image {
     return out;
 }
 
+/// The size `encode` takes nearest to w×h for `target`: each side the nearest power of
+/// two up to `maxSide`, the short one raised to keep 8:1.
+pub fn fitSize(w: u32, h: u32, target: Target) [2]u32 {
+    const most = maxSide(target);
+    var s: [2]u32 = undefined;
+    for (&s, [2]u32{ w, h }) |*d, v| {
+        const c = @max(1, @min(v, most));
+        const hi = std.math.ceilPowerOfTwo(u32, c) catch most;
+        d.* = if (hi > 1 and c - hi / 2 < hi - c) hi / 2 else hi;
+    }
+    if (s[0] > s[1] * 8) s[1] = s[0] / 8;
+    if (s[1] > s[0] * 8) s[0] = s[1] / 8;
+    return s;
+}
+
+test fitSize {
+    try std.testing.expectEqual([2]u32{ 128, 64 }, fitSize(100, 60, .both));
+    try std.testing.expectEqual([2]u32{ 256, 256 }, fitSize(1000, 300, .both));
+    try std.testing.expectEqual([2]u32{ 256, 32 }, fitSize(256, 3, .both));
+    try std.testing.expectEqual([2]u32{ 1, 1 }, fitSize(1, 1, .both));
+    try std.testing.expectEqual([2]u32{ 1024, 256 }, fitSize(1000, 300, .port));
+    try std.testing.expectEqual([2]u32{ 4096, 2048 }, fitSize(5000, 3000, .port));
+}
+
+/// `img` resampled to w×h, each pixel the mean of the source pixels under it.
+pub fn resize(gpa: Allocator, img: Image, w: u32, h: u32) Allocator.Error!Image {
+    var out = try Image.init(gpa, w, h);
+    const fx = @as(f32, @floatFromInt(img.width)) / @as(f32, @floatFromInt(w));
+    const fy = @as(f32, @floatFromInt(img.height)) / @as(f32, @floatFromInt(h));
+    for (0..h) |y| for (0..w) |x| {
+        const x0: usize = @intFromFloat(@as(f32, @floatFromInt(x)) * fx);
+        const y0: usize = @intFromFloat(@as(f32, @floatFromInt(y)) * fy);
+        const x1 = @max(x0 + 1, @min(img.width, @as(usize, @intFromFloat(@ceil(@as(f32, @floatFromInt(x + 1)) * fx)))));
+        const y1 = @max(y0 + 1, @min(img.height, @as(usize, @intFromFloat(@ceil(@as(f32, @floatFromInt(y + 1)) * fy)))));
+        var sum: [4]u32 = .{ 0, 0, 0, 0 };
+        for (y0..y1) |sy| for (x0..x1) |sx| for (0..4) |ch| {
+            sum[ch] += img.pixels[(sy * img.width + sx) * 4 + ch];
+        };
+        const n: u32 = @intCast((x1 - x0) * (y1 - y0));
+        for (0..4) |ch| out.pixels[(y * w + x) * 4 + ch] = @intCast(sum[ch] / n);
+    };
+    return out;
+}
+
 test "encode argb4444: mips read back" {
     const gpa = std.testing.allocator;
     var img = try Image.init(gpa, 4, 2);
@@ -281,6 +365,29 @@ test "encode argb4444: mips read back" {
     try std.testing.expectEqual(4, mips[0].width);
     try std.testing.expectEqualSlices(u8, &.{ 0x11, 0x22, 0x33, 0x44 }, mips[0].pixels[0..4]);
     try std.testing.expectEqual(1, mips[2].width);
+}
+
+test "encode argb8888: exact, mips, port only" {
+    const gpa = std.testing.allocator;
+    var img = try Image.init(gpa, 512, 256);
+    defer img.deinit(gpa);
+    for (img.pixels, 0..) |*p, i| p.* = @truncate(i * 7);
+    const bytes = try encode(gpa, img, .port);
+    defer gpa.free(bytes);
+    try std.testing.expect(std.mem.startsWith(u8, bytes, "3df v1.1\nargb8888\nlod range: 1 512\naspect ratio: 2 1\n"));
+    const hdr = try parseHeader(bytes);
+    try std.testing.expect(!exeReads(hdr.format));
+    // A R G B on disk.
+    try std.testing.expectEqualSlices(u8, &.{ img.pixels[3], img.pixels[0], img.pixels[1], img.pixels[2] }, bytes[hdr.data_offset..][0..4]);
+    const mips = try decodeMips(gpa, bytes);
+    defer {
+        for (mips) |*m| m.deinit(gpa);
+        gpa.free(mips);
+    }
+    try std.testing.expectEqual(10, mips.len);
+    try std.testing.expectEqualSlices(u8, img.pixels, mips[0].pixels);
+    try std.testing.expectEqual(1, mips[9].width);
+    try std.testing.expectError(error.BadSize, encode(gpa, img, .both));
 }
 
 test "argb4444 big-endian and crlf header" {

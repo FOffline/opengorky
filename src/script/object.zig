@@ -2,8 +2,28 @@
 //! class functions with inheritance (`#inherit`). The interpreter is `runtime.zig`.
 
 const std = @import("std");
+const names = @import("names.zig");
 const ast = @import("ast.zig");
+const ir = @import("ir.zig");
 const Value = @import("value.zig").Value;
+const traits = @import("traits.zig");
+const names_classic = @import("classic/names.zig");
+
+/// A class function: its parse tree and the IR the runtime compiles from it on the
+/// first call (`classic/import.zig`). Classes that inherit it share it. An OGS method
+/// has no parse tree: its IR is the parser's.
+pub const Func = struct {
+    ast: ?*const ast.Function,
+    /// Lower-case file of the definition.
+    file: []const u8,
+    ir: ?*const ir.Fn = null,
+    /// `Runtime.ir_gen` the IR was compiled at (a new script function that takes a
+    /// builtin's name makes older IR stale).
+    gen: u32 = 0,
+    /// The Classic class that defined it: its host renames the names of its code
+    /// (`classic/names.zig`); null: none (a tool's, an OGS method).
+    class: ?*const Class = null,
+};
 
 pub const Class = struct {
     /// Class file name, lower case.
@@ -13,18 +33,44 @@ pub const Class = struct {
     parent: ?*Class,
     /// Class is still being built (`Runtime.loadClass`).
     loading: bool = false,
-    /// Own variables and inserted `#inherit` ones, in text order.
+    /// Entity class (rules.classOf), found on first use.
+    ident: ?[]const u8 = null,
+    /// OGS: the component whose instances have this class (`Runtime.attach`).
+    component: ?*const ir.Component = null,
+    /// OGS: the marks its component implements (`: Monitor`, through its traits too); a
+    /// native component's: its marks and methods.
+    marks: traits.Mask = .empty,
+    /// A native component's: the engine runs its methods (Runtime.attachNative).
+    native: ?*const Native = null,
+    /// Own variables and inserted `#inherit` ones, in text order, as the files spell them
+    /// (`varName`: as the engine does).
     vars: std.ArrayList(ast.VarDecl) = .empty,
+    /// Classic: the most derived base class whose file it includes or inherits
+    /// (`classes\\weapon.s`): the engine's names of its fields (`classic/names.zig`).
+    host: ?names_classic.Host = null,
     /// Key is the interned function name (`intern`); the first definition wins
     /// (`#inherit`/`#include` insertions come before later ones).
-    functions: std.AutoHashMapUnmanaged(u32, *const ast.Function) = .empty,
+    functions: std.AutoHashMapUnmanaged(u32, *Func) = .empty,
+
+    /// Variable `d` of the class as the engine names it (`charSize` → `footprint_tiles`).
+    pub fn varName(self: *const Class, d: ast.VarDecl) []const u8 {
+        return names_classic.engine(self.host, d.name);
+    }
+
+    /// Its interned id (`intern`).
+    pub fn varId(self: *const Class, d: ast.VarDecl) std.mem.Allocator.Error!u32 {
+        const n = self.varName(d);
+        if (n.ptr == d.name.ptr) if (d.id) |id| return id;
+        return intern(n);
+    }
 
     pub fn findFunction(self: *const Class, lower_name: []const u8) ?*const ast.Function {
-        return self.findFunctionId(findName(lower_name) orelse return null);
+        const f = self.findFunctionId(findName(lower_name) orelse return null) orelse return null;
+        return f.ast;
     }
 
     /// Lookup by interned name id, up the ancestor chain.
-    pub fn findFunctionId(self: *const Class, id: u32) ?*const ast.Function {
+    pub fn findFunctionId(self: *const Class, id: u32) ?*Func {
         var c: ?*const Class = self;
         while (c) |cls| : (c = cls.parent) {
             if (cls.functions.get(id)) |f| return f;
@@ -42,50 +88,21 @@ pub const Class = struct {
     }
 };
 
+/// A native component (core/natives.zig): an ability whose methods the engine
+/// runs in Zig (`Runtime.native_components`), in the host's component list with the OGS
+/// ones. `tag` tells the engine which one; `bits` the methods and marks it implements.
+pub const Native = struct { name: []const u8, tag: u8, bits: traits.Mask };
+
 pub const Var = struct {
-    type: ast.Type,
+    type: ir.Type,
     value: Value,
 };
 
-/// Process-wide table of lower-case variable names: each name gets a small id once, so
-/// object lookups compare integers instead of hashing strings (~13% of a playthrough).
-/// Only the script thread touches it.
-const names = struct {
-    var ids: std.StringHashMapUnmanaged(u32) = .empty;
-    var list: std.ArrayList([]const u8) = .empty;
-    const gpa = std.heap.smp_allocator;
-};
-
-/// Id of a lower-case name, adding it to the table.
-fn internName(lower: []const u8) std.mem.Allocator.Error!u32 {
-    if (names.ids.get(lower)) |id| return id;
-    const copy = try names.gpa.dupe(u8, lower);
-    errdefer names.gpa.free(copy);
-    const id: u32 = @intCast(names.list.items.len);
-    try names.list.append(names.gpa, copy);
-    errdefer _ = names.list.pop();
-    try names.ids.put(names.gpa, copy, id);
-    return id;
-}
-
-/// Id of a name in any case, adding it to the table (the parser resolves identifiers once).
-pub fn intern(name: []const u8) std.mem.Allocator.Error!u32 {
-    var buf: [128]u8 = undefined;
-    if (name.len <= buf.len) return internName(std.ascii.lowerString(&buf, name));
-    const lower = try names.gpa.alloc(u8, name.len);
-    defer names.gpa.free(lower);
-    return internName(std.ascii.lowerString(lower, name));
-}
-
-/// Id of a lower-case name, or null if no object ever declared it.
-pub fn findName(lower: []const u8) ?u32 {
-    return names.ids.get(lower);
-}
-
-/// Lower-case name of an id.
-pub fn nameOf(id: u32) []const u8 {
-    return names.list.items[id];
-}
+pub const intern = names.intern;
+pub const findName = names.findName;
+pub const findAnyCase = names.findAnyCase;
+pub const nameOf = names.nameOf;
+const internName = names.internName;
 
 pub const Object = struct {
     name: []const u8,
@@ -95,6 +112,60 @@ pub const Object = struct {
     enabled: bool = true,
     /// Engine data attached to the object.
     host: ?*anyopaque = null,
+    /// What an OGS `ref` value points at (`ref`, `of`); its name is `name`.
+    handle: Value.Handle = .{},
+    /// OGS: a component instance's host (`host` in its code); null for others.
+    owner: ?*Object = null,
+    /// OGS: the component instances attached to this host, in attach order.
+    components: std.ArrayList(*Object) = .empty,
+    /// OGS: the built-in methods and marks (traits.names()) at least one active component of
+    /// this host implements; an engine point checks its bit before it makes the arguments
+    /// (`refreshImplements` after an attach or a role change).
+    implements: traits.Mask = .empty,
+    /// OGS: its host-kind trait (`Fighter`, `Item`…: `x is Fighter`, `param fighter`), set by
+    /// the engine as it makes a world object; null: no kind (a component instance, a test's).
+    kind: ?*const traits.Trait = null,
+    /// OGS: the roles the host has now (the engine grants them: dispatch.setRole).
+    roles: traits.Roles = .empty,
+    /// OGS: a component instance active only while its host has one of these roles
+    /// (`for Hero`); empty: always active.
+    for_roles: traits.Roles = .empty,
+    /// OGS: a component instance's lifetime: with the host (`object`: native ones, attached
+    /// as the object is made) or one battle (`battle`: a row's scripted abilities,
+    /// combat/events.zig spawn attaches them anew).
+    scope: enum { object, battle } = .object,
+
+    /// Whether component instance `c` of `host` takes part (gets events, counts for
+    /// `implements`).
+    pub fn activeOn(c: *const Object, host: *const Object) bool {
+        return c.for_roles.count() == 0 or c.for_roles.intersectWith(host.roles).count() > 0;
+    }
+
+    /// Whether an active component implements built-in method or mark `name`.
+    pub fn implementsC(self: *const Object, comptime name: []const u8) bool {
+        return self.implements.isSet(traits.bit(name));
+    }
+
+    /// `implements` again from the active components' methods and marks.
+    pub fn refreshImplements(self: *Object) void {
+        self.implements = .empty;
+        for (self.components.items) |c| if (c.activeOn(self)) {
+            self.implements.setUnion(c.class.marks);
+            var it = c.class.functions.valueIterator();
+            while (it.next()) |f| if (f.*.ir) |m| if (traits.bitOf(m.name)) |b| self.implements.set(b);
+        };
+    }
+
+    /// The OGS value referring to this object.
+    pub fn ref(self: *Object) Value {
+        self.handle.name = self.name;
+        return .{ .ref = &self.handle };
+    }
+
+    /// The object an OGS `ref` value refers to.
+    pub fn of(h: *const Value.Handle) *Object {
+        return @constCast(@as(*const Object, @alignCast(@fieldParentPtr("handle", h))));
+    }
 
     /// Variable by a comptime-known name (almost every engine access): the id is looked
     /// up once per call site and cached.
@@ -127,9 +198,7 @@ pub const Object = struct {
 
     /// Variable by a runtime name.
     pub fn getVarDyn(self: *Object, name: []const u8) ?*Var {
-        var buf: [128]u8 = undefined;
-        if (name.len > buf.len) return null;
-        return self.vars.getPtr(findName(std.ascii.lowerString(&buf, name)) orelse return null);
+        return self.vars.getPtr(findAnyCase(name) orelse return null);
     }
 
     /// Declare a variable by its lower-case name unless the object has it.
@@ -175,9 +244,7 @@ pub const Object = struct {
     }
 
     pub fn hasFunction(self: *Object, name: []const u8) bool {
-        var buf: [128]u8 = undefined;
-        if (name.len > buf.len) return false;
-        return self.class.findFunction(std.ascii.lowerString(&buf, name)) != null;
+        return self.class.findFunctionId(findAnyCase(name) orelse return false) != null;
     }
 };
 

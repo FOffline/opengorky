@@ -2193,7 +2193,8 @@ void Clay__InitializePersistentMemory(Clay_Context* context) {
     int32_t maxMeasureTextCacheWordCount = context->maxMeasureTextCacheWordCount;
     Clay_Arena *arena = &context->internalArena;
 
-    context->scrollContainerDatas = Clay__ScrollContainerDataInternalArray_Allocate_Arena(10, arena);
+    // OpenGorky: every clipped element has one (a clipped label in each list row), not 10.
+    context->scrollContainerDatas = Clay__ScrollContainerDataInternalArray_Allocate_Arena(maxElementCount, arena);
     context->layoutElementsHashMapInternal = Clay__LayoutElementHashMapItemArray_Allocate_Arena(maxElementCount, arena);
     context->layoutElementsHashMap = Clay__int32_tArray_Allocate_Arena(maxElementCount, arena);
     context->measureTextHashMapInternal = Clay__MeasureTextCacheItemArray_Allocate_Arena(maxElementCount, arena);
@@ -2813,6 +2814,9 @@ void Clay__CalculateFinalLayout(void) {
                                     .vertical = elementConfig->config.clipElementConfig->vertical,
                                 }
                             };
+                            // OpenGorky: its SCISSOR_END is never culled, so neither is the start
+                            // (a clipped label scrolled out of a list ended the list's clipping).
+                            shouldRender = true;
                             break;
                         }
                         case CLAY__ELEMENT_CONFIG_TYPE_IMAGE: {
@@ -4097,7 +4101,13 @@ void Clay_UpdateScrollContainers(bool enableDragScrolling, Clay_Vector2 scrollDe
         }
         scrollData->scrollPosition.y = CLAY__MIN(CLAY__MAX(scrollData->scrollPosition.y, -(CLAY__MAX(scrollData->contentSize.height - scrollData->layoutElement->dimensions.height, 0))), 0);
 
-        for (int32_t j = 0; j < context->pointerOverIds.length; ++j) { // TODO n & m are small here but this being n*m gives me the creeps
+        // OpenGorky: the wheel goes to the innermost container that can move its way (a
+        // clipped label in a list row must not take the list's scrolling).
+        Clay_ClipElementConfig *cc = Clay__FindElementConfigWithType(scrollData->layoutElement, CLAY__ELEMENT_CONFIG_TYPE_CLIP).clipElementConfig;
+        bool movesY = cc && cc->vertical && scrollData->contentSize.height > scrollData->layoutElement->dimensions.height;
+        bool movesX = cc && cc->horizontal && scrollData->contentSize.width > scrollData->layoutElement->dimensions.width;
+        bool takes = scrollOccurred ? ((scrollDelta.y != 0 && movesY) || (scrollDelta.x != 0 && movesX)) : (movesX || movesY);
+        for (int32_t j = 0; takes && j < context->pointerOverIds.length; ++j) { // TODO n & m are small here but this being n*m gives me the creeps
             if (scrollData->layoutElement->id == Clay_ElementIdArray_Get(&context->pointerOverIds, j)->id) {
                 highestPriorityElementIndex = j;
                 highestPriorityScrollData = scrollData;

@@ -1,0 +1,248 @@
+GridFloor(level = "01__port_citadel", z = -30);
+KillIcon(fighter = 125, icon = "cripple");
+KillIcon(fighter = 105, icon = "cutterpil");
+KillIcon(fighter = 107, icon = "fang");
+KillIcon(fighter = 124, icon = "fatman");
+KillIcon(fighter = 101, icon = "garcia");
+KillIcon(fighter = 113, icon = "grandma");
+KillIcon(fighter = 131, icon = "guard");
+KillIcon(fighter = 122, icon = "harvester");
+KillIcon(fighter = 118, icon = "headnail");
+KillIcon(fighter = 128, icon = "hornet");
+KillIcon(fighter = 108, icon = "hound");
+KillIcon(fighter = 138, icon = "incubus");
+KillIcon(fighter = 120, icon = "invisible");
+KillIcon(fighter = 100, icon = "jet elmer");
+KillIcon(fighter = 115, icon = "judge");
+KillIcon(fighter = 116, icon = "judgeslave");
+KillIcon(fighter = 129, icon = "lillith");
+KillIcon(fighter = 135, icon = "lillith");
+KillIcon(fighter = 137, icon = "lucy");
+KillIcon(fighter = 119, icon = "medusa_rap");
+KillIcon(fighter = 139, icon = "messiah");
+KillIcon(fighter = 130, icon = "needle");
+KillIcon(fighter = 121, icon = "paingod");
+KillIcon(fighter = 132, icon = "puppet");
+KillIcon(fighter = 106, icon = "rc28");
+KillIcon(fighter = 126, icon = "reverend insect");
+KillIcon(fighter = 136, icon = "schizo family");
+KillIcon(fighter = 109, icon = "sinner");
+KillIcon(fighter = 123, icon = "sister of mercy");
+KillIcon(fighter = 110, icon = "smoke");
+KillIcon(fighter = 102, icon = "sphinks");
+KillIcon(fighter = 133, icon = "squeaker");
+KillIcon(fighter = 127, icon = "stinger");
+KillIcon(fighter = 114, icon = "wnuczek");
+KillIcon(fighter = 27, icon = "kozow_rap");
+KillIcon(fighter = 141, icon = "nato_capitan_rap");
+KillIcon(fighter = 25, icon = "nato_soldier_rap");
+KillIcon(fighter = 28, icon = "specnaz_rap");
+KillIcon(fighter = 142, icon = "Lamare");
+SkillIcon(weapon = 49, icon = "pistolet");
+SkillIcon(weapon = 98, icon = "riffle");
+SkillIcon(weapon = 45, icon = "dartgun");
+SkillIcon(weapon = 1022, icon = "Chaingun");
+SkillIcon(weapon = 1023, icon = "shotgun");
+SkillIcon(weapon = 1024, icon = "RocketLuncher");
+SkillIcon(weapon = 1025, icon = "LiquidThrower");
+SkillIcon(weapon = 1026, icon = "FlameThrower");
+SkillIcon(weapon = 42, icon = "axe");
+SkillIcon(weapon = 76, icon = "bejsbol");
+SkillIcon(weapon = 44, icon = "crowbar");
+SkillIcon(weapon = 52, icon = "shocker");
+SkillIcon(weapon = 43, icon = "bagnet");
+SkillIcon(weapon = 70, icon = "fist");
+SkillIcon(weapon = 35, icon = "grenade");
+SkillIcon(weapon = 1027, icon = "grenade_teargas");
+SkillIcon(weapon = 86, icon = "Molotov");
+SkillIcon(weapon = 33, icon = "bomb_stun");
+SkillIcon(weapon = 40, icon = "knife_throwing");
+SkillIcon(weapon = 34, icon = "bomb_time");
+SkillIcon(weapon = 1037, icon = "blaster");
+SkillIcon(weapon = 1028, icon = "NapalmThrower");
+SkillIcon(weapon = 1029, icon = "IonRifle");
+SkillIcon(weapon = 80, icon = "matches");
+SkillIcon(weapon = 1030, icon = "gasoline");
+SkillIcon(weapon = 1031, icon = "distractor");
+SkillIcon(weapon = 1032, icon = "vodka");
+SkillIcon(weapon = 1020, icon = "MedusaShort");
+SkillIcon(weapon = 1021, icon = "MedusaLong");
+PanelPlace(
+    button = "inventory",
+    rect = list(4, 21, 35, 61),
+    hint = "hint_inventory",
+    pressed = Pressed(frame = 35, dx = 4),
+    shutter = list(4, 9),
+);
+PanelPlace(
+    button = "give",
+    rect = list(40, 21, 73, 61),
+    hint = "give",
+    pressed = Pressed(frame = 36, dx = 4),
+    shutter = list(4, 9),
+);
+PanelPlace(button = "hand", rect = list(85, 5, 153, 60), hint = "hint_hand", shutter = list(10, 21));
+PanelPlace(
+    button = "short_list",
+    rect = list(155, 6, 175, 60),
+    hint = "hint_short_list",
+    pressed = Pressed(frame = 37, dx = 1),
+);
+PanelPlace(
+    button = "push",
+    rect = list(188, 21, 218, 61),
+    hint = "push",
+    pressed = Pressed(frame = 38, dx = 4),
+    shutter = list(4, 9),
+);
+PanelPlace(
+    button = "defend",
+    rect = list(224, 21, 257, 61),
+    hint = "hint_defend",
+    pressed = Pressed(frame = 39, dx = 4),
+    shutter = list(4, 9),
+);
+PanelPlace(button = "portrait0", rect = list(270, 5, 313, 52), shutter = list(29, 34));
+PanelPlace(button = "portrait1", rect = list(320, 5, 363, 52), shutter = list(29, 34));
+PanelPlace(button = "portrait2", rect = list(370, 5, 413, 52), shutter = list(29, 34));
+PanelPlace(button = "portrait3", rect = list(420, 5, 463, 52), shutter = list(29, 34));
+PanelPlace(button = "portrait4", rect = list(470, 5, 513, 52), shutter = list(29, 34));
+PanelPlace(
+    button = "turn",
+    rect = list(524, 21, 565, 60),
+    hint = "hint_turn",
+    shutter = list(22, 28),
+);
+PanelPlace(
+    button = "end_turn",
+    rect = list(574, 21, 602, 60),
+    hint = "hint_end_turn",
+    pressed = Pressed(frame = 40, dx = 2),
+    shutter = list(4, 9),
+);
+PanelPlace(
+    button = "skills",
+    rect = list(609, 20, 633, 41),
+    hint = "hint_skills",
+    pressed = Pressed(frame = 41, dx = 3),
+);
+PanelPlace(
+    button = "stats",
+    rect = list(608, 44, 633, 60),
+    hint = "hint_stats",
+    pressed = Pressed(frame = 42, dx = 3),
+);
+Windows(
+    skills = Window(at = list(5, 40), from = list(-150, 40), size = list(143, 323)),
+    skills_inventory = list(16, 75),
+    stats = Window(at = list(450, 60), from = list(700, 50), size = list(185, 336)),
+    stats_inventory = list(450, 10),
+    level_up = list(250, 40),
+);
+MainMenu(
+    model = "menu",
+    anim = "menu",
+    light = "gorky-light.3df",
+    circle = "white_circle.3df",
+    flare = "menuflare.3df",
+    lens = "lens.3df",
+    lens2 = "lens2.3df",
+    arrow = "strzalka.3df",
+    cursor = "kursor.3df",
+    font = "3d_menu",
+    glow = "3d_menug",
+    start_y = Adj(d = 220),
+    h_space = Adj(d = 47),
+);
+ExeVideo(name = "introkon.avi", x = 0, y = 60, double = 1, caption = 1);
+ExeVideo(name = "logo1.avi", x = -1000, y = 0, double = 0);
+ExeVideo(name = "monolith.avi", x = 0, y = 67, double = 0);
+ExeVideo(name = "topware.avi", x = 0, y = 80, double = 0);
+ExeVideo(name = "logo.avi", x = 80, y = 100, double = 0);
+ExeVideo(name = "presents.avi", x = 160, y = 160, double = 0);
+ExeVideo(name = "intro.avi", x = 0, y = 60, double = 1);
+ExeMusic(
+    level_up = "upgradeparameters",
+    battle_enter = "screenoff4",
+    victory = "victory",
+    game_over = "gameover",
+    statistics = "statistics",
+    battle = "battle battle2",
+    boss = "battle3",
+    enemy_suffix = "_enemy",
+);
+DistrictMusic(prefix = "03_museum_", track = "03_museum");
+DistrictMusic(prefix = "01_port_", track = "01_port");
+UiSounds(
+    select_hero = "selecthero",
+    give = "invgive",
+    item_choose = "Itemchoose",
+    item_put = "Itemput",
+    item_select = "invselect",
+    weapons_tab = "invbuttonweapons",
+    items_tab = "invbuttonitems",
+    keys_tab = "invbuttonkeys",
+    explosion = "granat",
+    no_ammo = "battle_noammo",
+    set_points = "upgrade_setpoints",
+    take_items = "takeitems1",
+    safe_key = "safekey",
+    heal = "health2",
+    menu_slide_in = "battle_menuslide_in",
+    menu_slide_out = "battle_menuslide_out",
+    push_barrel = "pull_barell",
+    push_box = "pull_wood_box",
+    click = "click",
+    keyboard = "keyboard",
+    menu_open = "menu1",
+    key_accept = "keyaccept",
+    miss = "miss01 miss02",
+    walk_ok = "setway",
+    walk_bad = "setway-wrong",
+    inventory_open = "menu_open",
+    inventory_close = "menu_close",
+    silence = "silents",
+    blood = "blood1 blood2 blood3",
+);
+GridFloor(level = "04__city_hotelentrance", z = -30);
+UiEffects(
+    morph_sparks = "poswiata",
+    morph_sparks_rgb = list(0.5, 0.5, 0.8),
+    effect_mesh = "chaingun",
+    explosion = "explosion1",
+    select_marker = "sel.3df",
+    facing_arrow = "facingArrow.3df",
+    click_marker = "disturb.3df",
+    area_marker = "strzalki.3df",
+    shock = "current.3df",
+    grid = "combatGrid.3df",
+);
+UiAssets(
+    panel = "sprites/game_box.spr",
+    cursor = "sprites/mouse.spr",
+    fighter_info = "sprites/FighterInfo.spr",
+    border = "sprites/border.spr",
+    spinner = "other/pila.spr",
+    atlas = "sprites/fonts.spr",
+    skills = "sprites/WeaponSkill.spr",
+    intro = "sprites/intro.spr",
+    hero_stats = "sprites/HeroStats.spr",
+    dialog_box = "sprites/dialog_box.spr",
+    report = "sprites/raport.spr",
+    item_list = "sprites/item_list.spr",
+    scrollbar = "sprites/GScrollBar.spr",
+    inventory = "sprites/inventory.spr",
+    give_man = "sprites/GiveMan.spr",
+    examine = "sprites/ebox.spr",
+    examine_box = "sprites/examine_box.spr",
+    safe = "sprites/sejf.spr",
+    save = "sprites/save.spr",
+    credits = "sprites/credits.spr",
+    hp_font = "02_hp",
+    safe_font = "03_sejf",
+    msg_font = "3d_msg",
+    credits_font = "01_credits",
+    dialog_font = "02_dialog",
+    small_font = "03_small",
+    system_font = "04_system",
+);

@@ -3,3 +3,7 @@
 
 pub const scenario = @import("scene/scenario.zig");
 pub const scenes = @import("scene/scenes.zig");
+
+test {
+    _ = scenario;
+}

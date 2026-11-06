@@ -4,12 +4,13 @@
 //! back in the game's format (formats/anim.zig `writeAni`).
 
 const std = @import("std");
+const baseName = @import("doctab.zig").baseName;
 const Allocator = std.mem.Allocator;
 const c = @import("sdl");
 const og = @import("opengorky");
 const anim = og.formats.anim;
-const main = @import("app.zig");
-const App = main.App;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
 const common_archive = @import("store.zig").common_archive;
 const sound_archive = "common/sound.dat";
 
@@ -24,7 +25,7 @@ pub const Player = struct {
     rng: std.Random.DefaultPrng = .init(17),
     /// The last track played alone (music, a line, a video's sound): its stream and
     /// length, for the position shown (null after Stop).
-    track: ?struct { name: main.Name(64), stream: *c.SDL_AudioStream, start_ms: u64, len: f32 } = null,
+    track: ?struct { name: app_mod.Name(64), stream: *c.SDL_AudioStream, start_ms: u64, len: f32 } = null,
 
     /// After a save or discard: `sound.dat` changed, its index is read again on next use.
     pub fn reload(self: *Player) void {
@@ -43,7 +44,7 @@ pub const Player = struct {
     fn ready(self: *Player, app: *App) bool {
         if (self.failed) return false;
         if (self.bank == null) {
-            self.bank = og.audio.sound.Bank.open(app.io, app.gpa, app.dat) catch {
+            self.bank = og.compose.sounds.open(app.io, app.gpa, app.dat) catch {
                 self.failed = true;
                 return false;
             };
@@ -86,10 +87,10 @@ pub const Player = struct {
     pub fn playEffect(self: *Player, app: *App, name: []const u8, alone: bool) void {
         if (!self.ready(app)) return;
         // An imported sound (unsaved) first, then the archive's.
-        var own: ?og.audio.decode.Sound = null;
+        var own: ?og.audio.sound.Sound = null;
         defer if (own) |*o| o.deinit(app.gpa);
         if (app.store.find(sound_archive, name)) |i| if (!app.store.gone(i)) {
-            own = og.audio.decode.decode(app.gpa, app.store.text(i)) catch null;
+            own = og.compose.sounds.decode(app.gpa, app.store.text(i)) catch null;
         };
         const snd = if (own) |*o| o else self.bank.?.effect(std.fs.path.stem(name)) orelse return;
         if (alone) self.playSound(app, name, snd) else self.start(app.gpa, snd);
@@ -98,18 +99,18 @@ pub const Player = struct {
     /// A sound file's bytes (WAV or MP3) now, alone (a line of speech: the one before stops).
     pub fn playBytes(self: *Player, app: *App, name: []const u8, bytes: []const u8) void {
         if (!self.ready(app)) return;
-        var s = og.audio.decode.decode(app.gpa, bytes) catch return;
+        var s = og.compose.sounds.decode(app.gpa, bytes) catch return;
         defer s.deinit(app.gpa);
         self.playSound(app, name, &s);
     }
 
     /// Decoded sound `snd` now, alone, as track `name` (its position kept).
-    pub fn playSound(self: *Player, app: *App, name: []const u8, snd: *const og.audio.decode.Sound) void {
+    pub fn playSound(self: *Player, app: *App, name: []const u8, snd: *const og.audio.sound.Sound) void {
         if (!self.ready(app)) return;
         self.stopAll();
         self.start(app.gpa, snd);
         if (self.streams.items.len == 0) return;
-        var n: main.Name(64) = .{};
+        var n: app_mod.Name(64) = .{};
         n.set(name);
         self.track = .{ .name = n, .stream = self.streams.items[0], .start_ms = c.SDL_GetTicks(), .len = @as(f32, @floatFromInt(snd.frames())) / @as(f32, @floatFromInt(@max(1, snd.rate))) };
     }
@@ -117,10 +118,10 @@ pub const Player = struct {
     /// `voice.dat`'s index (null: no audio files).
     pub fn voiceIndex(self: *Player, app: *App) ?*const og.formats.archive.Archive {
         if (self.bank == null) _ = self.ready(app);
-        return if (self.bank) |*b| &b.voices else null;
+        return if (self.bank) |*b| og.compose.sounds.archiveOf(b, .voices) else null;
     }
 
-    fn start(self: *Player, gpa: Allocator, snd: *const og.audio.decode.Sound) void {
+    fn start(self: *Player, gpa: Allocator, snd: *const og.audio.sound.Sound) void {
         // Finished streams go.
         var k = self.streams.items.len;
         while (k > 0) {
@@ -140,26 +141,13 @@ pub const Player = struct {
 
     /// The `.wav` names of `common/sound.dat` with the imported ones, sorted.
     pub fn names(self: *Player, app: *App, a: Allocator) []const []const u8 {
-        var out: std.ArrayList([]const u8) = .empty;
         // The bank only: listing needs no audio device (opening one can block).
-        if (self.bank == null and !self.failed) self.bank = og.audio.sound.Bank.open(app.io, app.gpa, app.dat) catch blk: {
+        if (self.bank == null and !self.failed) self.bank = og.compose.sounds.open(app.io, app.gpa, app.dat) catch blk: {
             self.failed = true;
             break :blk null;
         };
-        if (self.bank) |*b| for (b.sounds.entries) |e| {
-            if (std.ascii.endsWithIgnoreCase(e.name, ".wav")) out.append(a, e.name) catch {};
-        };
-        for (app.store.files.items, 0..) |f, i| {
-            if (!std.mem.eql(u8, f.archive, sound_archive) or app.store.gone(i)) continue;
-            if (self.bank != null and self.bank.?.sounds.find(f.entry) != null) continue;
-            out.append(a, f.entry) catch {};
-        }
-        std.mem.sort([]const u8, out.items, {}, struct {
-            fn lt(_: void, x: []const u8, y: []const u8) bool {
-                return std.ascii.lessThanIgnoreCase(x, y);
-            }
-        }.lt);
-        return out.items;
+        const base: []const og.formats.archive.Entry = if (self.bank) |*b| og.compose.sounds.archiveOf(b, .sounds).entries else &.{};
+        return app.store.listingOf(a, sound_archive, base, isWav, true);
     }
 
     /// The preview went from frame `prev` (null: the animation just started) to `now`
@@ -238,9 +226,9 @@ pub fn edit(app: *App, file: usize, ai: usize, op: Op) !void {
     const new: ?anim.SoundCue = if (op == .remove) null else cues.items[n];
     const bytes = try anim.writeAni(app.gpa, list.items);
     errdefer app.gpa.free(bytes);
-    // History: "sfinks.ani: atak, кадр 2 Sfattack1.wav" and the changed cue.
+    // History: "sfinks.ani: atak, frame 2 Sfattack1.wav" and the changed cue.
     const entry = app.store.files.items[file].entry;
-    const short = entry[if (std.mem.lastIndexOfScalar(u8, entry, '\\')) |k| k + 1 else 0..];
+    const short = baseName(entry);
     const shown = new orelse old.?;
     var what: std.ArrayList(u8) = .empty;
     defer what.deinit(app.gpa);
@@ -248,4 +236,8 @@ pub fn edit(app: *App, file: usize, ai: usize, op: Op) !void {
     if (old) |o| try what.print(app.gpa, "\n-{s} {d}: {s}", .{ an.name, o.frame - an.first, o.name });
     if (new) |w| try what.print(app.gpa, "\n+{s} {d}: {s}", .{ an.name, w.frame - an.first, w.name });
     try app.store.replaceLabeled(file, bytes, what.items);
+}
+
+fn isWav(name: []const u8) bool {
+    return std.ascii.endsWithIgnoreCase(name, ".wav");
 }

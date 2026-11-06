@@ -1,0 +1,19 @@
+module looks {
+    look grandma {
+        mesh = "grandma";
+        portrait = "grandma";
+        turn_speed = 0.2;
+        walk = [Speed(anim = "walk", speed = 3.6)];
+        idles = [
+            Idle(state = 0, anim = "ryk", weight = 100),
+            Idle(state = 0, anim = "amb1", weight = 100),
+            Idle(state = 0, anim = "amb2", weight = 100),
+        ];
+        slots = [
+            Slot(state = 0, name = "walk", anim = "walk"),
+            Slot(state = 0, name = "long_attack", anim = "atak"),
+            Slot(state = 0, name = "hit", anim = "hit"),
+            Slot(state = 0, name = "death", anim = "death"),
+        ];
+    }
+}

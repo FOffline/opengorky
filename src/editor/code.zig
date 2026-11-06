@@ -1,10 +1,28 @@
 //! Script text editing for the code editor: a UTF-8 buffer with cursor, selection,
 //! line moves, auto-indent and its own undo; line highlighting; the word before the
 //! cursor and completion candidates. The game's bytes (Windows-1251 in the Russian
-//! edition) convert to UTF-8 and back without loss.
+//! edition) convert to UTF-8 and back without loss. The buffer lives in codebuf.zig,
+//! the call and argument scanners in callscan.zig.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const codebuf = @import("codebuf.zig");
+const callscan = @import("callscan.zig");
+
+pub const Buffer = codebuf.Buffer;
+pub const CallPos = callscan.CallPos;
+pub const NamedArg = callscan.NamedArg;
+pub const Scan = callscan.Scan;
+pub const Token = callscan.Token;
+pub const argValue = callscan.argValue;
+pub const argsEnd = callscan.argsEnd;
+pub const callAt = callscan.callAt;
+pub const namedArg = callscan.namedArg;
+pub const nameStart = callscan.nameStart;
+pub const scanTo = callscan.scanTo;
+const skipOver = callscan.skipOver;
+pub const tokenAt = callscan.tokenAt;
+pub const valueOf = callscan.valueOf;
 
 /// Game bytes → UTF-8: Cyrillic letters of Windows-1251 (Russian edition) to their
 /// letters, every other high byte to U+0080…U+00FF, so `toGame` gives the bytes back.
@@ -19,13 +37,23 @@ pub fn fromGame(gpa: Allocator, bytes: []const u8, cyrillic: bool) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-/// UTF-8 → game bytes; characters the edition can't hold become '?'.
+/// UTF-8 → game bytes; typographic quotes, dashes and the ellipsis as ASCII (no game
+/// font draws them), other characters the edition can't hold become '?'.
 pub fn toGame(gpa: Allocator, text: []const u8, cyrillic: bool) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     var it = (std.unicode.Utf8View.init(text) catch return error.BadText).iterator();
     while (it.nextCodepoint()) |cp| try out.append(gpa, switch (cp) {
-        0...0xff => @intCast(cp),
+        // Latin-1 letters would be Cyrillic ones in cp1251 (é → й); fromGame never makes them there.
+        0xa8, 0xb8, 0xc0...0xff => if (cyrillic) '?' else @intCast(cp),
+        0...0xa7, 0xa9...0xb7, 0xb9...0xbf => @intCast(cp),
+        0x2018, 0x2019, 0x201a, 0x2032 => '\'',
+        0x201c, 0x201d, 0x201e, 0x2033 => '"',
+        0x2010...0x2015, 0x2212 => '-',
+        0x2026 => blk: {
+            try out.appendSlice(gpa, "..");
+            break :blk '.';
+        },
         0x410...0x44f => if (cyrillic) @intCast(cp - 0x410 + 0xc0) else '?',
         0x401 => if (cyrillic) 0xa8 else '?',
         0x451 => if (cyrillic) 0xb8 else '?',
@@ -34,711 +62,158 @@ pub fn toGame(gpa: Allocator, text: []const u8, cyrillic: bool) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-pub fn isIdent(ch: u8) bool {
-    return std.ascii.isAlphanumeric(ch) or ch == '_';
+/// A file's bytes → UTF-8: an OpenGorky (OGS) file's are UTF-8 already (`utf8`; one that
+/// is not reads as game bytes and is written back as UTF-8), the game's scripts' the
+/// edition's (fromGame).
+pub fn fromFile(gpa: Allocator, bytes: []const u8, utf8: bool, cyrillic: bool) ![]u8 {
+    if (utf8 and std.unicode.utf8ValidateSlice(bytes)) return gpa.dupe(u8, bytes);
+    return fromGame(gpa, bytes, cyrillic);
 }
 
-pub const Buffer = struct {
-    gpa: Allocator,
-    text: std.ArrayList(u8) = .empty,
-    /// Byte offsets; `anchor` ≠ null: a selection between it and `cursor`.
-    cursor: usize = 0,
-    anchor: ?usize = null,
-    /// Column kept by up/down moves (in characters).
-    want_col: ?usize = null,
-    undo: std.ArrayList(Snap) = .empty,
-    /// Steps undone (Cmd+Shift+Z puts them back); any new change drops them.
-    redo: std.ArrayList(Snap) = .empty,
-    /// Where the closing brackets and quotes typed with their openers are (innermost
-    /// last): typing one there steps over it.
-    closers: [16]usize = undefined,
-    n_closers: usize = 0,
-    /// Typing letters joins one undo step until something else happens.
-    typing: bool = false,
-    changed: bool = false,
-    /// Grows with every change (the code editor checks the text again).
-    version: u32 = 0,
-
-    const Snap = struct { text: []u8, cursor: usize };
-
-    pub fn init(gpa: Allocator, text: []const u8) !Buffer {
-        var b: Buffer = .{ .gpa = gpa };
-        try b.text.appendSlice(gpa, text);
-        return b;
-    }
-
-    pub fn deinit(self: *Buffer) void {
-        for (self.undo.items) |s| self.gpa.free(s.text);
-        self.undo.deinit(self.gpa);
-        dropAll(self.gpa, &self.redo);
-        self.text.deinit(self.gpa);
-    }
-
-    pub fn str(self: *const Buffer) []const u8 {
-        return self.text.items;
-    }
-
-    fn snap(self: *Buffer, typing: bool) !void {
-        if (typing and self.typing) return;
-        self.typing = typing;
-        try self.undo.append(self.gpa, .{ .text = try self.gpa.dupe(u8, self.text.items), .cursor = self.cursor });
-        dropAll(self.gpa, &self.redo);
-        self.version +%= 1;
-    }
-
-    fn dropAll(gpa: Allocator, list: *std.ArrayList(Snap)) void {
-        for (list.items) |x| gpa.free(x.text);
-        list.clearAndFree(gpa);
-    }
-
-    pub fn undoLast(self: *Buffer) !void {
-        try self.step(&self.undo, &self.redo);
-    }
-
-    pub fn redoLast(self: *Buffer) !void {
-        try self.step(&self.redo, &self.undo);
-    }
-
-    /// The text back to the last snapshot of `from`; the current one kept in `to`.
-    fn step(self: *Buffer, from: *std.ArrayList(Snap), to: *std.ArrayList(Snap)) !void {
-        const s = from.pop() orelse return;
-        defer self.gpa.free(s.text);
-        try to.append(self.gpa, .{ .text = try self.gpa.dupe(u8, self.text.items), .cursor = self.cursor });
-        self.text.clearRetainingCapacity();
-        try self.text.appendSlice(self.gpa, s.text);
-        self.cursor = @min(s.cursor, self.text.items.len);
-        self.anchor = null;
-        self.n_closers = 0;
-        self.typing = false;
-        self.changed = true;
-        self.version +%= 1;
-    }
-
-    pub fn selection(self: *const Buffer) ?[2]usize {
-        const a = self.anchor orelse return null;
-        if (a == self.cursor) return null;
-        return .{ @min(a, self.cursor), @max(a, self.cursor) };
-    }
-
-    fn deleteSelection(self: *Buffer) bool {
-        const s = self.selection() orelse return false;
-        self.text.replaceRangeAssumeCapacity(s[0], s[1] - s[0], &.{});
-        self.cursor = s[0];
-        self.anchor = null;
-        self.n_closers = 0;
-        return true;
-    }
-
-    /// Types `s` (replacing the selection).
-    pub fn insert(self: *Buffer, s: []const u8) !void {
-        const word = s.len == 1 and isIdent(s[0]);
-        try self.snap(word);
-        _ = self.deleteSelection();
-        try self.text.insertSlice(self.gpa, self.cursor, s);
-        self.shiftClosers(self.cursor, self.cursor, @intCast(s.len));
-        self.cursor += s.len;
-        self.want_col = null;
-        self.changed = true;
-        self.version +%= 1;
-    }
-
-    /// Enter: the new line keeps the indent, one level more after `{`.
-    pub fn newline(self: *Buffer) !void {
-        const t = self.text.items;
-        const ls = lineStart(t, self.cursor);
-        var e = ls;
-        while (e < t.len and (t[e] == ' ' or t[e] == '\t')) e += 1;
-        var buf: [128]u8 = undefined;
-        const indent = t[ls..@min(e, self.cursor)];
-        var n = @min(indent.len, buf.len - 3);
-        @memcpy(buf[0..n], indent[0..n]);
-        const before = std.mem.trimEnd(u8, t[ls..self.cursor], " \t");
-        if (before.len > 0 and before[before.len - 1] == '{') {
-            @memcpy(buf[n..][0..2], "  ");
-            n += 2;
-        }
-        // The game's scripts end lines with CRLF.
-        const crlf = std.mem.indexOf(u8, t, "\r\n") != null;
-        var line: [280]u8 = undefined;
-        const nl: []const u8 = if (crlf) "\r\n" else "\n";
-        @memcpy(line[0..nl.len], nl);
-        @memcpy(line[nl.len..][0..n], buf[0..n]);
-        var len = nl.len + n;
-        // `{|}`: the closer on a line of its own under the opener's indent.
-        const between = before.len > 0 and before[before.len - 1] == '{' and self.cursor < t.len and t[self.cursor] == '}';
-        if (between) {
-            @memcpy(line[len..][0..nl.len], nl);
-            @memcpy(line[len + nl.len ..][0..indent.len], indent[0..@min(indent.len, 128)]);
-            len += nl.len + indent.len;
-        }
-        try self.insert(line[0..len]);
-        if (between) self.cursor -= nl.len + indent.len;
-        self.typing = false;
-        self.n_closers = 0;
-    }
-
-    pub fn backspace(self: *Buffer) !void {
-        try self.snap(false);
-        if (self.deleteSelection()) return;
-        if (self.cursor == 0) return;
-        const t = self.text.items;
-        const p = prevChar(t, self.cursor);
-        // CRLF goes as one; an opener with the closer typed with it, both.
-        const from = if (p > 0 and t[p] == '\n' and t[p - 1] == '\r') p - 1 else p;
-        const pair = self.closerAt() == self.cursor and closerOf(t[from]) == t[self.cursor];
-        self.cut(from, if (pair) self.cursor + 1 else self.cursor);
-    }
-
-    /// Bytes `a..b` removed, the cursor at `a` (after a snapshot).
-    fn cut(self: *Buffer, a: usize, b: usize) void {
-        self.text.replaceRangeAssumeCapacity(a, b - a, &.{});
-        self.shiftClosers(a, b, -@as(isize, @intCast(b - a)));
-        self.cursor = a;
-        self.anchor = null;
-        self.changed = true;
-        self.version +%= 1;
-    }
-
-    /// Alt+Backspace: the word before the cursor; Cmd+Backspace (`line`): the line up to it.
-    pub fn deleteBack(self: *Buffer, line: bool) !void {
-        if (self.selection() != null or self.cursor == 0) return self.backspace();
-        const t = self.text.items;
-        const from = if (line) lineStart(t, self.cursor) else wordLeftPos(t, self.cursor);
-        if (from == self.cursor) return self.backspace();
-        try self.snap(false);
-        self.cut(from, self.cursor);
-    }
-
-    /// Alt+Delete: the word after the cursor.
-    pub fn deleteWordForward(self: *Buffer) !void {
-        if (self.selection() != null) return self.deleteForward();
-        const to = wordRightPos(self.text.items, self.cursor);
-        if (to == self.cursor) return;
-        try self.snap(false);
-        self.cut(self.cursor, to);
-    }
-
-    /// Typed text: a bracket or quote comes with its closer (or wraps the selection), a
-    /// closer typed where its own pair put one steps over it.
-    pub fn typeText(self: *Buffer, s: []const u8) !void {
-        if (s.len != 1) return self.insert(s);
-        const ch = s[0];
-        const t = self.text.items;
-        if (self.selection() == null) if (self.closerAt()) |p| if (p == self.cursor and p < t.len and t[p] == ch) {
-            self.cursor += 1;
-            self.n_closers -= 1;
-            self.typing = false;
-            return;
-        };
-        const cl = closerOf(ch) orelse return self.insert(s);
-        if (self.selection()) |sel| {
-            try self.snap(false);
-            try self.text.insert(self.gpa, sel[1], cl);
-            try self.text.insert(self.gpa, sel[0], ch);
-            self.anchor = sel[0] + 1;
-            self.cursor = sel[1] + 1;
-            self.changed = true;
-            self.version +%= 1;
-            return;
-        }
-        const nx: u8 = if (self.cursor < t.len) t[self.cursor] else '\n';
-        const quote_ok = ch != '"' or ((self.cursor == 0 or !isIdent(t[self.cursor - 1])) and !inString(t, self.cursor));
-        if (isIdent(nx) or nx == '"' or !quote_ok) return self.insert(s);
-        try self.insert(&.{ ch, cl });
-        self.cursor -= 1;
-        // The oldest forgotten when full (stepping over it is only a convenience).
-        if (self.n_closers == self.closers.len) {
-            std.mem.copyForwards(usize, self.closers[0 .. self.closers.len - 1], self.closers[1..]);
-            self.n_closers -= 1;
-        }
-        self.closers[self.n_closers] = self.cursor;
-        self.n_closers += 1;
-    }
-
-    fn closerAt(self: *const Buffer) ?usize {
-        return if (self.n_closers > 0) self.closers[self.n_closers - 1] else null;
-    }
-
-    /// Bytes `a..b` changed by `d` (inserted at `a` = `b`, or removed): closers after
-    /// move, ones inside go.
-    fn shiftClosers(self: *Buffer, a: usize, b: usize, d: isize) void {
-        var k: usize = 0;
-        for (self.closers[0..self.n_closers]) |p| {
-            if (p >= a and p < b) continue;
-            self.closers[k] = if (p >= b) @intCast(@as(isize, @intCast(p)) + d) else p;
-            k += 1;
-        }
-        self.n_closers = k;
-    }
-
-    pub fn wordLeft(self: *Buffer, select: bool) void {
-        self.moveTo(wordLeftPos(self.text.items, self.cursor), select);
-        self.want_col = null;
-    }
-
-    pub fn wordRight(self: *Buffer, select: bool) void {
-        self.moveTo(wordRightPos(self.text.items, self.cursor), select);
-        self.want_col = null;
-    }
-
-    /// Cmd+Up/Down: the text's start or end.
-    pub fn docEdge(self: *Buffer, to_end: bool, select: bool) void {
-        self.moveTo(if (to_end) self.text.items.len else 0, select);
-        self.want_col = null;
-    }
-
-    /// Double click: the word (or run of spaces or signs) at `i` selected.
-    pub fn selectWord(self: *Buffer, i: usize) void {
-        const t = self.text.items;
-        var a = @min(i, t.len);
-        if (a == t.len or t[a] == '\r' or t[a] == '\n') {
-            if (a == 0 or t[a - 1] == '\n') return;
-            a -= 1;
-        }
-        const k = class(t[a]);
-        var b = a;
-        while (a > 0 and class(t[a - 1]) == k) a -= 1;
-        while (b < t.len and class(t[b]) == k) b += 1;
-        self.anchor = a;
-        self.cursor = b;
-        self.want_col = null;
-        self.typing = false;
-    }
-
-    /// Triple click, Cmd+L: line `i` is on selected with its line end (Cmd+L again: the
-    /// next one too).
-    pub fn selectLine(self: *Buffer, i: usize, extend: bool) void {
-        const t = self.text.items;
-        const from = if (extend and self.selection() != null) self.selection().?[0] else lineStart(t, i);
-        const at = if (extend and self.selection() != null) self.cursor else i;
-        self.anchor = from;
-        self.cursor = nextLine(t, lineEnd(t, at));
-        self.want_col = null;
-        self.typing = false;
-    }
-
-    /// The lines the selection (or the cursor) touches: start of the first, past the
-    /// last one's line end.
-    fn lineRange(self: *const Buffer) [2]usize {
-        const t = self.text.items;
-        const s = self.selection() orelse [2]usize{ self.cursor, self.cursor };
-        // A selection ending at a line's start leaves that line out.
-        const last = if (s[1] > s[0] and s[1] == lineStart(t, s[1])) s[1] - 1 else s[1];
-        return .{ lineStart(t, s[0]), nextLine(t, lineEnd(t, last)) };
-    }
-
-    fn eol(self: *const Buffer) []const u8 {
-        return if (std.mem.indexOf(u8, self.text.items, "\r\n") != null) "\r\n" else "\n";
-    }
-
-    /// Bytes `a..b` replaced by `s` with the selection (or the cursor) kept on the same
-    /// text: offsets inside move by `shift`, a selection then covers the new lines whole.
-    fn replaceLines(self: *Buffer, a: usize, b: usize, s: []const u8, shift: isize) !void {
-        const had = self.selection() != null;
-        try self.snap(false);
-        self.text.replaceRangeAssumeCapacity(a, b - a, &.{});
-        try self.text.insertSlice(self.gpa, a, s);
-        const len = self.text.items.len;
-        const move = struct {
-            fn f(p: usize, d: isize, lo: usize, hi: usize) usize {
-                return @intCast(std.math.clamp(@as(isize, @intCast(p)) + d, @as(isize, @intCast(lo)), @as(isize, @intCast(hi))));
-            }
-        }.f;
-        self.cursor = move(self.cursor, shift, 0, len);
-        if (had) self.anchor = move(self.anchor.?, shift, 0, len) else self.anchor = null;
-        self.n_closers = 0;
-        self.want_col = null;
-        self.changed = true;
-        self.version +%= 1;
-    }
-
-    const LineOp = enum { comment, indent, outdent };
-
-    /// Cmd+/ (`//` on the lines, or off when all have it), Tab / Shift+Tab over a
-    /// selection (two spaces in or out).
-    pub fn lines(self: *Buffer, op: LineOp) !void {
-        const t = self.text.items;
-        const r = self.lineRange();
-        var all = true;
-        var it = std.mem.splitScalar(u8, t[r[0]..r[1]], '\n');
-        while (it.next()) |ln| {
-            const body = std.mem.trim(u8, ln, " \t\r");
-            if (body.len > 0 and !std.mem.startsWith(u8, body, "//")) all = false;
-        }
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(self.gpa);
-        var ls = r[0];
-        var shift: isize = 0;
-        const cur_line = lineStart(t, self.cursor);
-        while (ls < r[1]) {
-            const le = lineEnd(t, ls);
-            const nl = nextLine(t, le);
-            const ln = t[ls..le];
-            var ind: usize = 0;
-            while (ind < ln.len and (ln[ind] == ' ' or ln[ind] == '\t')) ind += 1;
-            const blank = ind == ln.len;
-            const before = out.items.len;
-            switch (op) {
-                .comment => if (blank) {
-                    try out.appendSlice(self.gpa, ln);
-                } else if (all) {
-                    const rest = ln[ind + 2 ..];
-                    try out.appendSlice(self.gpa, ln[0..ind]);
-                    try out.appendSlice(self.gpa, if (rest.len > 0 and rest[0] == ' ') rest[1..] else rest);
-                } else {
-                    try out.appendSlice(self.gpa, ln[0..ind]);
-                    try out.appendSlice(self.gpa, "// ");
-                    try out.appendSlice(self.gpa, ln[ind..]);
-                },
-                .indent => {
-                    if (!blank) try out.appendSlice(self.gpa, "  ");
-                    try out.appendSlice(self.gpa, ln);
-                },
-                .outdent => {
-                    const n: usize = if (ind > 0 and ln[0] == '\t') 1 else @min(ind, 2);
-                    try out.appendSlice(self.gpa, ln[n..]);
-                },
-            }
-            if (ls == cur_line) shift = @as(isize, @intCast(out.items.len - before)) - @as(isize, @intCast(ln.len));
-            try out.appendSlice(self.gpa, t[le..nl]);
-            ls = nl;
-            if (nl == le) break;
-        }
-        if (self.selection()) |_| {
-            try self.replaceLines(r[0], r[1], out.items, 0);
-            // The lines whole, selected.
-            self.anchor = r[0];
-            self.cursor = r[0] + out.items.len;
-        } else try self.replaceLines(r[0], r[1], out.items, shift);
-    }
-
-    /// The lines (as normalised: each with its line end) of `a..b`, the last one's line
-    /// end left off when the text ends there without one.
-    fn withEol(self: *Buffer, out: *std.ArrayList(u8), a: usize, b: usize) !void {
-        try out.appendSlice(self.gpa, self.text.items[a..b]);
-        if (b == a or (self.text.items[b - 1] != '\n')) try out.appendSlice(self.gpa, self.eol());
-    }
-
-    /// Alt+Up/Down: the lines swapped with the one above or below.
-    pub fn moveLines(self: *Buffer, down: bool) !void {
-        const t = self.text.items;
-        const r = self.lineRange();
-        if (if (down) r[1] >= t.len else r[0] == 0) return;
-        const o: [2]usize = if (down) .{ r[1], nextLine(t, lineEnd(t, r[1])) } else .{ lineStart(t, r[0] - 1), r[0] };
-        const lo = @min(r[0], o[0]);
-        const hi = @max(r[1], o[1]);
-        const ends_open = hi == t.len and t[hi - 1] != '\n';
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(self.gpa);
-        if (down) {
-            try self.withEol(&out, o[0], o[1]);
-            try self.withEol(&out, r[0], r[1]);
-        } else {
-            try self.withEol(&out, r[0], r[1]);
-            try self.withEol(&out, o[0], o[1]);
-        }
-        if (ends_open) out.shrinkRetainingCapacity(out.items.len - self.eol().len);
-        var other_len: isize = @intCast(o[1] - o[0]);
-        if (o[1] == t.len and t[o[1] - 1] != '\n') other_len += @intCast(self.eol().len);
-        try self.replaceLines(lo, hi, out.items, if (down) other_len else -other_len);
-    }
-
-    /// Shift+Alt+Down, Cmd+Shift+D: the lines copied under themselves, the cursor on the copy.
-    pub fn duplicateLines(self: *Buffer) !void {
-        const t = self.text.items;
-        const r = self.lineRange();
-        const ends_open = r[1] == t.len and (r[1] == r[0] or t[r[1] - 1] != '\n');
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(self.gpa);
-        try self.withEol(&out, r[0], r[1]);
-        const one = out.items.len;
-        try self.withEol(&out, r[0], r[1]);
-        if (ends_open) out.shrinkRetainingCapacity(out.items.len - self.eol().len);
-        try self.replaceLines(r[0], r[1], out.items, @intCast(one));
-    }
-
-    /// Cmd+Shift+K: the lines gone, the cursor's column kept on the line now there.
-    pub fn deleteLines(self: *Buffer) !void {
-        const t = self.text.items;
-        var r = self.lineRange();
-        // The last line has no line end of its own: the one before it goes instead.
-        if (r[1] == t.len and r[0] > 0 and (r[1] == r[0] or t[r[1] - 1] != '\n')) {
-            r[0] -= 1;
-            if (r[0] > 0 and t[r[0] - 1] == '\r') r[0] -= 1;
-        }
-        const col = colOf(t, self.cursor);
-        try self.snap(false);
-        self.cut(r[0], r[1]);
-        const nt = self.text.items;
-        self.cursor = posAtCol(nt, lineStart(nt, r[0]), col);
-    }
-
-    /// Cmd+Enter (`above`: Cmd+Shift+Enter): a new line under (over) this one, the cursor there.
-    pub fn openLine(self: *Buffer, above: bool) !void {
-        const t = self.text.items;
-        if (above) {
-            const ls = lineStart(t, self.cursor);
-            self.moveTo(ls, false);
-            var e = ls;
-            while (e < t.len and (t[e] == ' ' or t[e] == '\t')) e += 1;
-            var buf: [256]u8 = undefined;
-            const ind = t[ls..@min(e, ls + 128)];
-            const nl = self.eol();
-            @memcpy(buf[0..ind.len], ind);
-            @memcpy(buf[ind.len..][0..nl.len], nl);
-            const k = ind.len;
-            try self.insert(buf[0 .. ind.len + nl.len]);
-            self.cursor = ls + k;
-        } else {
-            self.moveTo(lineEnd(t, self.cursor), false);
-            try self.newline();
-        }
-    }
-
-    pub fn deleteForward(self: *Buffer) !void {
-        try self.snap(false);
-        self.n_closers = 0;
-        if (self.deleteSelection()) return;
-        if (self.cursor >= self.text.items.len) return;
-        var n = nextChar(self.text.items, self.cursor);
-        if (self.text.items[self.cursor] == '\r' and n < self.text.items.len and self.text.items[n] == '\n') n += 1;
-        self.text.replaceRangeAssumeCapacity(self.cursor, n - self.cursor, &.{});
-        self.changed = true;
-    }
-
-    fn moveTo(self: *Buffer, pos: usize, select: bool) void {
-        if (select) {
-            if (self.anchor == null) self.anchor = self.cursor;
-        } else self.anchor = null;
-        self.cursor = pos;
-        self.typing = false;
-        self.n_closers = 0;
-    }
-
-    pub fn left(self: *Buffer, select: bool) void {
-        if (!select) if (self.selection()) |s| return self.moveTo(s[0], false);
-        var p = prevChar(self.text.items, self.cursor);
-        if (p > 0 and self.text.items[p] == '\n' and self.text.items[p - 1] == '\r') p -= 1;
-        self.moveTo(p, select);
-        self.want_col = null;
-    }
-
-    pub fn right(self: *Buffer, select: bool) void {
-        if (!select) if (self.selection()) |s| return self.moveTo(s[1], false);
-        var n = nextChar(self.text.items, self.cursor);
-        if (self.cursor < self.text.items.len and self.text.items[self.cursor] == '\r' and n < self.text.items.len and self.text.items[n] == '\n') n += 1;
-        self.moveTo(n, select);
-        self.want_col = null;
-    }
-
-    pub fn home(self: *Buffer, select: bool) void {
-        const t = self.text.items;
-        const ls = lineStart(t, self.cursor);
-        var e = ls;
-        while (e < t.len and (t[e] == ' ' or t[e] == '\t')) e += 1;
-        // First the indent's end, then the line's start.
-        self.moveTo(if (self.cursor == e) ls else e, select);
-        self.want_col = null;
-    }
-
-    pub fn end(self: *Buffer, select: bool) void {
-        self.moveTo(lineEnd(self.text.items, self.cursor), select);
-        self.want_col = null;
-    }
-
-    /// Up (`dl` < 0) or down by lines, keeping the column.
-    pub fn vertical(self: *Buffer, dl: i32, select: bool) void {
-        const t = self.text.items;
-        const col = self.want_col orelse colOf(t, self.cursor);
-        var ls = lineStart(t, self.cursor);
-        var k = dl;
-        while (k < 0) : (k += 1) {
-            if (ls == 0) break;
-            ls = lineStart(t, ls - 1);
-        }
-        while (k > 0) : (k -= 1) {
-            const e = lineEnd(t, ls);
-            if (e >= t.len) break;
-            ls = nextLine(t, e);
-        }
-        self.moveTo(posAtCol(t, ls, col), select);
-        self.want_col = col;
-    }
-
-    pub fn selectAll(self: *Buffer) void {
-        self.anchor = 0;
-        self.cursor = self.text.items.len;
-    }
-
-    /// The identifier being typed before the cursor.
-    pub fn wordBefore(self: *const Buffer) []const u8 {
-        const t = self.text.items;
-        var a = self.cursor;
-        while (a > 0 and isIdent(t[a - 1])) a -= 1;
-        return t[a..self.cursor];
-    }
-
-    /// Bytes `a..b` replaced with `s`, the cursor after it (one undo step).
-    pub fn replaceSpan(self: *Buffer, a: usize, b: usize, s: []const u8) !void {
-        try self.snap(false);
-        self.text.replaceRangeAssumeCapacity(a, b - a, &.{});
-        try self.text.insertSlice(self.gpa, a, s);
-        self.cursor = a + s.len;
-        self.anchor = null;
-        self.changed = true;
-        self.version +%= 1;
-    }
-
-    /// Replaces the word before the cursor with `w` (a chosen completion).
-    pub fn complete(self: *Buffer, w: []const u8) !void {
-        try self.snap(false);
-        const n = self.wordBefore().len;
-        self.text.replaceRangeAssumeCapacity(self.cursor - n, n, &.{});
-        self.cursor -= n;
-        try self.text.insertSlice(self.gpa, self.cursor, w);
-        self.cursor += w.len;
-        self.anchor = null;
-        self.changed = true;
-    }
-
-    /// Replaces the word before the cursor with call `name(args)` (`;` too at a line's
-    /// end) and selects its first argument, to type over.
-    pub fn insertCall(self: *Buffer, name: []const u8, args: []const u8) !void {
-        try self.complete(name);
-        const t = self.text.items;
-        const tail = std.mem.trim(u8, t[self.cursor..lineEnd(t, self.cursor)], " \t").len == 0;
-        if (self.cursor < t.len and t[self.cursor] == '(') return;
-        const open = self.cursor;
-        try self.text.insert(self.gpa, self.cursor, '(');
-        try self.text.insertSlice(self.gpa, self.cursor + 1, args);
-        try self.text.insertSlice(self.gpa, self.cursor + 1 + args.len, if (tail) ");" else ")");
-        self.cursor += 1;
-        if (!self.selectArg(open, 0)) self.cursor = open + 2 + args.len;
-    }
-
-    /// Selects argument `k` of the call whose `(` is at `open`; false if it has none.
-    fn selectArg(self: *Buffer, open: usize, k: usize) bool {
-        const s = argSpan(self.text.items, open, k) orelse return false;
-        self.anchor = s[0];
-        self.cursor = s[1];
-        self.typing = false;
-        return true;
-    }
-
-    /// Tab inside a call's arguments: selects the next one, or goes past `)` (and
-    /// its `;`) after the last. False outside a call.
-    pub fn nextArg(self: *Buffer) bool {
-        const t = self.text.items;
-        const from = if (self.selection()) |s| s[0] else self.cursor;
-        const cp = callAt(t, from) orelse return false;
-        if (self.selectArg(cp.open, cp.arg + 1)) return true;
-        const close = argsEnd(t, cp.open) orelse return false;
-        self.anchor = null;
-        self.cursor = close + 1;
-        if (self.cursor < t.len and t[self.cursor] == ';') self.cursor += 1;
-        return true;
-    }
-};
-
-/// A call around a text offset: its name, the offset of its `(` and which argument
-/// (from 0) the offset is in.
-const CallPos = struct { name: []const u8, open: usize, arg: usize };
-
-/// The innermost call whose arguments hold offset `i` (within the statement).
-pub fn callAt(t: []const u8, i: usize) ?CallPos {
-    var depth: usize = 0;
-    var commas: usize = 0;
-    var k = @min(i, t.len);
-    while (k > 0) {
-        k -= 1;
-        switch (t[k]) {
-            ')' => depth += 1,
-            ',' => if (depth == 0) {
-                commas += 1;
-            },
-            ';', '{', '}' => return null,
-            '(' => {
-                if (depth > 0) {
-                    depth -= 1;
-                    continue;
-                }
-                var a = k;
-                while (a > 0 and t[a - 1] == ' ') a -= 1;
-                const e = a;
-                while (a > 0 and isIdent(t[a - 1])) a -= 1;
-                const name = t[a..e];
-                if (name.len == 0 or std.mem.eql(u8, name, "if") or std.mem.eql(u8, name, "while")) return null;
-                return .{ .name = name, .open = k, .arg = commas };
-            },
-            else => {},
-        }
-    }
-    return null;
+/// UTF-8 → a file's bytes: an OGS file's as they are, a game script's toGame.
+pub fn toFile(gpa: Allocator, text: []const u8, utf8: bool, cyrillic: bool) ![]u8 {
+    if (!utf8) return toGame(gpa, text, cyrillic);
+    if (!std.unicode.utf8ValidateSlice(text)) return error.BadText;
+    return gpa.dupe(u8, text);
 }
 
-/// Offset of the `)` closing the call opened at `open`.
-fn argsEnd(t: []const u8, open: usize) ?usize {
-    var depth: usize = 0;
-    var k = open + 1;
-    while (k < t.len) : (k += 1) switch (t[k]) {
-        '"' => k = std.mem.indexOfScalarPos(u8, t, k + 1, '"') orelse return null,
-        '(' => depth += 1,
-        ')' => {
-            if (depth == 0) return k;
-            depth -= 1;
-        },
-        ';', '{', '}' => return null,
-        else => {},
-    };
-    return null;
-}
+pub const isIdent = @import("model.zig").isIdent;
 
-/// Start and end (spaces trimmed) of argument `n` of the call opened at `open`.
-fn argSpan(t: []const u8, open: usize, n: usize) ?[2]usize {
-    const close = argsEnd(t, open) orelse return null;
-    var depth: usize = 0;
+/// A function's declaration: its name, `(` and `)` (`close` is the text's end when it is
+/// not closed yet), each parameter as declared with its comment (`// …` after it on its
+/// line), and the `//` lines right above it joined (its doc).
+const Header = struct { name: []const u8, open: usize, close: usize, params: []const HeaderParam, doc: []const u8 };
+pub const HeaderParam = struct { decl: []const u8, doc: []const u8 = "" };
+
+/// The declaration whose `function` keyword (OG Script's `fn`) is at `at`; null if none
+/// is there.
+pub fn header(a: Allocator, t: []const u8, at: usize) ?Header {
+    const kw: usize = if (std.mem.startsWith(u8, t[at..], "function")) "function".len else if (std.mem.startsWith(u8, t[at..], "fn ")) "fn".len else return null;
+    var j = at + kw;
+    while (j < t.len and (t[j] == ' ' or t[j] == '\t')) j += 1;
+    const s0 = j;
+    while (j < t.len and isIdent(t[j])) j += 1;
+    if (j == s0 or j == at + kw) return null;
+    const name = t[s0..j];
+    while (j < t.len and (t[j] == ' ' or t[j] == '\t')) j += 1;
+    if (j >= t.len or t[j] != '(') return null;
+    const open = j;
+    var params: std.ArrayList(HeaderParam) = .empty;
     var start = open + 1;
-    var idx: usize = 0;
     var k = open + 1;
-    while (k <= close) : (k += 1) {
-        const ch = t[k];
-        if (ch == '"') {
-            k = std.mem.indexOfScalarPos(u8, t, k + 1, '"') orelse return null;
-            continue;
-        }
-        if (ch == '(') depth += 1;
-        if (ch == ')' and k < close) depth -= 1;
-        if ((ch == ',' and depth == 0) or k == close) {
-            if (idx == n) {
-                var a = start;
-                var e = k;
-                while (a < e and t[a] == ' ') a += 1;
-                while (e > a and t[e - 1] == ' ') e -= 1;
-                if (a == e and k == close and n == 0) return null;
-                return .{ a, e };
-            }
-            idx += 1;
+    const close = while (k < t.len) : (k += 1) switch (t[k]) {
+        ',', ')' => {
+            const d = std.mem.trim(u8, t[start..k], " \t\r\n");
+            if (d.len > 0) params.append(a, .{ .decl = d }) catch {};
             start = k + 1;
-        }
+            if (t[k] == ')') break k;
+        },
+        '/' => if (k + 1 < t.len and t[k + 1] == '/') {
+            const e = lineEnd(t, k);
+            noteParam(a, &params, t[start..k], std.mem.trim(u8, t[k + 2 .. e], " \t/"));
+            start = e;
+            k = e;
+        },
+        '{', ';' => break k,
+        else => {},
+    } else t.len;
+    // Still being typed: the last one so far.
+    if (close == t.len or t[close] != ')') noteParam(a, &params, t[start..close], "");
+    // A comment after `)` on its line is the last parameter's.
+    if (close < t.len and t[close] == ')') {
+        const e = lineEnd(t, close);
+        if (std.mem.indexOf(u8, t[close..e], "//")) |c| if (std.mem.trim(u8, t[close + 1 .. close + c], " \t").len == 0) noteParam(a, &params, "", std.mem.trim(u8, t[close + c + 2 .. e], " \t/"));
     }
-    return null;
+    // The comment lines right above.
+    var doc: std.ArrayList(u8) = .empty;
+    var lines: std.ArrayList([]const u8) = .empty;
+    var ls = lineStart(t, at);
+    while (ls > 0) {
+        const prev = lineStart(t, ls - 1);
+        const l = std.mem.trim(u8, t[prev .. ls - 1], " \t\r");
+        if (!std.mem.startsWith(u8, l, "//")) break;
+        lines.append(a, std.mem.trim(u8, l, " \t/-=*")) catch {};
+        ls = prev;
+    }
+    var n = lines.items.len;
+    while (n > 0) {
+        n -= 1;
+        if (lines.items[n].len == 0) continue;
+        if (doc.items.len > 0) doc.append(a, ' ') catch {};
+        doc.appendSlice(a, lines.items[n]) catch {};
+    }
+    return .{ .name = name, .open = open, .close = close, .params = params.items, .doc = doc.items };
+}
+
+test header {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t = "x;\n// Opens the door.\n//   ---\n// Twice.\nfunction Door(string hero, // who\n  int fast) // 1: run\n{\n};\nfunction F()\n{};\n";
+    const h = header(a, t, std.mem.indexOf(u8, t, "function Door").?).?;
+    try std.testing.expectEqualStrings("Door", h.name);
+    try std.testing.expectEqualStrings("Opens the door. Twice.", h.doc);
+    try std.testing.expectEqual(2, h.params.len);
+    try std.testing.expectEqualStrings("string hero", h.params[0].decl);
+    try std.testing.expectEqualStrings("who", h.params[0].doc);
+    try std.testing.expectEqualStrings("int fast", h.params[1].decl);
+    try std.testing.expectEqualStrings("1: run", h.params[1].doc);
+    try std.testing.expectEqual(')', t[h.close]);
+    const f = header(a, t, std.mem.indexOf(u8, t, "function F").?).?;
+    try std.testing.expectEqual(0, f.params.len);
+    try std.testing.expectEqualStrings("", f.doc);
+    try std.testing.expect(header(a, t, 0) == null);
+    // Not closed yet (being typed).
+    const u = header(a, "function G(int a, str", 0).?;
+    try std.testing.expectEqual(2, u.params.len);
+    // OG Script: `fn`, a parameter's type and default as written.
+    const o = header(a, "// Hit.\nfn OnHit(attacker, amount: int = 2) {}", 8).?;
+    try std.testing.expectEqualStrings("OnHit", o.name);
+    try std.testing.expectEqualStrings("Hit.", o.doc);
+    try std.testing.expectEqualStrings("amount: int = 2", o.params[1].decl);
+}
+
+/// Comment `note` of the parameter written before it on its line: `seg` (still being
+/// written: it ends there), else the last one.
+fn noteParam(a: Allocator, params: *std.ArrayList(HeaderParam), seg: []const u8, note: []const u8) void {
+    const d = std.mem.trim(u8, seg, " \t\r\n");
+    if (d.len > 0) {
+        params.append(a, .{ .decl = d, .doc = note }) catch {};
+    } else if (params.items.len > 0 and params.items[params.items.len - 1].doc.len == 0) params.items[params.items.len - 1].doc = note;
+}
+
+/// The argument being typed at offset `i`: in its string (`quoted`), or a bare word
+/// right after `(` or `,` (a value goes in with its quotes); where its text starts.
+const ArgSlot = struct { call: CallPos, start: usize, quoted: bool };
+
+pub fn argSlot(t: []const u8, i: usize) ?ArgSlot {
+    if (stringArgAt(t, i)) |sa| return .{ .call = sa.call, .start = sa.start, .quoted = true };
+    const cp = callAt(t, i) orelse return null;
+    var a = i;
+    while (a > 0 and isIdent(t[a - 1])) a -= 1;
+    var k = a;
+    while (k > 0 and t[k - 1] == ' ') k -= 1;
+    if (k == 0 or (t[k - 1] != '(' and t[k - 1] != ',')) return null;
+    return .{ .call = cp, .start = a, .quoted = false };
+}
+
+test argSlot {
+    const t = "PlaceActor(\"Sul\", cap";
+    try std.testing.expect(argSlot(t, 15).?.quoted);
+    const s = argSlot(t, t.len).?;
+    try std.testing.expect(!s.quoted and s.call.arg == 1 and s.start == 18);
+    try std.testing.expect(argSlot("x = 1 + ab", 10) == null);
+    try std.testing.expectEqualStrings("Sullivan", argValue("Actor_SetAnimation(\"Sullivan\", \"idle\");", 18, 0).?);
 }
 
 /// A string argument the cursor is in: its call and where the string's text starts
 /// (after the opening `"`), the call need not be closed yet.
-pub const StringArg = struct { call: CallPos, start: usize };
+const StringArg = struct { call: CallPos, start: usize };
 
 pub fn stringArgAt(t: []const u8, i: usize) ?StringArg {
-    const cp = callAt(t, i) orelse return null;
-    var quotes: usize = 0;
-    var last: usize = 0;
-    var k = cp.open + 1;
-    while (k < i) : (k += 1) if (t[k] == '"') {
-        quotes += 1;
-        last = k;
-    };
-    if (quotes % 2 == 0) return null;
-    return .{ .call = cp, .start = last + 1 };
+    const s = scanTo(t, i);
+    if (s.in != .string) return null;
+    return .{ .call = s.call(t, s.n) orelse return null, .start = s.quote + 1 };
 }
 
 /// `text` re-indented by its braces (`indent` a level) with trailing spaces gone;
@@ -801,8 +276,25 @@ pub const View = struct {
     /// Store index of the file and its name.
     file: usize,
     title: []u8,
-    /// First line shown.
+    /// First line shown; the text's line count (measured with `wide`); the vertical bar's
+    /// thumb held (where on it it was taken).
     scroll: usize = 0,
+    lines: usize = 1,
+    vbar: ?f32 = null,
+    /// Points the text is scrolled to the left (long lines); its widest line (measured at
+    /// buffer version `wide_ver`); the horizontal bar's thumb held (where on it it was
+    /// taken); the cursor brought into view sideways at the next draw.
+    hscroll: f32 = 0,
+    wide: f32 = 0,
+    wide_ver: ?u32 = null,
+    hbar: ?f32 = null,
+    follow_x: bool = false,
+    /// The right-click menu open (where), as Go to's pick list when `picks`.
+    menu: ?[2]f32 = null,
+    picks: bool = false,
+    /// Where the pointer rests over the text and since when (ms): its hover tip.
+    rest: [2]f32 = .{ 0, 0 },
+    rest_since: u64 = 0,
     /// Completion list open and its selected line.
     popup: bool = false,
     popup_sel: usize = 0,
@@ -822,8 +314,23 @@ pub const View = struct {
     force: bool = false,
     /// Calls (scene commands in a `.scr`) that nothing registers: line and name, the
     /// first `unknown.len` (warnings, they do not hold Apply back).
-    unknown: [16]struct { line: u32, name: [48]u8, len: u8 } = undefined,
+    /// A hooks file's functions the engine never calls this way (`hook`: no such hook,
+    /// `hook_args`: not its parameters) go in here too; `note`: a message of its own
+    /// (`msg`: a rules row's problem, a value naming nothing, a callback's parameters),
+    /// under its name (in quotes when `quoted`).
+    unknown: [16]struct { line: u32, name: [48]u8, len: u8, kind: enum { call, hook, hook_args, port_only, args, missing, note } = .call, quoted: bool = false, msg: [240]u8 = undefined, msg_len: u8 = 0 } = undefined,
     unknown_n: usize = 0,
+    /// The interface language the messages were made in (a change checks again).
+    checked_lang: @import("text.zig").Lang = .en,
+    /// Hash of the Store's text the buffer was last read from or applied to; `stale`:
+    /// the Store's changed since while the buffer has edits of its own (codeview.refresh).
+    store_hash: u64 = 0,
+    stale: bool = false,
+    /// The Store's key then (codecheck.storeKey).
+    checked_store: [3]usize = .{ 0, 0, 0 },
+    /// A Classic script shown as OG Script (its functions printed from the IR); Apply
+    /// writes it back through the Classic exporter (model.setCode). False: its own text.
+    ogs_view: bool = false,
     /// The find field (Cmd+F) shown and its text; its matches are marked.
     find_open: bool = false,
     find_buf: [64]u8 = undefined,
@@ -842,12 +349,77 @@ pub const View = struct {
         @memcpy(self.find_buf[0..self.find_len], q[0..self.find_len]);
     }
 
+    /// The buffer read again from `bytes` (its file's game text) when they differ from
+    /// what it was last read from or applied to, the cursor and scroll kept. With edits
+    /// of its own it stays, marked `stale` (Apply asks before writing over).
+    pub fn follow(self: *View, bytes: []const u8, utf8_file: bool, cyrillic: bool) !void {
+        const h = std.hash.Wyhash.hash(0, bytes);
+        if (h == self.store_hash) return;
+        if (self.buf.changed) {
+            self.stale = true;
+            return;
+        }
+        const utf8 = try fromFile(self.buf.gpa, bytes, utf8_file, cyrillic);
+        defer self.buf.gpa.free(utf8);
+        try self.reread(utf8, h);
+    }
+
+    /// The buffer as `utf8` (from the Store's text hashed `h`), the cursor kept.
+    pub fn reread(self: *View, utf8: []const u8, h: u64) !void {
+        const gpa = self.buf.gpa;
+        var nb = try Buffer.init(gpa, utf8);
+        nb.cursor = @min(self.buf.cursor, utf8.len);
+        while (nb.cursor > 0 and nb.cursor < utf8.len and utf8[nb.cursor] & 0xc0 == 0x80) nb.cursor -= 1;
+        nb.version = self.buf.version +% 1;
+        self.buf.deinit();
+        self.buf = nb;
+        self.store_hash = h;
+        self.stale = false;
+    }
+
     pub fn destroy(self: *View, gpa: Allocator) void {
         self.buf.deinit();
         gpa.free(self.title);
         gpa.destroy(self);
     }
 };
+
+pub const Func = struct { name: []const u8, at: usize, component: bool = false };
+
+/// `function name(` headers of the text, in order; OG Script's `fn name(`,
+/// `component Name` and `trait Name` too (two words in a row: no Classic text has them).
+pub fn functions(a: Allocator, t: []const u8) []const Func {
+    var out: std.ArrayList(Func) = .empty;
+    var i: usize = 0;
+    while (i < t.len) {
+        if (!isIdent(t[i])) {
+            i += 1;
+            continue;
+        }
+        const at = i;
+        while (i < t.len and isIdent(t[i])) i += 1;
+        const w = t[at..i];
+        const comp = std.mem.eql(u8, w, "component") or std.mem.eql(u8, w, "trait");
+        if (!comp and !std.mem.eql(u8, w, "function") and !std.mem.eql(u8, w, "fn")) continue;
+        // Not one commented out (`// function OnDamage(…)` of the hooks template).
+        if (std.mem.indexOf(u8, t[lineStart(t, at)..at], "//") != null) continue;
+        var j = i;
+        while (j < t.len and (t[j] == ' ' or t[j] == '\t')) j += 1;
+        const s0 = j;
+        while (j < t.len and isIdent(t[j])) j += 1;
+        if (j == s0 or (!comp and (j >= t.len or t[j] != '('))) continue;
+        out.append(a, .{ .name = t[s0..j], .at = at, .component = comp }) catch {};
+    }
+    return out.items;
+}
+
+pub fn currentFn(fns: []const Func, cursor: usize) ?usize {
+    var cur: ?usize = null;
+    for (fns, 0..) |f, k| if (f.at <= cursor) {
+        cur = k;
+    };
+    return cur;
+}
 
 pub fn lineStart(t: []const u8, i: usize) usize {
     var a = @min(i, t.len);
@@ -862,33 +434,54 @@ pub fn lineEnd(t: []const u8, i: usize) usize {
     return e;
 }
 
-fn nextLine(t: []const u8, e: usize) usize {
+/// Offset just past the line holding `i` (after its LF; the text's end on the last line).
+pub fn lineAfter(t: []const u8, i: usize) usize {
+    return if (std.mem.indexOfScalarPos(u8, t, i, '\n')) |e| e + 1 else t.len;
+}
+
+/// Offset of line `n` (1-based; past the last line: the text's end).
+pub fn lineOffset(t: []const u8, n: usize) usize {
+    var at: usize = 0;
+    var l: usize = 1;
+    while (l < n) : (l += 1) at = (std.mem.indexOfScalarPos(u8, t, at, '\n') orelse return t.len) + 1;
+    return at;
+}
+
+test lineOffset {
+    try std.testing.expectEqual(@as(usize, 0), lineOffset("a\nb", 1));
+    try std.testing.expectEqual(@as(usize, 3), lineOffset("a\r\nb", 2));
+    try std.testing.expectEqual(@as(usize, 3), lineOffset("a\nb", 3));
+    try std.testing.expectEqual(@as(usize, 2), lineAfter("a\nb", 0));
+    try std.testing.expectEqual(@as(usize, 3), lineAfter("a\nb", 2));
+}
+
+pub fn nextLine(t: []const u8, e: usize) usize {
     var n = e;
     if (n < t.len and t[n] == '\r') n += 1;
     if (n < t.len and t[n] == '\n') n += 1;
     return n;
 }
 
-fn prevChar(t: []const u8, i: usize) usize {
+pub fn prevChar(t: []const u8, i: usize) usize {
     var p = i -| 1;
     while (p > 0 and t[p] & 0xc0 == 0x80) p -= 1;
     return p;
 }
 
-fn nextChar(t: []const u8, i: usize) usize {
+pub fn nextChar(t: []const u8, i: usize) usize {
     var n = @min(i + 1, t.len);
     while (n < t.len and t[n] & 0xc0 == 0x80) n += 1;
     return n;
 }
 
-fn colOf(t: []const u8, i: usize) usize {
+pub fn colOf(t: []const u8, i: usize) usize {
     var n: usize = 0;
     for (t[lineStart(t, i)..i]) |ch| n += @intFromBool(ch & 0xc0 != 0x80);
     return n;
 }
 
 /// Offset of column `col` (characters) on the line starting at `ls`, or its end.
-fn posAtCol(t: []const u8, ls: usize, col: usize) usize {
+pub fn posAtCol(t: []const u8, ls: usize, col: usize) usize {
     const e = lineEnd(t, ls);
     var i = ls;
     var n: usize = 0;
@@ -898,7 +491,7 @@ fn posAtCol(t: []const u8, ls: usize, col: usize) usize {
 
 /// What a character is for word moves: spaces, a word (letters, digits, `_`, any
 /// non-ASCII), signs, a line end.
-fn class(ch: u8) u2 {
+pub fn class(ch: u8) u2 {
     if (ch == ' ' or ch == '\t') return 0;
     if (ch == '\n' or ch == '\r') return 3;
     if (isIdent(ch) or ch >= 0x80) return 1;
@@ -907,7 +500,7 @@ fn class(ch: u8) u2 {
 
 /// Alt+Left: past the spaces, then the word (or the signs) before `i`; at a line's start,
 /// to the line before's end.
-fn wordLeftPos(t: []const u8, i: usize) usize {
+pub fn wordLeftPos(t: []const u8, i: usize) usize {
     var p = i;
     while (p > 0 and class(t[p - 1]) == 0) p -= 1;
     if (p == 0) return 0;
@@ -917,7 +510,7 @@ fn wordLeftPos(t: []const u8, i: usize) usize {
     return p;
 }
 
-fn wordRightPos(t: []const u8, i: usize) usize {
+pub fn wordRightPos(t: []const u8, i: usize) usize {
     var p = i;
     while (p < t.len and class(t[p]) == 0) p += 1;
     if (p == t.len) return p;
@@ -927,7 +520,7 @@ fn wordRightPos(t: []const u8, i: usize) usize {
     return p;
 }
 
-fn closerOf(ch: u8) ?u8 {
+pub fn closerOf(ch: u8) ?u8 {
     return switch (ch) {
         '(' => ')',
         '[' => ']',
@@ -937,29 +530,30 @@ fn closerOf(ch: u8) ?u8 {
     };
 }
 
-/// Offset `i` is inside a string on its line (an odd number of quotes before it).
-fn inString(t: []const u8, i: usize) bool {
-    var n: usize = 0;
-    var k = lineStart(t, i);
-    while (k < i) : (k += 1) {
-        if (t[k] == '\\') k += 1 else n += @intFromBool(t[k] == '"');
-    }
-    return n % 2 == 1;
+/// Offset `i` is inside a string or a comment.
+pub fn inString(t: []const u8, i: usize) bool {
+    return scanTo(t, i).in != .code;
 }
 
 /// Highlight kinds.
-pub const Kind = enum { plain, keyword, call, string, number, comment, directive };
+/// `path`: an OG Script path (`looks::medusa_2`); `field`: the name a value is given to
+/// (`hp = 120`, a named argument).
+pub const Kind = enum { plain, keyword, call, string, number, comment, directive, path, field };
 
 pub const Span = struct { kind: Kind, start: usize, end: usize };
 
 const keywords = [_][]const u8{ "function", "if", "else", "while", "for", "return", "int", "float", "string", "break", "continue" };
 
-/// Highlight spans of `line` (no newline).
-pub fn highlight(a: Allocator, line: []const u8) ![]Span {
+/// OG Script's words (script/ogs/parser.zig): declarations, statements, values, types.
+pub const ogs_keywords = [_][]const u8{ "module", "use", "component", "trait", "fn", "param", "var", "attach", "import", "injects", "struct", "enum", "if", "else", "while", "for", "in", "return", "break", "continue", "and", "or", "not", "nil", "true", "false", "self", "host", "super", "is", "native", "classic", "int", "float", "string", "bool", "object" };
+
+/// Highlight spans of `line` (no newline); `ogs`: an OG Script line (its words, strings
+/// with `\"` escapes, no `#` directives).
+pub fn highlight(a: Allocator, line: []const u8, ogs: bool) ![]Span {
     var out: std.ArrayList(Span) = .empty;
     var i: usize = 0;
     const trimmed = std.mem.trimStart(u8, line, " \t");
-    if (std.mem.startsWith(u8, trimmed, "#")) {
+    if (!ogs and std.mem.startsWith(u8, trimmed, "#")) {
         try out.append(a, .{ .kind = .directive, .start = 0, .end = line.len });
         return out.items;
     }
@@ -967,24 +561,39 @@ pub fn highlight(a: Allocator, line: []const u8) ![]Span {
         const ch = line[i];
         const s = i;
         var kind: Kind = .plain;
-        if (ch == '/' and i + 1 < line.len and line[i + 1] == '/') {
-            i = line.len;
-            kind = .comment;
-        } else if (ch == '"') {
-            i = if (std.mem.indexOfScalarPos(u8, line, i + 1, '"')) |e| e + 1 else line.len;
+        // Line by line: a `/* */` on one line stays plain (one across lines can't be told).
+        if (ogs and ch == '~' and i + 2 < line.len and std.ascii.isAlphabetic(line[i + 1]) and line[i + 2] == '"') {
+            // A sigil (`~l"01_port"`): its letter as a word of the language, then the string.
+            i += 2;
+            kind = .keyword;
+        } else if (ogs and ch == '"') {
+            i += 1;
+            while (i < line.len and line[i] != '"') i += if (line[i] == '\\' and i + 1 < line.len) 2 else 1;
+            i = @min(line.len, i + 1);
             kind = .string;
+        } else if ((ch == '/' and i + 1 < line.len and line[i + 1] == '/') or ch == '"') {
+            i = skipOver(line, i).?;
+            kind = if (ch == '"') .string else .comment;
         } else if (std.ascii.isDigit(ch) or (ch == '-' and i + 1 < line.len and std.ascii.isDigit(line[i + 1]) and (i == 0 or !isIdent(line[i - 1])))) {
             i += 1;
             while (i < line.len and (std.ascii.isDigit(line[i]) or line[i] == '.')) i += 1;
             kind = .number;
         } else if (isIdent(ch)) {
             while (i < line.len and isIdent(line[i])) i += 1;
+            // OG Script: a path `a::b::c` one word.
+            var path = false;
+            if (ogs) while (i + 2 < line.len and line[i] == ':' and line[i + 1] == ':' and isIdent(line[i + 2])) {
+                path = true;
+                i += 2;
+                while (i < line.len and isIdent(line[i])) i += 1;
+            };
             const w = line[s..i];
             var k = i;
             while (k < line.len and line[k] == ' ') k += 1;
-            kind = for (keywords) |kw| {
+            const called = k < line.len and line[k] == '(';
+            kind = for (if (ogs) &ogs_keywords else &keywords) |kw| {
                 if (std.mem.eql(u8, w, kw)) break .keyword;
-            } else if ((k < line.len and line[k] == '(') or (s == line.len - trimmed.len and isCommand(w))) .call else .plain;
+            } else if (called or (!ogs and s == line.len - trimmed.len and isCommand(w))) .call else if (path) .path else if (ogs and blockKind(line, s, k)) .keyword else if (ogs and k < line.len and line[k] == '=' and !(k + 1 < line.len and line[k + 1] == '=')) .field else .plain;
         } else {
             i = nextChar(line, i);
         }
@@ -995,6 +604,15 @@ pub fn highlight(a: Allocator, line: []const u8) ![]Span {
     return out.items;
 }
 
+/// OG Script: the word at `s` (its line's first, `k` the next non-space after it) opens a
+/// block: a name or a string follows, the line ends with `{` (`fighter medusa {`,
+/// `weapon la: weapons::medusalong {`, `level "01_port" {`).
+fn blockKind(line: []const u8, s: usize, k: usize) bool {
+    if (std.mem.trimStart(u8, line[0..s], " \t").len != 0 or k >= line.len) return false;
+    if (!isIdent(line[k]) and line[k] != '"') return false;
+    return std.mem.endsWith(u8, std.mem.trimEnd(u8, line, " \t\r"), "{");
+}
+
 /// A scene command without arguments (`FADE_OUT`): an all-caps word.
 fn isCommand(w: []const u8) bool {
     if (w.len < 2) return false;
@@ -1002,10 +620,40 @@ fn isCommand(w: []const u8) bool {
     return true;
 }
 
+test "a sigil is highlighted before its string" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const sp = try highlight(arena.allocator(), "LEVEL_Load(~l\"01_port\")", true);
+    try std.testing.expectEqual(Kind.keyword, sp[2].kind);
+    try std.testing.expectEqualStrings("~l", "LEVEL_Load(~l\"01_port\")"[sp[2].start..sp[2].end]);
+    try std.testing.expectEqual(Kind.string, sp[3].kind);
+}
+
+test "OG Script: a block's kind, a path, a field" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const line = "    weapon la: weapons::medusalong {";
+    const sp = try highlight(a, line, true);
+    var kinds: [8]Kind = undefined;
+    var n: usize = 0;
+    for (sp) |x| if (x.kind != .plain) {
+        kinds[n] = x.kind;
+        n += 1;
+    };
+    try std.testing.expectEqualSlices(Kind, &.{ .keyword, .path }, kinds[0..n]);
+    const f = try highlight(a, "    look = looks::medusa_2;", true);
+    try std.testing.expectEqual(Kind.field, f[1].kind);
+    try std.testing.expectEqualStrings("look", "    look = looks::medusa_2;"[f[1].start..f[1].end]);
+    // A call by its path stays a call; `==` names no field.
+    try std.testing.expectEqual(Kind.call, (try highlight(a, "fx::Rocket(a)", true))[0].kind);
+    for (try highlight(a, "if (x == 1)", true)) |x| if (x.start <= 4 and 4 < x.end) try std.testing.expectEqual(Kind.plain, x.kind);
+}
+
 test "scene command without arguments is a call" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const spans = try highlight(arena.allocator(), "  FADE_OUT");
+    const spans = try highlight(arena.allocator(), "  FADE_OUT", false);
     try std.testing.expectEqual(Kind.call, spans[spans.len - 1].kind);
 }
 
@@ -1160,8 +808,14 @@ test "code: highlight and completion" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const sp = try highlight(a, "  if (x) StartScriptlet(\"a\", 12); // go");
+    const sp = try highlight(a, "  if (x) StartScriptlet(\"a\", 12); // go", false);
     try std.testing.expectEqual(Kind.keyword, sp[1].kind);
+    // OG Script: its words, an escaped quote inside a string, no directive.
+    const o = try highlight(a, "fn OnHit(a) { FighterPopup(host, \"\\\"x\\\" // y\"); } // z", true);
+    try std.testing.expectEqual(Kind.keyword, o[0].kind);
+    for (o) |x| if (x.kind == .string) try std.testing.expectEqualStrings("\"\\\"x\\\" // y\"", "fn OnHit(a) { FighterPopup(host, \"\\\"x\\\" // y\"); } // z"[x.start..x.end]);
+    try std.testing.expectEqual(Kind.comment, o[o.len - 1].kind);
+    try std.testing.expect((try highlight(a, "#include x", true))[0].kind != .directive);
     var kinds: [32]Kind = undefined;
     for (sp, 0..) |s, i| kinds[i] = s.kind;
     try std.testing.expect(std.mem.indexOfScalar(Kind, kinds[0..sp.len], .call) != null);
@@ -1188,4 +842,86 @@ test format {
     const out = try format(gpa, src, "  ");
     defer gpa.free(out);
     try std.testing.expectEqualStrings("function init()\r\n{\r\n  if(a){\r\n    b = \"{\"; // }\r\n  }\r\n\r\n  /* {\r\n   kept */\r\n};\r\n", out);
+}
+
+test "code: an OGS file's UTF-8 as it is, a game script's cp1251 both ways" {
+    const gpa = std.testing.allocator;
+    const u = try fromFile(gpa, "// \u{41f}\u{440}\u{438}\u{432}\u{435}\u{442} \u{2014}", true, true);
+    defer gpa.free(u);
+    try std.testing.expectEqualStrings("// \u{41f}\u{440}\u{438}\u{432}\u{435}\u{442} \u{2014}", u);
+    const back = try toFile(gpa, u, true, true);
+    defer gpa.free(back);
+    try std.testing.expectEqualStrings(u, back);
+    const g = try fromFile(gpa, "\xcf\xf0", false, true);
+    defer gpa.free(g);
+    try std.testing.expectEqualStrings("\u{41f}\u{440}", g);
+    const gb = try toFile(gpa, g, false, true);
+    defer gpa.free(gb);
+    try std.testing.expectEqualStrings("\xcf\xf0", gb);
+    // Not UTF-8 in an OGS file: the game bytes' letters, then written as UTF-8.
+    const bad = try fromFile(gpa, "\xcf", true, true);
+    defer gpa.free(bad);
+    try std.testing.expectEqualStrings("\u{41f}", bad);
+}
+
+test "toGame: typographic quotes, dashes and the ellipsis as ASCII; game bytes back" {
+    const gpa = std.testing.allocator;
+    const g = try toGame(gpa, "\u{201c}Hi\u{201d} \u{2014} it\u{2019}s\u{2026} \u{432}", true);
+    defer gpa.free(g);
+    try std.testing.expectEqualStrings("\"Hi\" - it's... \xe2", g);
+    const u = try fromGame(gpa, "\x93\xe2", true);
+    defer gpa.free(u);
+    const back = try toGame(gpa, u, true);
+    defer gpa.free(back);
+    try std.testing.expectEqualStrings("\x93\xe2", back);
+    const l = try toGame(gpa, "\u{e9}", true);
+    defer gpa.free(l);
+    try std.testing.expectEqualStrings("?", l);
+}
+
+/// Whole-word matches of `w` in `t` (case aside).
+const WordUses = struct {
+    t: []const u8,
+    w: []const u8,
+    pos: usize = 0,
+
+    pub fn next(self: *WordUses) ?usize {
+        while (std.ascii.findIgnoreCasePos(self.t, self.pos, self.w)) |i| {
+            self.pos = i + self.w.len;
+            if (i > 0 and isIdent(self.t[i - 1])) continue;
+            if (self.pos < self.t.len and isIdent(self.t[self.pos])) continue;
+            return i;
+        }
+        return null;
+    }
+};
+
+pub fn wordUses(t: []const u8, w: []const u8) WordUses {
+    return .{ .t = t, .w = w };
+}
+
+test wordUses {
+    var it = wordUses("Sullivan; xSullivan sullivan_1 \"SULLIVAN\"", "sullivan");
+    try std.testing.expectEqual(@as(?usize, 0), it.next());
+    try std.testing.expectEqual(@as(?usize, 32), it.next());
+    try std.testing.expectEqual(@as(?usize, null), it.next());
+}
+
+test "View.follow: a view without edits reads the Store's new text; one with edits keeps them, stale" {
+    const gpa = std.testing.allocator;
+    var v: View = .{ .buf = try Buffer.init(gpa, "a();\r\n"), .file = 0, .title = &.{}, .store_hash = std.hash.Wyhash.hash(0, "a();\r\n") };
+    defer v.buf.deinit();
+    v.buf.cursor = 3;
+    try v.follow("a();\r\n", false, false);
+    try std.testing.expectEqualStrings("a();\r\n", v.buf.str());
+    // Changed elsewhere (a page wrote a row): read again, the cursor kept.
+    try v.follow("a();\r\nb();\r\n", false, false);
+    try std.testing.expectEqualStrings("a();\r\nb();\r\n", v.buf.str());
+    try std.testing.expectEqual(@as(usize, 3), v.buf.cursor);
+    try std.testing.expect(!v.stale);
+    // Typed in, then changed elsewhere: the typing stays, marked stale.
+    v.buf.changed = true;
+    try v.follow("c();\r\n", false, false);
+    try std.testing.expectEqualStrings("a();\r\nb();\r\n", v.buf.str());
+    try std.testing.expect(v.stale);
 }

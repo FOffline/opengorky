@@ -1,7 +1,6 @@
 //! Viewer startup: settings, window, archives, subsystems, then the loop.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const flow = @import("flow.zig");
 const viewer_mod = @import("viewer.zig");
 const og = @import("opengorky");
@@ -19,6 +18,7 @@ const Menu = @import("../menu.zig").Menu;
 const config = @import("config.zig");
 const options = @import("options.zig");
 const startup = @import("startup.zig");
+const launcher = @import("launcher.zig");
 const InputScript = @import("input_script.zig").InputScript;
 const input_ctx = @import("input_ctx.zig");
 const main_loop = @import("main_loop.zig");
@@ -36,48 +36,9 @@ fn orWarn(comptime what: []const u8, r: anytype) ?@typeInfo(@TypeOf(r)).error_un
     };
 }
 
-/// The directory has a dat folder, so it looks like a game directory.
-fn isGameDir(io: Io, path: []const u8) bool {
-    if (path.len == 0) return false;
-    var d = Io.Dir.cwd().openDir(io, path, .{}) catch return false;
-    defer d.close(io);
-    var dat = d.openDir(io, "dat", .{}) catch return false;
-    dat.close(io);
-    return true;
-}
-
-/// Windows folder prompt (the macOS bundle asks in its launcher script); null on cancel.
-fn askGameDir(buf: []u8) ?[]const u8 {
-    if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return null;
-    defer c.SDL_Quit();
-    const Pick = struct {
-        buf: []u8,
-        len: usize = 0,
-        done: std.atomic.Value(bool) = .init(false),
-        // May run on another thread (SDL docs).
-        fn picked(ud: ?*anyopaque, list: [*c]const [*c]const u8, _: c_int) callconv(.c) void {
-            const p: *@This() = @ptrCast(@alignCast(ud));
-            if (list != null and list[0] != null) {
-                const path = std.mem.span(list[0]);
-                p.len = @min(path.len, p.buf.len);
-                @memcpy(p.buf[0..p.len], path[0..p.len]);
-            }
-            p.done.store(true, .release);
-        }
-    };
-    var pick: Pick = .{ .buf = buf };
-    c.SDL_ShowOpenFolderDialog(Pick.picked, &pick, null, null, false);
-    while (!pick.done.load(.acquire)) {
-        c.SDL_PumpEvents();
-        c.SDL_Delay(10);
-    }
-    return if (pick.len > 0) buf[0..pick.len] else null;
-}
-
-/// Game directory: from the argument, else from the settings (game_path). The old
-/// separate game_path file (macOS bundle) migrates into the settings once.
-fn resolveGameDir(io: Io, gpa: std.mem.Allocator, opts: *options.Options, cfg: *config.Config, cfg_dir: ?[]const u8, cfg_path: ?[]const u8) !void {
-    if (cfg.game_path_len == 0) if (cfg_dir) |d| {
+/// The old separate game_path file (macOS bundle) migrates into the settings once.
+fn migrateGamePath(io: Io, gpa: std.mem.Allocator, cfg: *config.Config, cfg_dir: ?[]const u8, cfg_path: ?[]const u8) void {
+    if (cfg.gamePath().len == 0) if (cfg_dir) |d| {
         var old_buf: [600]u8 = undefined;
         if (std.fmt.bufPrint(&old_buf, "{s}/game_path", .{d})) |old| {
             if (Io.Dir.cwd().readFileAlloc(io, old, gpa, .limited(4096))) |data| {
@@ -88,24 +49,24 @@ fn resolveGameDir(io: Io, gpa: std.mem.Allocator, opts: *options.Options, cfg: *
             } else |_| {}
         } else |_| {}
     };
+}
+
+/// Game directory: from the argument, else from the settings (game_path).
+fn resolveGameDir(io: Io, a: std.mem.Allocator, opts: *options.Options, cfg: *config.Config, cfg_dir: ?[]const u8, cfg_path: ?[]const u8) !void {
     if (opts.game_dir.len == 0) {
-        if (builtin.os.tag == .windows and opts.play and !isGameDir(io, cfg.gamePath())) {
-            var buf: [1024]u8 = undefined;
-            const dir = askGameDir(&buf) orelse return error.NoGameDir;
-            if (!isGameDir(io, dir)) {
-                _ = c.SDL_ShowSimpleMessageBox(c.SDL_MESSAGEBOX_ERROR, "OpenGorky", "The selected folder has no dat folder.", null);
-                return error.NoGameDir;
-            }
-            cfg.setGamePath(dir);
-            if (cfg_dir != null and cfg_path != null) cfg.save(io, cfg_dir.?, cfg_path.?);
-        }
-        if (cfg.game_path_len == 0) {
+        if (cfg.gamePath().len == 0) {
             std.log.err(options.usage, .{});
             std.log.err("game directory not set: pass it as the first argument or set game_path in {s}", .{cfg_path orelse "opengorky.cfg"});
             return error.Usage;
         }
         opts.game_dir = cfg.gamePath();
-    } else if (opts.play and cfg_dir != null and cfg_path != null and !isGameDir(io, cfg.gamePath()) and isGameDir(io, opts.game_dir)) {
+        // The package chosen in the launcher (its game: this game folder).
+        if (cfg.package.get().len > 0) {
+            if (@import("packages.zig").resolve(io, a, cfg.gamePath(), cfg_dir, cfg.package.get())) |p| {
+                opts.game_dir = p;
+            } else std.log.warn("package {s}: not in the game's or the settings' mods/ folder, the original game starts", .{cfg.package.get()});
+        }
+    } else if (opts.play and cfg_dir != null and cfg_path != null and !og.loaders.isGameDir(io, cfg.gamePath()) and og.loaders.isGameDir(io, opts.game_dir)) {
         // First game launch with a path (or the old path no longer works): remember it.
         cfg.setGamePath(opts.game_dir);
         cfg.save(io, cfg_dir.?, cfg_path.?);
@@ -127,13 +88,91 @@ fn archivesWithImages(io: Io, gpa: std.mem.Allocator, dat: Io.Dir, all: []const 
     return with_images;
 }
 
+/// Project `path`'s manifest (a folder's or a package's, the OGS loader reads it); in `a`.
+fn projectManifest(io: Io, a: std.mem.Allocator, path: []const u8) og.formats.manifest.Manifest {
+    return .parse(og.loaders.ogs.manifestAt(io, a, path));
+}
+
+/// A project (a folder or a package) made for a newer OpenGorky: said (in a window for the
+/// player) and not run.
+fn refuseProject(io: Io, a: std.mem.Allocator, path: []const u8, window: bool) error{EngineTooNew} {
+    const m = projectManifest(io, a, path);
+    const have = og.formats.manifest.engine_version;
+    var buf: [400]u8 = undefined;
+    const msg = std.fmt.bufPrintSentinel(&buf, "This game folder is an OpenGorky project that needs OpenGorky {d}.{d} or newer (this one reads {d}.{d}). Update OpenGorky to play it.", .{ m.engine[0], m.engine[1], have[0], have[1] }, 0) catch "This game folder needs a newer OpenGorky.";
+    std.log.err("{s}", .{msg});
+    if (window) _ = c.SDL_ShowSimpleMessageBox(c.SDL_MESSAGEBOX_ERROR, "OpenGorky", msg.ptr, null);
+    return error.EngineTooNew;
+}
+
+/// An OpenGorky project or package whose installed game is not there (a package handed to a
+/// player names its author's folder): said, with where it was looked for and how to give
+/// it (in a window for the player); null: `path` is no project, the error is another's.
+fn refuseNoGame(io: Io, a: std.mem.Allocator, path: []const u8, window: bool) ?error{NoGame} {
+    if (projectManifest(io, a, path).format != .ogs) return null;
+    const tried = og.loaders.ogs.game_env orelse og.loaders.ogs.manifest.parse(og.loaders.ogs.manifestAt(io, a, path)).game;
+    var buf: [1000]u8 = undefined;
+    const args = .{ std.fs.path.basename(path), tried };
+    const msg = if (systemRussian())
+        std.fmt.bufPrintSentinel(&buf, "Для {s} нужна установленная Gorky 17, а в «{s}» её нет. Укажите папку Gorky 17 в окне запуска (удерживайте Shift при запуске OpenGorky) или задайте её в OPENGORKY_GAME.", args, 0) catch "Для этой игры OpenGorky нужна установленная Gorky 17: укажите её папку в окне запуска."
+    else
+        std.fmt.bufPrintSentinel(&buf, "{s} needs the installed Gorky 17, which is not in \"{s}\". Choose your Gorky 17 folder in the launcher (hold Shift when starting OpenGorky) or set OPENGORKY_GAME to it.", args, 0) catch "This OpenGorky game needs the installed Gorky 17: choose its folder in the launcher.";
+    std.log.err("{s}", .{msg});
+    if (window) _ = c.SDL_ShowSimpleMessageBox(c.SDL_MESSAGEBOX_ERROR, "OpenGorky", msg.ptr, null);
+    return error.NoGame;
+}
+
+/// The player's system language is Russian (SDL's first preferred locale; SDL_PREFERRED_LOCALES
+/// overrides it): refusals before a game is open say it so — there are no game texts yet
+/// to take the edition's language from.
+fn systemRussian() bool {
+    var n: c_int = 0;
+    const locs = c.SDL_GetPreferredLocales(&n) orelse return false;
+    defer c.SDL_free(@ptrCast(locs));
+    return n > 0 and std.mem.eql(u8, std.mem.span(locs[0].*.language), "ru");
+}
+
+/// `--start` (the game open: a test room's battle may be the project's first) as the level's
+/// archive straight in, `--level --heroes --play`; the area to start at ("" none).
+fn startLevel(a: std.mem.Allocator, opts: *options.Options) ![]const u8 {
+    const s = opts.start orelse return "";
+    const st = og.compose.og_build.Start.parse(s) catch {
+        std.log.err("--start {s}: location:<level>[@<area>] | battle:<battle> | test-room:<character>[@<battle>]", .{s});
+        return error.Usage;
+    };
+    const level = switch (st) {
+        .location => |l| l.level,
+        .battle => |b| b,
+        .test_room => |r| if (r.battle.len > 0) r.battle else og.loaders.ogs.firstBattle() orelse {
+            std.log.err("--start {s}: the project has no battle", .{s});
+            return error.Usage;
+        },
+    };
+    opts.archive = try std.fmt.allocPrint(a, "{s}/sprite.dat", .{level});
+    opts.level = true;
+    opts.heroes = true;
+    opts.play = true;
+    return if (st == .location) st.location.area else "";
+}
+
+/// The party on area `area`'s points in order (PlaceActor(hero, area, i) each), the camera
+/// on the selected hero; no such area: warned, they stay where the level put them.
+fn startAt(w: *og.state.world.World, area: []const u8) void {
+    if (og.world.areas.findArea(w, area) == null) return std.log.warn("--start: no area {s} in {s}", .{ area, w.level_name });
+    const heroes = w.party();
+    for (heroes.slice(), 0..) |h, i| og.world.queue.placeAtPoint(w, h, area, @intCast(i), 0);
+    w.out.camera_snap = true;
+}
+
 pub fn run(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var opts = try options.parseArgs(args);
-    // Windows: a double click (no arguments) starts the game, like the macOS and Linux launchers.
-    if (builtin.os.tag == .windows and args.len == 1) opts.play = true;
+    // No arguments (a double click, the macOS app, `opengorky` on Linux without a path):
+    // the game, through the launcher window. Any argument (tests, scripts) skips it.
+    const player = args.len == 1;
+    if (player) opts.play = true;
 
     // Port settings (opengorky.cfg): window output, debugging, messages, game directory.
     var cfg_dir_buf: [512]u8 = undefined;
@@ -141,12 +180,28 @@ pub fn run(init: std.process.Init) !void {
     const cfg_dir = config.configDir(&cfg_dir_buf, init.environ_map);
     const cfg_path = if (cfg_dir) |d| std.fmt.bufPrint(&cfg_path_buf, "{s}/opengorky.cfg", .{d}) catch null else null;
     var cfg: config.Config = if (cfg_dir != null and cfg_path != null) config.Config.load(io, gpa, cfg_dir.?, cfg_path.?) else .{};
-    try resolveGameDir(io, gpa, &opts, &cfg, cfg_dir, cfg_path);
+    migrateGamePath(io, gpa, &cfg, cfg_dir, cfg_path);
+    // Launcher: with `launcher = 1`, Shift held, or no usable game folder.
+    if (opts.launcher_shot != null or (player and (cfg.launcher or launcher.shiftHeld() or !og.loaders.isGameDir(io, cfg.gamePath())))) {
+        const start: launcher.Start = .{ .tab = opts.launcher_tab, .folder = if (opts.game_dir.len > 0) opts.game_dir else null, .shot = opts.launcher_shot };
+        if (try launcher.run(io, gpa, &cfg, cfg_dir, cfg_path, start) == .exit) return;
+    }
+    try resolveGameDir(io, init.arena.allocator(), &opts, &cfg, cfg_dir, cfg_path);
 
-    var game = try Io.Dir.cwd().openDir(io, opts.game_dir, .{});
-    defer game.close(io);
-    var dat = try game.openDir(io, "dat", .{ .iterate = true });
-    defer dat.close(io);
+    // The manifest, adjust.kdt and the rules, then dat (an OpenGorky project: its reader).
+    // An OpenGorky project's installed game: $OPENGORKY_GAME, else the settings' game folder
+    // (a player's), else its manifest's `game`.
+    og.loaders.ogs.game_env = init.environ_map.get("OPENGORKY_GAME") orelse og.loaders.ogs.installedGame(io, cfg.gamePath());
+    var opened = og.loaders.openGame(io, opts.game_dir) catch |err| switch (err) {
+        error.EngineTooNew => return refuseProject(io, init.arena.allocator(), opts.game_dir, player),
+        error.FileNotFound, error.NotDir, error.NoGame => return refuseNoGame(io, init.arena.allocator(), opts.game_dir, player) orelse err,
+        else => return err,
+    };
+    defer opened.close(io);
+    const game = opened.root;
+    const dat = opened.dat;
+    const manifest = opened.manifest;
+    const start_area = try startLevel(init.arena.allocator(), &opts);
     const all_archives = try og.formats.archive.listArchives(io, gpa, dat);
     defer og.formats.archive.freeList(gpa, all_archives);
     var with_images = try archivesWithImages(io, gpa, dat, all_archives);
@@ -156,12 +211,12 @@ pub fn run(init: std.process.Init) !void {
 
     // Mods: `<game>/mods` and `<config dir>/mods`;
     // $OPENGORKY_MODS replaces the second. Without them everything is as in the exe.
-    const mods = og.world.mods;
-    mods.dirs[0] = game.openDir(io, "mods", .{ .iterate = true }) catch null;
+    const mods = og.loaders.world;
+    mods.mod_dirs[0] = game.openDir(io, "mods", .{ .iterate = true }) catch null;
     var mods_buf: [600]u8 = undefined;
     const mods_path = init.environ_map.get("OPENGORKY_MODS") orelse if (cfg_dir) |d| std.fmt.bufPrint(&mods_buf, "{s}/mods", .{d}) catch null else null;
-    if (mods_path) |mp| mods.dirs[1] = Io.Dir.cwd().openDir(io, mp, .{ .iterate = true }) catch null;
-    defer for (&mods.dirs) |*d| if (d.*) |*dd| {
+    if (mods_path) |mp| mods.mod_dirs[1] = Io.Dir.cwd().openDir(io, mp, .{ .iterate = true }) catch null;
+    defer for (&mods.mod_dirs) |*d| if (d.*) |*dd| {
         dd.close(io);
         d.* = null;
     };
@@ -198,9 +253,10 @@ pub fn run(init: std.process.Init) !void {
     }
     var audio_out: ?AudioOut = if (opts.shot == null and !silent) AudioOut.open() else null;
     defer if (audio_out) |*a| a.close();
-    if (audio_out != null) bank = og.audio.sound.Bank.open(io, gpa, dat) catch null;
+    if (audio_out != null or opts.mix_dump != null) bank = og.compose.sounds.open(io, gpa, dat) catch null;
 
-    var v: Viewer = .{ .io = io, .gpa = gpa, .renderer = renderer.?, .dat = dat, .archives = archives, .game_dir = opts.game_dir, .play = opts.play, .shot_run = opts.shot != null, .game = .{ .io = io, .gpa = gpa, .dat = dat, .models = null } };
+    const opener: og.loaders.world.Opener = .{ .io = io, .dat = dat };
+    var v: Viewer = .{ .io = io, .gpa = gpa, .renderer = renderer.?, .dat = dat, .archives = archives, .game_dir = opts.game_dir, .play = opts.play, .shot_run = opts.shot != null or opts.frames > 0, .game = .{ .io = io, .gpa = gpa, .worlds = opener.factory(), .models = null } };
     v.cfg = cfg;
     if (opts.upscale) |u| v.cfg.upscale = u;
     if (opts.fps) |f| v.cfg.fps_limit = f;
@@ -209,23 +265,27 @@ pub fn run(init: std.process.Init) !void {
     v.cfg_dir = cfg_dir;
     v.cfg_path = cfg_path;
     if (cfg.fullscreen and opts.shot == null) _ = c.SDL_SetWindowFullscreen(window, true);
-    og.formats.adjust.load(io, game);
-    @import("../level.zig").grid_mode = @intCast(std.math.clamp(og.formats.adjust.getInt("grid_mode", 0), 0, 2));
+    @import("../level.zig").grid_mode = @intCast(std.math.clamp(og.rules.adjust.int("grid_mode"), 0, 2));
     if (bank) |*b| v.sound = .{ .bank = b, .mixer = &mixer, .params = startup.loadSoundParams() };
     v.shadows = startup.loadShadows();
     v.debug = opts.debug;
-    var models: ?og.actor.model_cache.Cache = og.actor.model_cache.Cache.open(io, gpa, dat) catch null;
+    var models: ?og.actor.model_cache.Cache = og.compose.models.open(io, gpa, dat, null) catch null;
     defer if (models) |*m| m.deinit();
     if (models) |*m| {
         v.models = m;
         v.game.models = m;
     }
-    var fx_view: ?EffectsView = if (models) |*m| EffectsView.init(gpa, renderer.?, m) else null;
+    var textures: ?og.render.textures.Textures = if (models) |*m| og.compose.models.textures(gpa, m) else null;
+    defer if (textures) |*t| t.deinit();
+    if (textures) |*t| v.textures = t;
+    var fx_view: ?EffectsView = if (models) |*m| EffectsView.init(gpa, renderer.?, m, &textures.?) else null;
     defer if (fx_view) |*f| f.deinit();
     if (fx_view) |*f| v.fx = f;
+    // The core's classic_id texts (the UI's too) and the game's classes and heroes as its
+    // records up front; the fonts below take the texts' language.
+    og.loaders.loadCore(io, dat);
     // Dialog font: the engine's (subtitle pages), drawn by the viewer.
-    v.game.loadDialogFont();
-    if (v.game.dialog_font) |*f| v.font = f;
+    v.font = og.loaders.loadDialogFont(io, dat);
     var gui: ?Gui = Gui.load(io, gpa, renderer.?, dat) catch null;
     defer if (gui) |*g| g.deinit();
     if (gui) |*g| v.gui = g;
@@ -241,8 +301,9 @@ pub fn run(init: std.process.Init) !void {
     var saves_buf: [512]u8 = undefined;
     if (menu) |*m| {
         v.menu = m;
-        if (inventory) |*i| m.strings = &i.strings;
+        m.strings = og.loaders.textTable();
         if (v.font) |f| m.text_font = f;
+        if (manifest.format == .ogs) m.mod_title = manifest.title();
         v.saves_dir = config.savesDir(&saves_buf, init.environ_map);
         v.show_debug = v.cfg.debug;
         m.gains = &mixer.gains;
@@ -252,18 +313,10 @@ pub fn run(init: std.process.Init) !void {
         saves_ui.loadOptions(&v, &mixer.gains);
         saves_ui.refreshSlots(&v);
         m.show(.main);
-        // Intro videos before the menu (0x40fd06): logo1, monolith, topware, logo,
-        // presents, intro — whichever exist; Esc skips all.
+        // Intro videos before the menu (0x40fd06; the campaign's startup): logo1,
+        // monolith, topware, logo, presents, intro — whichever exist; Esc skips all.
         if (opts.shot == null) {
-            const intro = [_]og.outbox.VideoRequest{
-                .{ .name = "logo1.avi", .x = -1000, .y = 0, .double = false },
-                .{ .name = "monolith.avi", .x = 0, .y = 0x43, .double = false },
-                .{ .name = "topware.avi", .x = 0, .y = 0x50, .double = false },
-                .{ .name = "logo.avi", .x = 0x50, .y = 0x64, .double = false },
-                .{ .name = "presents.avi", .x = 0xa0, .y = 0xa0, .double = false },
-                .{ .name = "intro.avi", .x = 0, .y = 0x3c, .double = true },
-            };
-            v.video_queue.appendSlice(gpa, &intro) catch {};
+            flow.queueVideos(&v, og.rules.campaign().startup);
             v.nextVideo();
         }
     }
@@ -272,7 +325,7 @@ pub fn run(init: std.process.Init) !void {
     var start: usize = 0;
     if (opts.archive) |name| {
         start = for (archives, 0..) |p, ai| {
-            if (std.mem.eql(u8, p, name)) break ai;
+            if (og.formats.archive.samePath(p, name)) break ai;
         } else {
             std.log.err("archive not found: {s}", .{name});
             return error.ArchiveNotFound;
@@ -281,6 +334,7 @@ pub fn run(init: std.process.Init) !void {
     try v.openArchive(start);
     if (opts.image > 0) try v.step(.image, @intCast(opts.image));
     if (opts.level) v.toggleLevel();
+    if (start_area.len > 0) if (v.level) |*l| startAt(l.world, start_area);
     // --play with a level and --level: straight into the game (UI shots).
     if (opts.play and opts.level and opts.archive != null) if (v.menu) |m| {
         m.open = false;
@@ -291,11 +345,17 @@ pub fn run(init: std.process.Init) !void {
         l.show_objects = !opts.hide_objects;
         l.show_areas = opts.areas;
         if (opts.walk_layer > 0 and l.walk_textures[opts.walk_layer - 1] != null) l.walk_layer = opts.walk_layer;
-        if (opts.walk_layer > 0 and l.world.combat_map != null and l.walk_textures[0] == null) l.show_grid = true;
+        if (opts.walk_layer > 0 and l.world.map.combat != null and l.walk_textures[0] == null) l.show_grid = true;
     }
     camera_view.scrollBy(&v, opts.scroll[0], opts.scroll[1]);
 
-    if (opts.shot) |path| return shot.run(&v, &opts, io, gpa, renderer.?, path);
+    // --frames is a shot run of its own (it used to need --shot; without it the
+    // interactive loop ran forever on the hidden window).
+    if (opts.frames > 0 and v.level == null) {
+        std.log.err("--frames needs a level: pass an archive and --level", .{});
+        return error.Usage;
+    }
+    if (v.shot_run) return shot.run(&v, &opts, io, gpa, renderer.?, opts.shot orelse "");
 
     // Input script (--input): slot load and per-frame steps.
     var script: ?InputScript = null;
@@ -319,7 +379,12 @@ pub fn run(init: std.process.Init) !void {
     }
     // Console commands given (`--console "scene name"`): run once the level is up, as in shots.
     for (opts.console_cmds[0..opts.n_console]) |cmd| @import("commands.zig").consoleRun(&v, cmd);
-    var ev_ctx: input_ctx.Ctx = .{ .window = window.?, .renderer = renderer.?, .io = io, .mixer = &mixer, .opts = &opts };
+    var mix_out: std.ArrayList(f32) = .empty;
+    defer {
+        if (opts.mix_dump) |p| Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = std.mem.sliceAsBytes(mix_out.items) }) catch |err| std.log.warn("mix dump: {t}", .{err});
+        mix_out.deinit(gpa);
+    }
+    var ev_ctx: input_ctx.Ctx = .{ .window = window.?, .renderer = renderer.?, .io = io, .mixer = &mixer, .opts = &opts, .mix_out = if (opts.mix_dump != null) &mix_out else null };
     defer if (opts.perf) {
         var pb: [512]u8 = undefined;
         std.debug.print("{s}\n", .{perf.summary(&pb)});

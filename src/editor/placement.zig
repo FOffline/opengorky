@@ -1,14 +1,18 @@
 //! Placement calls in a level script (`.lev`): PlaceActor(name, x, y[, dir]),
-//! AIEnemyAppear(name, x0, y0, x1, y1), PlaceCombatActor(name, x, y, angle).
-//! Edits change the call text in place, so the rest of the script (comments,
-//! formatting, CRLF) stays byte for byte.
+//! AIEnemyAppear(name, x0, y0, x1, y1), PlaceCombatActor(name, x, y, angle), read from
+//! the level's model (`model.sites`: the IR of its functions). Edits change
+//! the call text in place, so the rest of the script (comments, formatting, CRLF) stays
+//! byte for byte; a lifted call's values go through the exporter (`level.Doc.drop`).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ir = @import("opengorky").script.ir;
+const model = @import("model.zig");
+const App = @import("app.zig").App;
 
 const Func = enum { place_actor, enemy_appear, place_combat };
 
-pub const Span = struct { start: usize, end: usize };
+pub const Span = @import("opengorky").formats.assigns.Span;
 
 pub const Call = struct {
     func: Func,
@@ -49,141 +53,93 @@ const names = [_]struct { s: []const u8, f: Func }{
     .{ .s = "AIEnemyAppear", .f = .enemy_appear },
     .{ .s = "PlaceCombatActor", .f = .place_combat },
 };
+const call_names = [_][]const u8{ names[0].s, names[1].s, names[2].s };
 
-fn isIdent(ch: u8) bool {
-    return std.ascii.isAlphanumeric(ch) or ch == '_';
+/// The placement calls of level script `file` (Store index), from its model's IR;
+/// `error.ScriptBroken` when it does not parse (no model).
+pub fn scan(app: *App, gpa: Allocator, file: usize) !Script {
+    if (!model.parses(app, file)) return error.ScriptBroken;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const text = app.store.text(file);
+    return build(gpa, text, model.sites(app, arena.allocator(), file, &call_names), model.funcSpan(app, file, "restore"));
 }
 
-fn skipSpace(text: []const u8, i: usize) usize {
-    var k = i;
-    while (k < text.len and std.ascii.isWhitespace(text[k])) k += 1;
-    return k;
-}
-
-/// Calls whose arguments are a string then numeric literals; other forms
-/// (`PlaceActor(name, "area", 0)`, expressions) are skipped.
-pub fn scan(gpa: Allocator, text: []const u8) !Script {
+/// `Script` of `text` from its call sites (`model.sites`) and restore()'s span. Calls whose
+/// arguments are a string then numeric literals; other forms (`PlaceActor(name, "area",
+/// 0)`, expressions) are skipped.
+fn build(gpa: Allocator, text: []const u8, sites: []const model.Site, restore: ?ir.Span) !Script {
     var calls: std.ArrayList(Call) = .empty;
     errdefer calls.deinit(gpa);
-    var restore_close: ?usize = null;
-    var depth: usize = 0;
-    var pending: ?[]const u8 = null;
-    var current: ?[]const u8 = null;
-    var i: usize = 0;
-    while (i < text.len) {
-        const ch = text[i];
-        if (ch == '/' and i + 1 < text.len and text[i + 1] == '/') {
-            i = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
-        } else if (ch == '/' and i + 1 < text.len and text[i + 1] == '*') {
-            i = if (std.mem.indexOfPos(u8, text, i + 2, "*/")) |e| e + 2 else text.len;
-        } else if (ch == '"') {
-            i = if (std.mem.indexOfScalarPos(u8, text, i + 1, '"')) |e| e + 1 else text.len;
-        } else if (ch == '{') {
-            if (depth == 0) current = pending;
-            depth += 1;
-            i += 1;
-        } else if (ch == '}') {
-            if (depth > 0) depth -= 1;
-            if (depth == 0) {
-                if (current) |f| if (std.ascii.eqlIgnoreCase(f, "restore")) {
-                    restore_close = i;
-                };
-                current = null;
-            }
-            i += 1;
-        } else if (isIdent(ch) and (i == 0 or !isIdent(text[i - 1]))) {
-            var e = i;
-            while (e < text.len and isIdent(text[e])) e += 1;
-            const word = text[i..e];
-            if (std.mem.eql(u8, word, "function")) {
-                const s = skipSpace(text, e);
-                var k = s;
-                while (k < text.len and isIdent(text[k])) k += 1;
-                pending = text[s..k];
-                i = k;
-                continue;
-            }
-            for (names) |n| if (std.mem.eql(u8, word, n.s)) {
-                if (parseCall(text, i, e, n.f)) |call_| {
-                    var call = call_;
-                    call.in_restore = depth == 1 and current != null and std.ascii.eqlIgnoreCase(current.?, "restore");
-                    call.in_appear = current != null and std.ascii.eqlIgnoreCase(current.?, "CombatEnemiesAppear");
-                    if (call.in_appear and call.func == .enemy_appear) guardsOf(text, &call);
-                    try calls.append(gpa, call);
-                }
-            };
-            i = e;
-        } else i += 1;
-    }
-    return .{ .calls = try calls.toOwnedSlice(gpa), .restore_close = restore_close };
+    for (sites) |st| if (callOf(text, st)) |call| try calls.append(gpa, call);
+    const close: ?usize = if (restore) |sp| if (std.mem.lastIndexOfScalar(u8, text[sp.start..sp.end], '}')) |k| sp.start + k else null else null;
+    return .{ .calls = try calls.toOwnedSlice(gpa), .restore_close = close };
 }
 
-/// The `AIFreeTile(x, y)` calls between the statement before the block holding
-/// `call` and that block's `{`.
-fn guardsOf(text: []const u8, call: *Call) void {
-    var depth: usize = 0;
-    var open = call.stmt.start;
-    while (open > 0) : (open -= 1) {
-        const ch = text[open - 1];
-        if (ch == '}') depth += 1;
-        if (ch == '{') {
-            if (depth == 0) break;
-            depth -= 1;
-        }
-    } else return;
-    open -= 1;
-    var from = open;
-    while (from > 0 and text[from - 1] != ';' and text[from - 1] != '{' and text[from - 1] != '}') from -= 1;
-    var k = from;
-    while (std.mem.indexOfPos(u8, text[0..open], k, "AIFreeTile")) |at| {
-        k = at + "AIFreeTile".len;
-        if (call.n_guards == call.guards.len) return;
-        var g: [2]Span = undefined;
-        for (&g, 0..) |*sp, n| {
-            k = skipSpace(text, k);
-            if (k >= open or text[k] != (if (n == 0) @as(u8, '(') else ',')) return;
-            k = skipSpace(text, k + 1);
-            const a = k;
-            if (k < open and text[k] == '-') k += 1;
-            while (k < open and std.ascii.isDigit(text[k])) k += 1;
-            if (k == a) return;
-            sp.* = .{ .start = a, .end = k };
-        }
-        call.guards[call.n_guards] = g;
-        call.n_guards += 1;
-    }
-}
-
-fn parseCall(text: []const u8, start: usize, name_end: usize, f: Func) ?Call {
-    var k = skipSpace(text, name_end);
-    if (k >= text.len or text[k] != '(') return null;
-    k = skipSpace(text, k + 1);
-    if (k >= text.len or text[k] != '"') return null;
-    const q = std.mem.indexOfScalarPos(u8, text, k + 1, '"') orelse return null;
-    var call: Call = .{ .func = f, .name = text[k + 1 .. q], .stmt = undefined, .in_restore = false };
-    k = q + 1;
-    while (true) {
-        k = skipSpace(text, k);
-        if (k >= text.len) return null;
-        if (text[k] == ')') break;
-        if (text[k] != ',' or call.n_args == call.args.len) return null;
-        k = skipSpace(text, k + 1);
-        const a = k;
-        if (k < text.len and (text[k] == '-' or text[k] == '+')) k += 1;
-        while (k < text.len and (std.ascii.isDigit(text[k]) or text[k] == '.')) k += 1;
-        if (k == a or std.fmt.parseFloat(f32, text[a..k]) == error.InvalidCharacter) return null;
-        call.args[call.n_args] = .{ .start = a, .end = k };
-        call.n_args += 1;
-    }
-    const semi = skipSpace(text, k + 1);
-    const end = if (semi < text.len and text[semi] == ';') semi + 1 else k + 1;
-    call.stmt = .{ .start = start, .end = end };
+fn callOf(text: []const u8, st: model.Site) ?Call {
+    const f = for (names) |n| {
+        if (std.ascii.eqlIgnoreCase(n.s, st.call.text)) break n.f;
+    } else return null;
+    const args = st.call.args;
     const want: usize = switch (f) {
         .place_actor => 2,
         .enemy_appear => 4,
         .place_combat => 3,
     };
-    return if (call.n_args >= want) call else null;
+    if (args.len < 1 + want or args.len > 5 or args[0].kind != .lit or args[0].kind.lit != .string) return null;
+    const q = args[0].span;
+    var call: Call = .{ .func = f, .name = text[q.start + 1 .. q.end - 1], .stmt = .{ .start = st.stmt.start, .end = st.stmt.end }, .in_restore = st.top and std.ascii.eqlIgnoreCase(st.func, "restore") };
+    for (args[1..]) |e| {
+        if (number(e) == null) return null;
+        call.args[call.n_args] = .{ .start = e.span.start, .end = e.span.end };
+        call.n_args += 1;
+    }
+    call.in_appear = std.ascii.eqlIgnoreCase(st.func, "CombatEnemiesAppear");
+    if (call.in_appear and f == .enemy_appear) for (st.conds) |cond| guardsIn(cond, &call);
+    return call;
+}
+
+/// A numeric literal (a minus over one too).
+fn number(e: *const ir.Expr) ?f32 {
+    return switch (e.kind) {
+        .lit => |v| switch (v) {
+            .int => |i| @floatFromInt(i),
+            .float => |x| x,
+            else => null,
+        },
+        .unary => |u| if (u.op == .neg) if (number(u.operand)) |x| -x else null else null,
+        else => null,
+    };
+}
+
+/// The `AIFreeTile(x, y)` calls with integer tiles in condition `e` (the battles check
+/// the tiles a reinforcement stops on), in the text's order.
+fn guardsIn(e: *const ir.Expr, call: *Call) void {
+    switch (e.kind) {
+        .call => |c| {
+            for (c.args) |x| guardsIn(x, call);
+            if (!std.ascii.eqlIgnoreCase(c.text, "AIFreeTile") or c.args.len != 2 or call.n_guards == call.guards.len) return;
+            var g: [2]Span = undefined;
+            for (c.args, &g) |x, *sp| {
+                const v = number(x) orelse return;
+                if (v != @trunc(v) or (x.kind == .lit and x.kind.lit != .int)) return;
+                sp.* = .{ .start = x.span.start, .end = x.span.end };
+            }
+            call.guards[call.n_guards] = g;
+            call.n_guards += 1;
+        },
+        .exe => |x| for (x.args) |a| guardsIn(a, call),
+        .unary => |u| guardsIn(u.operand, call),
+        .binary => |b| {
+            guardsIn(b.lhs, call);
+            guardsIn(b.rhs, call);
+        },
+        .logic => |l| {
+            guardsIn(l.lhs, call);
+            guardsIn(l.rhs, call);
+        },
+        else => {},
+    }
 }
 
 /// `text` without its `//` and `/* */` comments (a name only in a comment is no use).
@@ -239,6 +195,55 @@ pub fn apply(gpa: Allocator, text: []const u8, edits: []Edit) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
+/// `text` with each tile of a battle grid gone from `from` to `to` cells (PlaceActor's,
+/// PlaceCombatActor's, AIEnemyAppear's two and the AIFreeTile guards before it): `split`
+/// (the same floor cut finer or coarser) scales it to the cell over the same spot; a tile
+/// still off the grid (a shrunk one) is moved onto its nearest edge tile (not dropped: the
+/// fighter would stand nowhere; the editor shows where it went). An appearing enemy's
+/// start off the grid (it walks on from there) stays off, as far past the same edge.
+/// Null when nothing changes. `first`: the first call moved off the grid, `moved` their count.
+/// `s`: the calls of `text` (`scan`).
+pub fn remapTiles(gpa: Allocator, text: []const u8, s: Script, from: [2]u32, to: [2]u32, split: bool) !?struct { text: []u8, first: []const u8, moved: usize } {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var edits: std.ArrayList(Edit) = .empty;
+    var guards: std.AutoHashMapUnmanaged(usize, void) = .empty;
+    var first: []const u8 = "";
+    var moved: usize = 0;
+    for (s.calls) |cl| {
+        var off = false;
+        const n_args: usize = if (cl.func == .enemy_appear) 4 else 2;
+        for (0..n_args) |j| {
+            const i = j % 2;
+            const v = cl.arg(text, j) orelse continue;
+            const was: f32 = @floatFromInt(from[i]);
+            const n: f32 = @floatFromInt(to[i]);
+            const nv = if (cl.func == .enemy_appear and j < 2 and (v < 0 or v >= was))
+                (if (v < 0) v else v - was + n)
+            else blk: {
+                const scaled = if (!split) v else if (cl.func == .place_combat) (v + 0.5) * n / was - 0.5 else @floor((v + 0.5) * n / was);
+                const c = std.math.clamp(scaled, 0, n - 1);
+                off = off or c != scaled;
+                break :blk c;
+            };
+            if (nv != v) try edits.append(a, .{ .span = cl.args[j], .text = try std.fmt.allocPrint(a, "{d}", .{nv}) });
+        }
+        // Guards may head a block of several calls: each edited once.
+        for (cl.guards[0..cl.n_guards]) |g| if (!(try guards.getOrPut(a, g[0].start)).found_existing) for (g, 0..) |sp, i| {
+            const v = std.fmt.parseFloat(f32, text[sp.start..sp.end]) catch continue;
+            const n: f32 = @floatFromInt(to[i]);
+            const c = std.math.clamp(if (split) @floor((v + 0.5) * n / @as(f32, @floatFromInt(from[i]))) else v, 0, n - 1);
+            if (c != v) try edits.append(a, .{ .span = sp, .text = try std.fmt.allocPrint(a, "{d}", .{c}) });
+        };
+        if (!off) continue;
+        if (moved == 0) first = cl.name;
+        moved += 1;
+    }
+    if (edits.items.len == 0) return null;
+    return .{ .text = try apply(gpa, text, edits.items), .first = first, .moved = moved };
+}
+
 /// Span removing statement `s` with its line when nothing else is on it.
 pub fn lineOf(text: []const u8, s: Span) Span {
     var a = s.start;
@@ -292,9 +297,44 @@ const sample =
     "    };\r\n" ++
     "};\r\n";
 
+/// `Script` of `sample` compiled as the model does (its functions' IR).
+fn testScan(gpa: Allocator, text: []const u8) !Script {
+    const script = @import("opengorky").script;
+    const import = script.classic.import;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Src = struct {
+        a: Allocator,
+        text: []const u8,
+        fn unit(ctx: *anyopaque, file: []const u8, diag: *script.parser.Diagnostic) anyerror!import.Loaded {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (!std.mem.eql(u8, file, "t.lev")) return error.ScriptNotFound;
+            return .{ .unit = try script.parser.parse(self.a, self.text, diag), .key = file };
+        }
+        fn callee(_: *anyopaque, _: u32) import.Callee {
+            return .{};
+        }
+    };
+    var src: Src = .{ .a = a, .text = text };
+    const env: import.Env = .{ .ctx = &src, .unit = Src.unit, .callee = Src.callee };
+    var diag: script.parser.Diagnostic = .{};
+    const u = try script.parser.parse(a, text, &diag);
+    var fns: std.ArrayList(*const ir.Fn) = .empty;
+    var restore: ?ir.Span = null;
+    for (u.items) |*it| if (it.* == .function) {
+        const func = try a.create(script.object.Func);
+        func.* = .{ .ast = &it.function, .file = "t.lev" };
+        const f = (try import.function(a, a, env, func)).ir;
+        if (std.ascii.eqlIgnoreCase(f.name, "restore")) restore = f.span;
+        try fns.append(a, f);
+    };
+    return build(gpa, text, try model.sitesOf(a, text, "t.lev", fns.items, &call_names), restore);
+}
+
 test "scan: calls, comments, restore depth" {
     const gpa = std.testing.allocator;
-    var s = try scan(gpa, sample);
+    var s = try testScan(gpa, sample);
     defer s.deinit(gpa);
     try std.testing.expectEqual(8, s.calls.len);
     try std.testing.expect(s.calls[6].in_appear and !s.calls[5].in_appear);
@@ -313,7 +353,7 @@ test "scan: calls, comments, restore depth" {
 
 test "apply: move, delete, insert keep the rest" {
     const gpa = std.testing.allocator;
-    var s = try scan(gpa, sample);
+    var s = try testScan(gpa, sample);
     defer s.deinit(gpa);
     const sf2 = s.calls[2];
     var edits = [_]Edit{
@@ -328,4 +368,31 @@ test "apply: move, delete, insert keep the rest" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\"Sullivan\",4,3") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "    PlaceActor(\"new\", 1, 2, 0);\r\n};\r\nfunction update") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "{\r\n    //PlaceActor") != null);
+}
+
+test "remapTiles: a shrunk grid's tiles onto its edge, a split grid's scaled" {
+    const gpa = std.testing.allocator;
+    var s = try testScan(gpa, sample);
+    defer s.deinit(gpa);
+    const r = (try remapTiles(gpa, sample, s, .{ 12, 12 }, .{ 4, 4 }, false)).?;
+    defer gpa.free(r.text);
+    try std.testing.expectEqual(6, r.moved);
+    try std.testing.expectEqualStrings("Sullivan", r.first);
+    try std.testing.expect(std.mem.indexOf(u8, r.text, "PlaceActor(\"Sullivan\",3,3);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.text, "PlaceActor(\"01h_sfinks2\",3,3,5);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.text, "PlaceActor(\"wave\",3,3);") != null);
+    try std.testing.expectEqual(null, try remapTiles(gpa, sample, s, .{ 12, 12 }, .{ 20, 20 }, false));
+    // 12 → 6 cells over the same floor: tile 10 → 5, 4 → 2.
+    const sp = (try remapTiles(gpa, sample, s, .{ 12, 12 }, .{ 6, 6 }, true)).?;
+    defer gpa.free(sp.text);
+    try std.testing.expectEqual(0, sp.moved);
+    try std.testing.expect(std.mem.indexOf(u8, sp.text, "PlaceActor(\"01h_sfinks2\",5,4,5);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sp.text, "PlaceActor(\"Sullivan\",2,1);") != null);
+    // Appearing enemies: an off-grid start stays as far off; targets and guards scale.
+    try std.testing.expect(std.mem.indexOf(u8, sp.text, "AIEnemyAppear(\"late\", 1, 5, 1, 4);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sp.text, "AIFreeTile(2,4)") != null and std.mem.indexOf(u8, sp.text, "AIFreeTile( 2, 5)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sp.text, "PlaceCombatActor(\"01h_pipe1\", 2.5, 3.25,") != null);
+    const sh = (try remapTiles(gpa, sample, s, .{ 12, 12 }, .{ 12, 10 }, false)).?;
+    defer gpa.free(sh.text);
+    try std.testing.expect(std.mem.indexOf(u8, sh.text, "AIEnemyAppear(\"late\", 4, 9, 4, 9);") != null);
 }

@@ -41,9 +41,9 @@ pub fn writeArchive(dir: Io.Dir, path: []const u8, files: []const File) !void {
 /// Common archives: hero Sullivan (`gamestart\`), the CombatLevel base class, scene `move`.
 pub fn writeCommon(dir: Io.Dir) !void {
     try writeArchive(dir, "common/other.dat", &.{
-        .{ "gamestart\\Sullivan.hro", "int hp; int nameID; int avoidEnumerate;\nfunction init() { hp = 100; };" },
+        .{ "gamestart\\Sullivan.hro", "int hp; int classic_id; int outside_party;\nfunction init() { hp = 100; };" },
         .{ "classes\\combatlevel.s", "string backLevel;" },
-        .{ "classes\\vest.s", "int nameID; int place; string Owner;\nfunction init() { nameID = 77; };" },
+        .{ "classes\\vest.s", "int classic_id; int place; string Owner;\nfunction init() { classic_id = 77; };" },
         // A scene that moves to 01_b (LOADLEVEL) and continues there.
         .{ "scriptlets\\move.scr", "LOADLEVEL(\"01_b\")\nFADE_OUT()\n" },
         // Mod-only scene commands (no shipped scene uses them).

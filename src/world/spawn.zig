@@ -4,21 +4,25 @@ const std = @import("std");
 const vec = @import("../vec.zig");
 const actor_mod = @import("../actor.zig");
 const fields = @import("../fields.zig");
-const og_adjust = @import("../formats.zig").adjust;
+const og_adjust = @import("../rules.zig").adjust;
 const object = @import("../script.zig").object;
 const effects_mod = @import("../effects.zig");
 const Object = object.Object;
+const hooks = @import("../state.zig").hooks;
 const world = @import("../state.zig").world;
 const World = world.World;
 const model_cache = actor_mod.model_cache;
+const start = @import("start.zig");
 
 /// Morph (0x42b5a0): the actor fades and after morf_life2 (50) ticks gets the new class
 /// (`applyMorph`); glow and fade-in are `effects.Morph`.
 pub fn morphActor(self: *World, o: *Object, class_file: []const u8, mesh: []const u8, idle: []const u8) !void {
     const a = world.actorOf(o);
     const ar = self.rt.arena();
-    a.morph = .{ .class = try ar.dupe(u8, class_file), .mesh = try ar.dupe(u8, mesh), .idle = try ar.dupe(u8, idle) };
-    a.morph_left = @intCast(@max(0, og_adjust.getInt("morf_life2", 50)));
+    // OpenGorky, no model given: the block's own (`mesh`).
+    const model = if (mesh.len == 0 and self.block_item != null) start.morphMesh(self, class_file) orelse "" else mesh;
+    a.morph = .{ .class = try ar.dupe(u8, class_file), .mesh = try ar.dupe(u8, model), .idle = try ar.dupe(u8, idle) };
+    a.morph_left = @intCast(@max(0, og_adjust.int("morf_life2")));
     a.morph_due = false;
     const p = fields.pos(o);
     const ang = fields.modelAngle(fields.angle(o)) + a.angle_offset;
@@ -76,15 +80,26 @@ pub fn releaseRemoved(self: *World) void {
 /// Change an actor's class (`.mtm` = fighter class): animations and vars from its init(),
 /// model `mesh`, then the animation `idle` once.
 pub fn applyMorph(self: *World, o: *Object, class_file: []const u8, mesh: []const u8, idle: []const u8) !void {
-    const cls = self.rt.loadClass(class_file) catch |err| {
-        std.log.warn("morph {s}: {t}", .{ class_file, err });
-        return;
-    };
     const a = world.actorOf(o);
-    a.mappings.clearRetainingCapacity();
-    try self.rt.morph(o, cls);
+    // An OpenGorky project: the archetype block the converter made of the `.mtm`.
+    if (self.block_item != null) {
+        const t = start.morphTarget(self, class_file) orelse return std.log.warn("morph {s}: no such archetype", .{class_file});
+        a.mappings.clearRetainingCapacity();
+        try start.morphInto(self, o, t);
+    } else {
+        const cls = self.rt.loadClass(class_file) catch |err| {
+            std.log.warn("morph {s}: {t}", .{ class_file, err });
+            return;
+        };
+        a.mappings.clearRetainingCapacity();
+        try self.rt.morph(o, cls);
+    }
     _ = try self.rt.callIfExists(o, "init", &.{});
-    if (mesh.len > 0) if (o.getVar("meshFile")) |v| {
+    _ = try hooks.on(self, o, "Object.OnCreate", &.{});
+    // OpenGorky: its native abilities read again from the new class's row (its scripted
+    // and data's components stay after them).
+    if (@import("../rules.zig").og) try @import("../core.zig").natives.reattach(&self.rt, o);
+    if (mesh.len > 0) if (o.getVar("mesh")) |v| {
         v.value = .{ .string = try self.rt.arena().dupe(u8, mesh) };
     };
     // 0x426503: an idle of the new class, then the morph's animation once over it, raw
@@ -149,13 +164,13 @@ pub fn tickBind(self: *World, o: *Object, a: *actor_mod.Actor, bd: *actor_mod.Ac
 }
 
 /// Held ball (0x4a5cac): while `hold` > 0 it sits at the midpoint of the owner's
-/// "kula1" and "kula2" points (the hands) in the current frame.
+/// `hold_links` ("kula1" and "kula2": the hands) in the current frame.
 pub fn aimBalls(self: *World) void {
     for (self.effects.projectiles.items) |*pr| {
         if (pr.hold == 0) continue;
         const o = pr.owner orelse continue;
-        const a = linkWorld(self, o, "kula1") orelse continue;
-        const b = linkWorld(self, o, "kula2") orelse continue;
+        const a = linkWorld(self, o, pr.hold_links[0]) orelse continue;
+        const b = linkWorld(self, o, pr.hold_links[1]) orelse continue;
         pr.pos = .{ (a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5 };
     }
 }

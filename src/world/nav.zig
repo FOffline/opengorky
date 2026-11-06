@@ -8,7 +8,7 @@ const std = @import("std");
 const value = @import("../script.zig").value;
 const num = @import("../num.zig");
 const Allocator = std.mem.Allocator;
-const WalkMap = @import("../formats.zig").level_files.WalkMap;
+const WalkMap = @import("../core.zig").map.WalkMap;
 
 const cell: f32 = WalkMap.cell_size;
 

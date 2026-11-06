@@ -4,7 +4,7 @@ const std = @import("std");
 const walk_mod = @import("../world.zig").walk;
 const scenes = @import("../scene.zig").scenes;
 const areas = @import("../world.zig").areas;
-const level_files = @import("../formats.zig").level_files;
+const level_files = @import("../core.zig").map;
 const runtime = @import("../script.zig").runtime;
 const world_mod = @import("../state.zig").world;
 const World = world_mod.World;
@@ -29,6 +29,11 @@ pub fn biFadeIn(ctx: *anyopaque, _: *Runtime, _: *Object, args: []const Value) a
     w.scene.fade = 1;
     w.scene.fade_target = 0;
     return .zero;
+}
+
+/// GetLevel() (OpenGorky, not in the exe): the current level's name ("05_laboratory").
+pub fn biGetLevel(ctx: *anyopaque, _: *Runtime, _: *Object, _: []const Value) anyerror!Value {
+    return .{ .string = args_mod.worldOf(ctx).level_name };
 }
 
 /// HeroInArea("area") (0x4c0230): any hero stands in the area (by background point).
@@ -89,7 +94,7 @@ pub fn biDisableHeroes(ctx: *anyopaque, _: *Runtime, _: *Object, args: []const V
     const w = args_mod.worldOf(ctx);
     if (try args_mod.deferAfterLoad(w, .disable_heroes, args)) return .zero;
     for (w.rt.objects.items) |o| {
-        if (world_mod.isHero(o) and o.getInt("avoidEnumerate") == 0 and !std.ascii.eqlIgnoreCase(o.name, w.selected_hero)) o.enabled = false;
+        if (world_mod.isHero(o) and o.getInt("outside_party") == 0 and !std.ascii.eqlIgnoreCase(o.name, w.selected_hero)) o.enabled = false;
     }
     return .zero;
 }
@@ -98,7 +103,7 @@ pub fn biDisableHeroes(ctx: *anyopaque, _: *Runtime, _: *Object, args: []const V
 /// (+0x24a40; Medusa stays disabled until she joins).
 pub fn biEnableHeroes(ctx: *anyopaque, _: *Runtime, _: *Object, _: []const Value) anyerror!Value {
     const w = args_mod.worldOf(ctx);
-    for (w.rt.objects.items) |o| if (world_mod.isHero(o) and o.getInt("avoidEnumerate") == 0) {
+    for (w.rt.objects.items) |o| if (world_mod.isHero(o) and o.getInt("outside_party") == 0) {
         o.enabled = true;
     };
     return .zero;
@@ -110,27 +115,35 @@ pub fn biGuiPanorama(ctx: *anyopaque, _: *Runtime, _: *Object, args: []const Val
 }
 
 pub fn biAdvInc(ctx: *anyopaque, _: *Runtime, _: *Object, _: []const Value) anyerror!Value {
-    if (advVar(ctx)) |l| l.setInt("advVar", l.getInt("advVar") + 1);
+    if (advVar(ctx)) |l| l.setInt("progress", l.getInt("progress") + 1);
     return .zero;
 }
 
 pub fn biAdvDec(ctx: *anyopaque, _: *Runtime, _: *Object, _: []const Value) anyerror!Value {
-    if (advVar(ctx)) |l| l.setInt("advVar", l.getInt("advVar") - 1);
+    if (advVar(ctx)) |l| l.setInt("progress", l.getInt("progress") - 1);
     return .zero;
 }
 
 pub fn biAdvGet(ctx: *anyopaque, _: *Runtime, _: *Object, _: []const Value) anyerror!Value {
-    return .{ .int = if (advVar(ctx)) |l| l.getInt("advVar") else 0 };
+    return .{ .int = if (advVar(ctx)) |l| l.getInt("progress") else 0 };
 }
 
 pub fn biAdvSet(ctx: *anyopaque, _: *Runtime, _: *Object, args: []const Value) anyerror!Value {
-    if (args.len > 0) if (advVar(ctx)) |l| l.setInt("advVar", args[0].toInt());
+    if (args.len > 0) if (advVar(ctx)) |l| l.setInt("progress", args[0].toInt());
     return .zero;
 }
 
 /// DialogInit("name", "file.dlg"): show a whole dialog (lines one by one).
 pub fn biDialogInit(ctx: *anyopaque, _: *Runtime, _: *Object, args: []const Value) anyerror!Value {
     try scenes.startDialog(args_mod.worldOf(ctx), args_mod.argString(args, 0), args_mod.argString(args, 1));
+    return .zero;
+}
+
+/// OpenGorky's `scene::Dialog(~d"lab-after_teleport")`: DialogInit of that one dialog
+/// (its Classic name, which nothing reads, is the dialog's).
+pub fn biDialog(ctx: *anyopaque, _: *Runtime, _: *Object, args: []const Value) anyerror!Value {
+    const d = args_mod.argString(args, 0);
+    try scenes.startDialog(args_mod.worldOf(ctx), d, d);
     return .zero;
 }
 

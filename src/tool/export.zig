@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 const og = @import("opengorky");
 const archive = og.formats.archive;
 const sprite = og.formats.sprite;
-const Image = og.formats.image.Image;
+const Image = og.image.Image;
 const resource = og.formats.resource;
 
 pub fn exportImages(io: Io, gpa: Allocator, dir: Io.Dir, stem: []const u8, kind: resource.Kind, data: []const u8) !usize {

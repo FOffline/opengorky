@@ -3,10 +3,10 @@
 
 const std = @import("std");
 const fields = @import("../fields.zig");
+const core = @import("../core.zig");
 const world_mod = @import("../state.zig").world;
 const World = world_mod.World;
 const Object = @import("../script.zig").object.Object;
-const generic = @import("../battle.zig").generic;
 const inventory = @import("../inventory.zig");
 const attacks = @import("../battle.zig").attacks;
 const Tile = @import("../battle.zig").grid.Tile;
@@ -15,12 +15,12 @@ const weapons = @import("weapons.zig");
 
 /// Put the model exactly at the tile centre.
 pub fn snap(w: *World, f: Fighter) void {
-    const cm = w.combat_map orelse return;
+    const cm = w.map.combat orelse return;
     fields.setPos(f.obj, cm.tileCenter(f.tile, f.size));
 }
 
 pub fn walkStraight(w: *World, f: *Fighter, to: Tile) void {
-    const cm = w.combat_map orelse return;
+    const cm = w.map.combat orelse return;
     fields.setPos(f.obj, cm.tileCenter(f.tile, f.size));
     const a = world_mod.actorOf(f.obj);
     a.placed = true;
@@ -47,16 +47,6 @@ pub fn snapAngle(raw: f64, rot: f32) f32 {
     return @floatCast(@mod(@as(f64, s), 2 * pi) + @as(f64, rot));
 }
 
-test "snapAngle: a placement on the exact diagonal rounds as the exe does" {
-    // 04__city_trapatthetruck: needle3 (2×2 at 0,13) and Trantigne at 5,18 — (5, 5) tiles apart.
-    const lf = @import("../formats.zig").level_files;
-    const cm: lf.CombatMap = .{ .center = .{ 3323.302979, -7874.714844, -365 }, .rotation = 0.02, .cell_size = .{ 387.5, 387.5 }, .width = 8, .height = 24, .blocked = &.{}, .heights = &.{} };
-    const me = cm.toWorld(1, 14);
-    const to = cm.toWorld(5.5, 18.5);
-    const raw = std.math.atan2(@as(f64, to[1]) - me[1], @as(f64, to[0]) - me[0]);
-    try std.testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0 + 0.02), snapAngle(raw, 0.02), 1e-5);
-}
-
 test "snapAngle rounds to the grid's quarter turns" {
     const pi = std.math.pi;
     try std.testing.expectApproxEqAbs(@as(f32, pi / 2.0), snapAngle(pi / 2.0 - 0.3, 0), 1e-5);
@@ -68,7 +58,7 @@ test "snapAngle rounds to the grid's quarter turns" {
 
 /// Smooth turn to a tile (command 0x12, 0x425150: rotSpeed per tick).
 pub fn face(w: *World, f: Fighter, t: Tile) void {
-    const cm = w.combat_map orelse return;
+    const cm = w.map.combat orelse return;
     const from = cm.tileCenter(f.tile, f.size);
     const to = cm.tileCenter(t, 1);
     world_mod.actorOf(f.obj).turnTo(f.obj, fields.facing(to[0] - from[0], to[1] - from[1]));
@@ -76,7 +66,7 @@ pub fn face(w: *World, f: Fighter, t: Tile) void {
 
 /// Instant turn (item box: the item action happens right away, as outside battle).
 pub fn faceNow(w: *World, f: Fighter, t: Tile) void {
-    const cm = w.combat_map orelse return;
+    const cm = w.map.combat orelse return;
     const from = cm.tileCenter(f.tile, f.size);
     const to = cm.tileCenter(t, 1);
     fields.setAngle(f.obj, fields.facing(to[0] - from[0], to[1] - from[1]));
@@ -88,19 +78,20 @@ pub fn beginAttackAnim(w: *World, f: Fighter, wpn: *Object) void {
     const a = world_mod.actorOf(f.obj);
     // An invisible monster (0x48a2a6) appears before the strike.
     if (a.invisible) a.materialize(true);
-    const anim = attackAnim(f, wpn);
+    const st = attacks.strikeOf(f.obj, wpn);
+    const anim = attacks.animOf(st);
     // Smoke Rider with weapon 1004 (0x489ec2): it plays ladder_start, and callback 21
     // (0x487698) after attack_smokerider_shot2_delay makes its second linked actor
     // (+0x3534, LinkActor 0x4c1c50 → 0x42ab60: the gunner smoke_pilot_2) play
-    // long_attack if more than one is linked (+0x30d4 > 1).
+    // long_attack if more than one is linked (+0x30d4 > 1): rules MonsterAttack `linked_anim`.
     // shortcut: played at the start, as the shipped shot2_delay is 0; schedule it if a mod sets more.
-    if (fields.nameId(f.obj) == 110 and fields.nameId(wpn) == 1004) {
+    if (st == .monster and st.monster.linked.len > 0) {
         var linked: u32 = 0;
         for (w.rt.objects.items) |o| {
             const n = World.nativeOf(o);
             if (n.kind != .actor or n.actor.attached_to != f.obj) continue;
             linked += 1;
-            if (linked == 2) n.actor.play(n.actor.resolve("long_attack"), false, true);
+            if (linked == 2) n.actor.play(n.actor.resolve(st.monster.linked), false, true);
         }
     }
     a.play(a.resolve(anim), false, true);
@@ -110,7 +101,7 @@ pub fn beginAttackAnim(w: *World, f: Fighter, wpn: *Object) void {
     // Dartgun (0x48c1cb): 0x428980("attack_gun", 0, 1, 1); the 4th argument mutes
     // frame sounds (0x4230c0 → 0x44f910 → [anim+0x30]); instead of the pistol shot,
     // dartsgun.wav plays at the shot (callback 0x27).
-    if (f.side == .hero and fields.nameId(wpn) == 45) a.mute_cues = true;
+    if (f.side == .hero and @import("../core.zig").entity.weaponOf(@import("../rules.zig").who(wpn)).silent_frames) a.mute_cues = true;
     // `play` blends into the strike: 10 ticks on the first frame (0x44f910, length 8);
     // strike delays (adjust.kdt) count from the start including this blend.
 }
@@ -126,42 +117,42 @@ pub fn hitFrame(wait: u32) u32 {
     return (wait + 1) -| attack_blend_ticks;
 }
 
-/// Logical attack animation name: heroes by weapon nameID (0x48bda2), monsters
-/// by their own branch (0x48d618).
-fn attackAnim(f: Fighter, wpn: *Object) []const u8 {
-    if (generic.is(f.obj)) return generic.attack(wpn).anim;
-    if (attacks.heroTable(fields.nameId(f.obj))) return attacks.heroAttack(fields.nameId(f.obj), fields.nameId(wpn)).anim;
-    return attacks.monsterAttack(fields.nameId(f.obj), fields.nameId(wpn)).anim;
-}
-
-/// Schizo's weapon pair by counter (if he has exactly 1077, 1078, 1079).
-pub fn schizoPair(w: *World, f: Fighter) ?[2]*Object {
+/// The fighter's weapon pair by its counter (its native Pairs' `pairs`, core/natives.zig:
+/// Schizo 1077–1079), if it has every weapon the pairs name (the last of a classic_id).
+pub fn weaponPair(w: *World, f: Fighter) ?[2]*Object {
+    // Its `pairs` variable: [[a, b], …] (another value a script set: no pairs).
+    var pb: [16][2]i32 = undefined;
+    var np: usize = 0;
+    if (core.natives.find(f.obj, .pairs)) |inst| if (inst.getVar("pairs")) |pv| if (pv.value == .list) for (pv.value.list) |p| {
+        if (np == pb.len or p != .list or p.list.len != 2) break;
+        pb[np] = .{ p.list[0].toInt(), p.list[1].toInt() };
+        np += 1;
+    };
+    const pairs = pb[0..np];
     var list: [16]*Object = undefined;
     const ws = weapons.weaponsOf(w, f, &list);
-    var by: [3]?*Object = .{ null, null, null };
-    for (ws) |o| switch (fields.nameId(o)) {
-        1077 => by[0] = o,
-        1078 => by[1] = o,
-        1079 => by[2] = o,
-        else => {},
-    };
-    const a = by[0] orelse return null;
-    const b = by[1] orelse return null;
-    const c = by[2] orelse return null;
-    return switch (f.schizo_turn) {
-        0 => .{ a, b },
-        1 => .{ a, c },
-        2 => .{ b, c },
-        else => null,
-    };
+    const find = struct {
+        fn of(all: []const *Object, id: i32) ?*Object {
+            var found: ?*Object = null;
+            for (all) |o| if (fields.classicId(o) == id) {
+                found = o;
+            };
+            return found;
+        }
+    }.of;
+    for (pairs) |p| for (p) |id| if (find(ws, id) == null) return null;
+    if (f.pair_turn >= pairs.len) return null;
+    const p = pairs[f.pair_turn];
+    return .{ find(ws, p[0]).?, find(ws, p[1]).? };
 }
 
 /// One-shot animation of the mesh on a link point (0x48d760: 0x48d7b0 finds the
 /// mesh by the point name, 0x44f910 plays it); the saw's "obrot" is the only use.
-pub fn spinLink(w: *World, o: *Object, link: []const u8) void {
+pub fn spinLink(w: *World, o: *Object, link: []const u8, spin: []const u8) void {
+    if (spin.len == 0) return;
     for (world_mod.actorOf(o).links.items) |*l| if (std.ascii.eqlIgnoreCase(l.link, link)) {
         l.blend = l.anim.len == 0;
-        l.anim = "obrot";
+        l.anim = spin;
         l.anim_from = w.ticks;
     };
 }

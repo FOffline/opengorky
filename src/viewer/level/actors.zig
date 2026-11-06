@@ -9,9 +9,8 @@ const layer_mod = @import("layer.zig");
 const level_view = @import("../level.zig");
 const LevelView = level_view.LevelView;
 const og = @import("opengorky");
-const lf = og.formats.level_files;
 const render_layer = og.render.layer;
-const Image = og.formats.image.Image;
+const Image = og.image.Image;
 const world_mod = og.state.world;
 const World = world_mod.World;
 const c = @import("sdl");
@@ -33,11 +32,10 @@ fn iceTexture(self: *LevelView, o: *og.script.object.Object) ?Image {
     const frozen = b.fighters.items[fi].frozen > 0 and b.fighters.items[fi].alive();
     if (!self.ice_loaded) {
         self.ice_loaded = true;
-        if (self.models) |m| for (&self.ice, 0..) |*im, k| {
+        if (self.textures) |m| for (&self.ice, 0..) |*im, k| {
             var buf: [40]u8 = undefined;
-            const path = std.fmt.bufPrint(&buf, "gfx_3d\\textures\\{d}.3df", .{k + 1}) catch continue;
-            const bytes = m.readFile(path) catch continue;
-            im.* = og.formats.tex3df.decode(self.gpa, bytes) catch null;
+            const path = std.fmt.bufPrint(&buf, "textures/{d}.3df", .{k + 1}) catch continue;
+            im.* = m.texture(self.gpa, path);
         };
     }
     const gop = self.ice_level.getOrPut(self.gpa, o) catch return null;
@@ -55,11 +53,11 @@ fn iceTexture(self: *LevelView, o: *og.script.object.Object) ?Image {
 /// shocked fighter (0x496d2c, case 1 of 0x496d10: (0.5, 0.5, 1), range
 /// attack_shocker_light_range 600·aS — 0x496de6, at height attack_shocker_light_level
 /// 500·aS — 0x496d3f).
-fn dynamicLights(self: *LevelView, static: []const lf.Omni) ![]const lf.Omni {
+fn dynamicLights(self: *LevelView, static: []const og.core.map.Omni) ![]const og.core.map.Omni {
     const w = self.world;
     const e = &w.effects;
     const as = w.actorScale();
-    var list: std.ArrayList(lf.Omni) = .empty;
+    var list: std.ArrayList(og.core.map.Omni) = .empty;
     const a = self.frame_arena.allocator();
     try list.appendSlice(a, static);
     for (e.lights.items) |l| try list.append(a, .{ .pos = l.pos, .color = l.color, .range = l.range });
@@ -69,7 +67,7 @@ fn dynamicLights(self: *LevelView, static: []const lf.Omni) ![]const lf.Omni {
         const n = World.nativeOf(o);
         if (n.kind != .actor or !n.actor.placed or n.actor.fx != .shock) continue;
         const p = og.fields.pos(o);
-        try list.append(a, .{ .pos = .{ p[0], p[1], p[2] + og.formats.adjust.getFloat("attack_shocker_light_level", 500) * as }, .color = .{ 0.5, 0.5, 1 }, .range = og.formats.adjust.getFloat("attack_shocker_light_range", 600) * as });
+        try list.append(a, .{ .pos = .{ p[0], p[1], p[2] + n.actor.shock_light[1] * as }, .color = .{ 0.5, 0.5, 1 }, .range = n.actor.shock_light[0] * as });
     }
     return list.items;
 }
@@ -81,7 +79,7 @@ fn itemFlash(self: *LevelView, o: *og.script.object.Object) f32 {
     if (w.battle != null or w.scene.cutscene or self.ui_modal) return 1;
     if (o.getInt("visible") == 0) return 1;
     const p = og.fields.pos(o);
-    const range = og.formats.adjust.getFloat("flash_range", 1700) * self.world.actorScale();
+    const range = og.rules.adjust.float("flash_range") * self.world.actorScale();
     var near = false;
     const heroes = w.party();
     for (heroes.slice()) |h| {
@@ -92,8 +90,8 @@ fn itemFlash(self: *LevelView, o: *og.script.object.Object) f32 {
     }
     if (!near) return 1;
     const t = og.num.toF32(w.ticks) / og.state.world.tick_hz;
-    const lo = og.formats.adjust.getFloat("flash_min", 0.4);
-    return lo + (1 - lo) * @abs(@sin(t * og.formats.adjust.getFloat("flash_speed", 4)));
+    const lo = og.rules.adjust.float("flash_min");
+    return lo + (1 - lo) * @abs(@sin(t * og.rules.adjust.float("flash_speed")));
 }
 /// A `classType` 5 fighter (factory 0x4bc6c0 → class 0x4bcf70, table 0x50df40) is
 /// not drawn: its draw +0x50 is an empty `ret` (0x4bcf90). These are the monitors
@@ -109,8 +107,9 @@ fn sidelined(self: *LevelView, o: *og.script.object.Object) bool {
 }
 
 fn unseenFighter(o: *og.script.object.Object) bool {
-    const v = o.getVar("classType") orelse return false;
-    return v.value == .int and v.value.int == 5 and o.getVar("charSize") != null;
+    // A monitor (rules Abilities `monitor`: invisible in battle).
+    if (o.getVar("battle_class") == null or o.getVar("footprint_tiles") == null) return false;
+    return og.core.modules.abilityRow(o).monitor;
 }
 /// Actor passes (0x42a2e0, 0x42a620, 0x4dc700): transparency, materialisation
 /// (v ≥ 0.6 — model at alpha v, else only the glow (0.2v, 0.3v, v)), ice over a
@@ -145,13 +144,14 @@ const LayerSink = struct {
         const frames = effectFrames(s.self, s.models, b.name) orelse return;
         const d = s.models.effect(b.name) orelse return;
         // Modes 3 and 5 don't occur in the batch; opaque draws as alpha.
-        const blend: render_layer.Layer.BillboardBlend = switch (d.blend) {
+        // A material's blend (no exe billboard here sets one), else additive or the `.dsc`'s.
+        const blend: render_layer.Layer.BillboardBlend = if (b.blend) |m| m else if (b.add) .add else switch (d.blend) {
             .add => .add,
             .alpha, .opaque_ => .alpha,
             else => .screen,
         };
         const cam = s.self.world.cam;
-        s.layer.billboard(cam, effects_view.billboardCorners(cam, b.pos, b.half), frames[b.frame % frames.len], b.alpha, b.rgb, blend);
+        s.layer.billboard(cam, effects_view.billboardCorners(cam, b.pos, b.half), frames[b.frame % frames.len], b.alpha, b.rgb, blend, b.program, b.k);
         s.drew.* = true;
     }
 };
@@ -184,11 +184,10 @@ fn effectFrames(self: *LevelView, models: *og.actor.model_cache.Cache, name: []c
     if (self.effect_frames.get(key)) |f| return if (f.len > 0) f else null;
     const d = models.effect(name) orelse return null;
     var list: std.ArrayList(Image) = .empty;
-    for (d.frames.items) |f| {
+    for (d.frames) |f| {
         var buf: [160]u8 = undefined;
-        const path = std.fmt.bufPrint(&buf, "gfx_3d\\effects\\{s}\\{s}", .{ name, f }) catch continue;
-        const bytes = models.readFile(path) catch continue;
-        const img = og.formats.tex3df.decode(self.gpa, bytes) catch continue;
+        const path = std.fmt.bufPrint(&buf, "effects/{s}/{s}", .{ name, f }) catch continue;
+        const img = (self.textures orelse break).texture(self.gpa, path) orelse continue;
         list.append(self.gpa, img) catch break;
     }
     const owned = list.toOwnedSlice(self.gpa) catch return null;
@@ -199,9 +198,8 @@ fn effectFrames(self: *LevelView, models: *og.actor.model_cache.Cache, name: []c
 fn currentTexture(self: *LevelView) ?Image {
     if (!self.current_loaded) {
         self.current_loaded = true;
-        if (self.models) |m| if (m.readFile("gfx_3d\\textures\\current.3df")) |bytes| {
-            self.current_tex = og.formats.tex3df.decode(self.gpa, bytes) catch null;
-        } else |_| {};
+        var tb: [128]u8 = undefined;
+        if (self.textures) |m| self.current_tex = m.texture(self.gpa, std.fmt.bufPrint(&tb, "textures/{s}", .{og.core.modules.ui().effects.shock}) catch "");
     }
     return self.current_tex;
 }
@@ -211,7 +209,8 @@ fn weaponInHand(self: *LevelView, o: *og.script.object.Object, model: *const og.
     const models = self.models orelse return null;
     if (world_mod.actorOf(o).scene_weapon) |sw| {
         const wm = models.get(sw.mesh) orelse return null;
-        return holdOn(model, wm, if (sw.two_hands) "two_hands" else "one_hand");
+        const holds = og.core.modules.ui().holds;
+        return holdOn(model, wm, if (sw.two_hands) holds.two_hands else holds.one_hand);
     }
     const b = &(self.world.battle orelse return null);
     for (b.fighters.items) |f| {
@@ -222,9 +221,10 @@ fn weaponInHand(self: *LevelView, o: *og.script.object.Object, model: *const og.
         // the player's request: one pose for all weapons, no grip, so the weapon hung
         // backwards. During a counterattack the stance is already combat — drawn.
         if (f.defending and world_mod.actorOf(o).state == 4) return null;
-        if (!og.inventory.equipment.weaponVisible(og.fields.nameId(o), og.fields.nameId(wpn))) return null;
+        if (!og.inventory.equipment.weaponVisible(o, wpn)) return null;
         const wm = models.get(og.fields.meshFile(wpn)) orelse return null;
-        return holdOn(model, wm, if (wpn.getInt("two_handed") == 1) "two_hands" else "one_hand");
+        const holds = og.core.modules.ui().holds;
+        return holdOn(model, wm, if (wpn.getInt("two_handed") == 1) holds.two_hands else holds.one_hand);
     }
     return null;
 }
@@ -258,7 +258,7 @@ fn linkedMeshes(self: *LevelView, o: *og.script.object.Object, model: *const og.
         if (n.kind != .actor or n.actor.attached_to != o or !rider.enabled or n.deleted) continue;
         const lp = n.actor.link_point orelse continue;
         const m = models.get(og.fields.meshFile(rider)) orelse continue;
-        out.append(a, .{ .model = m, .link = lp, .frame = n.actor.frameIn(m) }) catch return out.items;
+        out.append(a, .{ .model = m, .link = lp, .frame = n.actor.drawFrame(m) }) catch return out.items;
     }
     return out.items;
 }
@@ -293,7 +293,7 @@ pub fn drawActors(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void {
     const src = depth.depthSource(self);
     var pt = perf.now();
     layer.begin(scroll, src);
-    layer.light = if (self.level.lights) |lt| .{ .ambient = lt.ambient, .directional = lt.directional_color, .omni = lt.omni } else .{};
+    layer.light = if (self.backdrop.lights) |lt| .{ .ambient = lt.ambient, .directional = lt.directional_color, .omni = lt.omni } else .{};
     layer.light.omni = try dynamicLights(self, layer.light.omni);
     // z pass (0x420686): z-frames of visible objects with `zbufFile` over the
     // background, so actors behind an open gate hide; frame = cur_frame % frames.
@@ -305,9 +305,9 @@ pub fn drawActors(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void {
         const n = World.nativeOf(o);
         if (n.kind != .animation and n.kind != .active_animation) continue;
         if (!o.enabled or n.deleted or !n.visible) continue;
-        const spz = self.spzFrames(o.getString("zbufFile")) orelse continue;
+        const spz = self.spzFrames(o.getString("depth_sprite")) orelse continue;
         const frames = spz.sprite.frames;
-        const k: usize = @intCast(@mod(o.getInt("cur_frame"), @as(i32, @intCast(frames.len))));
+        const k: usize = @intCast(@mod(o.getInt("frame"), @as(i32, @intCast(frames.len))));
         layer.overlayDepth(frames[k], o.getInt("pos_x"), o.getInt("pos_y"), src);
     }
     perf.add(.layer_begin, pt);
@@ -316,7 +316,7 @@ pub fn drawActors(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void {
     const scale = self.world.actorScale() * self.debug.scale_tweak;
     // Shadows (0x4206dc, 0x42097e): light `shadowLight` from .lts; off with
     // disable_shadows or a light below the floor.
-    if (self.shadows) if (self.level.lights) |lt| {
+    if (self.shadows) if (self.backdrop.lights) |lt| {
         for (self.world.rt.objects.items) |o| {
             if (!drawnActor(self, o)) continue;
             const n = World.nativeOf(o);
@@ -367,17 +367,17 @@ pub fn drawActors(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void {
         // RegisterExtraBody (0x42a138): each extra mesh in the actor's place, the main mesh's
         // shift (+0x28) added to its own; not `still` — in the actor's animation with its own
         // player's transition (0x4233d5 → 0x44f910). The screen box takes them in (0x42a9da).
-        for (&n.actor.extra_bodies) |*slot| if (slot.*) |*eb| if (models.get(eb.mesh)) |em| {
+        for (&n.actor.extra_bodies, 0..) |*slot, si| if (slot.*) |*eb| if (models.get(eb.mesh)) |em| {
             const shifted = try self.frame_arena.allocator().create(og.actor.model_cache.Model);
             var ep = pl;
             ep.attach = null;
             ep.extra = &.{};
             ep.frame = 0;
             const em_posed = if (eb.still) em else blk: {
-                const to = n.actor.frameIn(em);
+                const to = n.actor.drawFrame(em);
                 eb.last_frame = to;
                 ep.frame = to;
-                break :blk try place.posedState(self, eb, n.actor.blendWeight(), to, em, &ep);
+                break :blk try place.posedState(self, .{ .o = o, .slot = @intCast(si) }, eb.mesh.ptr, eb, n.actor.blendWeight(), to, em, &ep);
             };
             shifted.* = em_posed.*;
             for (&shifted.mesh.center, raw.mesh.center) |*cc, mc| cc.* += mc;
@@ -408,8 +408,8 @@ pub fn drawActors(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void {
     layer.canvas.flush(layer_mod.rasterPool(self.io));
     perf.add(.models, pt);
     pt = perf.now();
-    if (self.shadows) if (self.level.lights) |lt| {
-        layer.compositeShadow(self.world.cam, lt.shadow_intensity, depth.shadowBias(self, src));
+    if (self.shadows) if (self.backdrop.lights) |lt| {
+        layer.compositeShadow(self.world.cam, lt.shadow_intensity, depth.shadowBias(self, src), layer_mod.rasterPool(self.io));
         any = true;
     };
     perf.add(.shadow_mix, pt);
@@ -436,10 +436,17 @@ pub fn drawActors(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void {
     self.n_tex_regions = cur.len;
     n = layer_mod.mergeRects(up[0..n]);
     for (up[0..n]) |u| try layer_mod.uploadRect(tex, layer.canvas.img.pixels, layer.canvas.img.width, u);
-    if (layer.glow_used) if (self.glow_tex) |gt|
-        try layer_mod.uploadRect(gt, layer.glow.pixels, layer.glow.width, .{ .x0 = 0, .y0 = 0, .x1 = layer.glow.width, .y1 = layer.glow.height });
-    if (layer.screen_used) if (self.screen_tex) |st|
-        try layer_mod.uploadRect(st, layer.screen.pixels, layer.screen.width, .{ .x0 = 0, .y0 = 0, .x1 = layer.screen.width, .y1 = layer.screen.height });
+    // Additive textures: what they drew now and what they held before (erased).
+    if (layer.glow_used) if (self.glow_tex) |gt| {
+        const u = self.glow_rect.join(layer.canvas.add_dirty);
+        if (!u.isEmpty()) try layer_mod.uploadRect(gt, layer.glow.pixels, layer.glow.width, u);
+        self.glow_rect = layer.canvas.add_dirty;
+    };
+    if (layer.screen_used) if (self.screen_tex) |st| {
+        const u = self.screen_rect.join(layer.canvas.add_dirty);
+        if (!u.isEmpty()) try layer_mod.uploadRect(st, layer.screen.pixels, layer.screen.width, u);
+        self.screen_rect = layer.canvas.add_dirty;
+    };
     try present(self, r, tex, layer);
 }
 /// Model layer, glow and screen billboards over the frame.

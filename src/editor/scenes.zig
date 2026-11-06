@@ -7,6 +7,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const placement = @import("placement.zig");
+const lineStart = @import("code.zig").lineStart;
+const lineAfter = @import("code.zig").lineAfter;
 const Span = placement.Span;
 
 /// Prefix of the lines the editor commented out.
@@ -20,16 +22,6 @@ pub const Call = struct {
     addon: bool,
     state: State,
 };
-
-fn lineStart(text: []const u8, i: usize) usize {
-    var a = i;
-    while (a > 0 and text[a - 1] != '\n') a -= 1;
-    return a;
-}
-
-fn lineEnd(text: []const u8, i: usize) usize {
-    return if (std.mem.indexOfScalarPos(u8, text, i, '\n')) |e| e + 1 else text.len;
-}
 
 /// Places naming `name` in quotes (an area in `HeroInArea("name")`, an object…),
 /// commented ones too; `at` is the opening quote.
@@ -107,11 +99,12 @@ pub fn startedIn(a: Allocator, text: []const u8, at: usize) []const []const u8 {
     return out.items;
 }
 
-/// The area whose entering runs the block of the call at `at` (HeroInArea, ActorInArea).
+/// The area whose entering runs the block of the call at `at` (HeroInArea, ActorInArea; OG
+/// Script's hero::AnyInArea, actor::InArea).
 pub fn areaOf(a: Allocator, text: []const u8, at: usize) ?[]const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     const sp = block(text, at);
-    quotedArgs(a, text[sp.start..sp.end], &.{ "HeroInArea", "ActorInArea" }, &out) catch {};
+    quotedArgs(a, text[sp.start..sp.end], &.{ "HeroInArea", "ActorInArea", "AnyInArea", "InArea" }, &out) catch {};
     return if (out.items.len > 0) out.items[0] else null;
 }
 
@@ -119,7 +112,7 @@ pub fn areaOf(a: Allocator, text: []const u8, at: usize) ?[]const u8 {
 /// `if` through the `};`), else the call's own lines.
 pub fn block(text: []const u8, at: usize) Span {
     // Inside an `if (…)` condition: that if and its body.
-    if (condIf(text, at)) |c| return ifSpan(text, c.if_at, c.open) orelse .{ .start = lineStart(text, at), .end = lineEnd(text, at) };
+    if (condIf(text, at)) |c| return ifSpan(text, c.if_at, c.open) orelse .{ .start = lineStart(text, at), .end = lineAfter(text, at) };
     // The innermost unclosed `{` before the call.
     var depth: usize = 0;
     var i = at;
@@ -135,14 +128,14 @@ pub fn block(text: []const u8, at: usize) Span {
     } else null;
     if (open) |o| if (ifBefore(text, o)) |if_at| if (ifSpan(text, if_at, o)) |sp| return sp;
     const semi = std.mem.indexOfScalarPos(u8, text, at, ';') orelse at;
-    return .{ .start = lineStart(text, at), .end = lineEnd(text, semi) };
+    return .{ .start = lineStart(text, at), .end = lineAfter(text, semi) };
 }
 
 /// Turning the call at `at` off comments out nothing else: the block's first line
 /// starts with it and its last line ends with it (no other statement shares them).
 pub fn safe(text: []const u8, at: usize) bool {
     const span = block(text, at);
-    const first_end = lineEnd(text, span.start);
+    const first_end = lineAfter(text, span.start);
     const head = std.mem.trim(u8, text[span.start..first_end], " \t\r\n");
     // The block starts a statement: `if`, or a call (not the middle of an expression).
     if (head.len == 0 or !(std.ascii.isAlphabetic(head[0]) or head[0] == '_')) return false;
@@ -169,7 +162,7 @@ fn ifSpan(text: []const u8, if_at: usize, open: usize) ?Span {
         '{' => d += 1,
         '}' => {
             d -= 1;
-            if (d == 0) return .{ .start = lineStart(text, if_at), .end = lineEnd(text, k) };
+            if (d == 0) return .{ .start = lineStart(text, if_at), .end = lineAfter(text, k) };
         },
         else => {},
     };
@@ -245,7 +238,7 @@ pub fn turnOff(gpa: Allocator, text: []const u8, span: Span) ![]u8 {
     try out.appendSlice(gpa, text[0..span.start]);
     var i = span.start;
     while (i < span.end) {
-        const e = lineEnd(text, i);
+        const e = lineAfter(text, i);
         try out.appendSlice(gpa, off_mark);
         try out.appendSlice(gpa, text[i..e]);
         i = e;
@@ -264,7 +257,7 @@ pub fn offRun(text: []const u8, at: usize) Span {
     var a = lineStart(text, at);
     while (a > 0 and marked(text, lineStart(text, a - 1))) a = lineStart(text, a - 1);
     var b = a;
-    while (b < text.len and marked(text, b)) b = lineEnd(text, b);
+    while (b < text.len and marked(text, b)) b = lineAfter(text, b);
     return .{ .start = a, .end = b };
 }
 
@@ -278,7 +271,7 @@ pub fn turnOn(gpa: Allocator, text: []const u8, at: usize) ![]u8 {
     try out.appendSlice(gpa, text[0..a]);
     var i = a;
     while (i < b) {
-        const e = lineEnd(text, i);
+        const e = lineAfter(text, i);
         try out.appendSlice(gpa, text[i + off_mark.len .. e]);
         i = e;
     }
@@ -307,8 +300,49 @@ pub fn isShort(text: []const u8) bool {
 fn showOnly(line: []const u8) bool {
     const t = std.mem.trim(u8, line, " \t\r\n");
     const end = std.mem.indexOfAny(u8, t, "( \t") orelse t.len;
-    for (show_only) |c| if (std.ascii.eqlIgnoreCase(t[0..end], c)) return true;
+    const name = @import("opengorky").core.scene.exeOf(t[0..end]);
+    for (show_only) |c| if (std.ascii.eqlIgnoreCase(name, c)) return true;
     return false;
+}
+
+/// A scene line's command (`dialog::Open(…);` of an OpenGorky scene, `DIALOG_INIT(…)` of a
+/// Classic one; `l` trimmed): the exe's name (core/scene.zig `commands`; a pair's by its last
+/// argument, `camera::Panorama(false)` PANORAMA_OFF) and where its arguments start, past the
+/// `(`. Null: no command.
+pub fn lineCmd(l: []const u8) ?struct { exe: []const u8, args: usize } {
+    const scene = @import("opengorky").core.scene;
+    const p = std.mem.indexOfScalar(u8, l, '(') orelse return null;
+    const name = std.mem.trimEnd(u8, l[0..p], " \t");
+    if (name.len == 0) return null;
+    for (name) |ch| if (!std.ascii.isAlphanumeric(ch) and ch != '_' and ch != ':') return null;
+    if (scene.ofOgs(name, null)) |c| if (c.flag != null) {
+        const close = std.mem.lastIndexOfScalar(u8, l, ')') orelse l.len;
+        const on = !std.mem.endsWith(u8, std.mem.trimEnd(u8, l[p + 1 .. @max(p + 1, close)], " \t"), "false");
+        if (scene.ofOgs(name, on)) |x| return .{ .exe = x.exe, .args = p + 1 };
+    };
+    return .{ .exe = scene.exeOf(name), .args = p + 1 };
+}
+
+/// Line `l` (trimmed) runs exe command `exe` (either spelling).
+pub fn isCmd(l: []const u8, exe: []const u8) bool {
+    const c = lineCmd(l) orelse return false;
+    return std.ascii.eqlIgnoreCase(c.exe, exe);
+}
+
+/// Some line of scene text `t` runs `exe`.
+pub fn hasCmd(t: []const u8, exe: []const u8) bool {
+    var it = std.mem.splitScalar(u8, t, '\n');
+    while (it.next()) |l| if (isCmd(std.mem.trim(u8, l, " \t\r"), exe)) return true;
+    return false;
+}
+
+test "a scene line's command in either spelling" {
+    try std.testing.expect(isCmd("dialog::Open(\"x\", \"a.dlg\");", "DIALOG_INIT"));
+    try std.testing.expect(isCmd("DIALOG_INIT(\"x\",\"a.dlg\")", "DIALOG_INIT"));
+    try std.testing.expect(!isCmd("// dialog::Open(1)", "DIALOG_INIT"));
+    try std.testing.expectEqual(@as(usize, 12), lineCmd("dialog::Say(2);").?.args);
+    try std.testing.expectEqualStrings("FORBID_WALK_IN_AREA", lineCmd("area::Walkable(\"a\", false);").?.exe);
+    try std.testing.expectEqualStrings("ALLOW_WALK_IN_AREA", lineCmd("area::Walkable(\"a\", true);").?.exe);
 }
 
 /// Scene text with its show-only lines commented out by the editor (and a first-line mark).
@@ -318,7 +352,7 @@ pub fn shorten(gpa: Allocator, text: []const u8) ![]u8 {
     try out.print(gpa, "{s}{s}", .{ short_mark, placement.newline(text) });
     var i: usize = 0;
     while (i < text.len) {
-        const e = lineEnd(text, i);
+        const e = lineAfter(text, i);
         if (showOnly(text[i..e])) try out.appendSlice(gpa, off_mark);
         try out.appendSlice(gpa, text[i..e]);
         i = e;
@@ -330,9 +364,9 @@ pub fn shorten(gpa: Allocator, text: []const u8) ![]u8 {
 pub fn unshorten(gpa: Allocator, text: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    var i: usize = if (isShort(text)) lineEnd(text, 0) else 0;
+    var i: usize = if (isShort(text)) lineAfter(text, 0) else 0;
     while (i < text.len) {
-        const e = lineEnd(text, i);
+        const e = lineAfter(text, i);
         const l = text[i..e];
         try out.appendSlice(gpa, if (std.mem.startsWith(u8, l, off_mark)) l[off_mark.len..] else l);
         i = e;

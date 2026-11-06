@@ -6,11 +6,11 @@ pub const areas = @import("world/areas.zig");
 pub const bitmap_anim = @import("world/bitmap_anim.zig");
 pub const floor = @import("world/floor.zig");
 pub const levels = @import("world/levels.zig");
-pub const mods = @import("world/mods.zig");
 pub const nav = @import("world/nav.zig");
 pub const party = @import("world/party.zig");
 pub const queue = @import("world/queue.zig");
 pub const route = @import("world/route.zig");
+pub const saved = @import("world/saved.zig");
 pub const snapshot = @import("world/snapshot.zig");
 pub const sources = @import("world/sources.zig");
 pub const spawn = @import("world/spawn.zig");
@@ -22,4 +22,5 @@ test {
     _ = floor;
     _ = nav;
     _ = queue;
+    _ = snapshot;
 }

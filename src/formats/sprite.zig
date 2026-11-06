@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Image = @import("image.zig").Image;
+const Image = @import("../image.zig").Image;
 
 pub const magic = "spr1";
 const raw_flag: u16 = 0x8000;

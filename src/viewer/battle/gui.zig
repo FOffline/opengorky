@@ -6,7 +6,6 @@ const Gui = gui_mod.Gui;
 const og = @import("opengorky");
 const c = @import("sdl");
 const gfx = @import("../media/gfx.zig");
-const monster_icons = og.battle.report.monster_icons;
 
 /// Text in the 3d_msg font centred at (cx, cy) with scale, colour and brightness.
 /// 3d_msg glyph: its own if present (capitals), else the lowercase one.
@@ -82,7 +81,7 @@ pub fn msgTextAlpha(self: *Gui, r: *c.SDL_Renderer, t: []const u8, cx: f32, cy: 
 pub fn drawBattleBanner(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World, strings: ?*const og.formats.strtab.Table) !void {
     // GUI_GAMEOVER from a scene: phase 1 as a lost battle's.
     if (w.flow.defeat_ticks) |t| if (self.go_frame == null) {
-        try msgText(self, r, if (strings) |st| st.get(500) orelse "Game Over" else "Game Over", 320, 220, 2.25, gfx.adjRgb("cftGameOver", .{ 240, 64, 64 }), @min(1, og.num.toF32(t) / 30));
+        try msgText(self, r, if (strings) |st| st.get(og.core.ui_text.id(.game_over)) orelse "Game Over" else "Game Over", 320, 220, 2.25, gfx.adjRgb("cftGameOver"), @min(1, og.num.toF32(t) / 30));
         return;
     };
     const b = &(w.battle orelse {
@@ -94,23 +93,23 @@ pub fn drawBattleBanner(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World
         const prev = self.last_phase;
         self.last_phase = b.phase;
         if (b.phase == .enemy and prev == .player) {
-            self.banner = og.popup.Popup.make(.{ 0, 0, 0 }, if (strings) |st| st.get(518) orelse "Enemy Turn" else "Enemy Turn", .enemy_turn);
+            self.banner = og.popup.Popup.make(.{ 0, 0, 0 }, if (strings) |st| st.get(og.core.ui_text.id(.enemy_turn)) orelse "Enemy Turn" else "Enemy Turn", .enemy_turn);
         } else if (b.phase == .player and prev == .enemy) {
-            self.banner = og.popup.Popup.make(.{ 0, 0, 0 }, if (strings) |st| st.get(517) orelse "Player Turn" else "Player Turn", .player_turn);
+            self.banner = og.popup.Popup.make(.{ 0, 0, 0 }, if (strings) |st| st.get(og.core.ui_text.id(.player_turn)) orelse "Player Turn" else "Player Turn", .player_turn);
         }
         self.banner_tick = w.ticks;
     }
     // Defeat (0x454350), phase 1: "Game Over" fades in over the battle for 90 ticks.
     if (b.phase == .lost and self.go_frame == null) {
         const a = @min(1, og.num.toF32(b.over_ticks) / 30);
-        try msgText(self, r, if (strings) |st| st.get(500) orelse "Game Over" else "Game Over", 320, 220, 2.25, gfx.adjRgb("cftGameOver", .{ 240, 64, 64 }), a);
+        try msgText(self, r, if (strings) |st| st.get(og.core.ui_text.id(.game_over)) orelse "Game Over" else "Game Over", 320, 220, 2.25, gfx.adjRgb("cftGameOver"), a);
         return;
     }
     if (b.phase == .won) {
         const t: f32 = @floatFromInt(b.over_ticks);
         if (t > 90 and !self.report_open) {
             const a = @min(1, (t - 90) / 30);
-            try msgText(self, r, if (strings) |st| st.get(501) orelse "Victory" else "Victory", 320, 240, 2.25, gfx.adjRgb("cftVictory", .{ 90, 174, 170 }), a);
+            try msgText(self, r, if (strings) |st| st.get(og.core.ui_text.id(.victory)) orelse "Victory" else "Victory", 320, 240, 2.25, gfx.adjRgb("cftVictory"), a);
         }
         return;
     }
@@ -136,12 +135,12 @@ pub fn drawGameOver(self: *Gui, r: *c.SDL_Renderer, strings: ?*const og.formats.
             return if (st) |x| x.get(id) orelse fb else fb;
         }
     }.get;
-    try msgText(self, r, s(strings, 500, "Game Over"), 320, 220, 2.25, gfx.adjRgb("cftGameOver", .{ 240, 64, 64 }), 1);
-    try msgText(self, r, s(strings, 531, "Repeat Battle"), 320, 300, 0.6, gfx.adjRgb("cftGameOver", .{ 240, 64, 64 }), 1);
-    const on = gfx.adjRgb("cftGameOverSelected", .{ 255, 140, 40 });
-    const off = gfx.adjRgb("cftGameOverChoose", .{ 170, 60, 10 });
-    try msgText(self, r, s(strings, 532, "Yes"), 320, 330, if (self.go_sel == 0) 0.6 else 0.5, if (self.go_sel == 0) on else off, 1);
-    try msgText(self, r, s(strings, 533, "No"), 320, 355, if (self.go_sel == 1) 0.6 else 0.5, if (self.go_sel == 1) on else off, 1);
+    try msgText(self, r, s(strings, og.core.ui_text.id(.game_over), "Game Over"), 320, 220, 2.25, gfx.adjRgb("cftGameOver"), 1);
+    try msgText(self, r, s(strings, og.core.ui_text.id(.retry_battle), "Repeat Battle"), 320, 300, 0.6, gfx.adjRgb("cftGameOver"), 1);
+    const on = gfx.adjRgb("cftGameOverSelected");
+    const off = gfx.adjRgb("cftGameOverChoose");
+    try msgText(self, r, s(strings, og.core.ui_text.id(.yes), "Yes"), 320, 330, if (self.go_sel == 0) 0.6 else 0.5, if (self.go_sel == 0) on else off, 1);
+    try msgText(self, r, s(strings, og.core.ui_text.id(.no), "No"), 320, 355, if (self.go_sel == 1) 0.6 else 0.5, if (self.go_sel == 1) on else off, 1);
 }
 
 pub fn clearGameOver(self: *Gui) void {
@@ -197,7 +196,7 @@ pub fn drawReport(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World, stri
     if (b.phase == .won and b.over_ticks > 240 and !self.report_open and !self.report_done and self.raport.len() > 0) {
         self.report_open = true;
         self.report_scroll = 0;
-        w.out.music_events.append(w.gpa, .{ .name = "statistics" }) catch {};
+        w.out.music_events.append(w.gpa, .{ .name = og.core.modules.ui().music.statistics }) catch {};
     }
     if (!self.report_open or self.raport.len() == 0) return;
     const X: f32 = 10;
@@ -209,7 +208,7 @@ pub fn drawReport(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World, stri
     // Close, names and kill labels in font 3 (0x4521a6); Close centred at (313, 409).
     const f = self.sys_font orelse f2;
     const col: [3]u8 = gui_mod.text_light;
-    const close = if (strings) |st| st.get(2) orelse "Close" else "Close";
+    const close = if (strings) |st| st.get(og.core.ui_text.id(.close)) orelse "Close" else "Close";
     gui_mod.textShadow(f, t.*, 313 - @divTrunc(@as(i32, @intCast(f.measure(close))), 2), 409, close, col);
     var buf: [8]*og.battle.fighter.Fighter = undefined;
     const heroes = reportHeroes(b, &buf);
@@ -222,19 +221,16 @@ pub fn drawReport(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World, stri
         const fi = heroes[k];
         const ry = Y + 22 + 102 * og.num.toF32(i);
         if (self.portrait(fi.obj)) |p| if (p.len() > 0) try p.draw(r, 0, X + 17, ry + 3);
-        const name = if (strings) |st| st.get(og.fields.nameId(fi.obj)) orelse fi.obj.name else fi.obj.name;
+        const name = if (strings) |st| st.get(og.fields.classicId(fi.obj)) orelse fi.obj.name else fi.obj.name;
         gui_mod.textShadow(f, t.*, @as(i32, @intFromFloat(X + 140)) - @as(i32, @intCast(f.measure(name))), @intFromFloat(ry), name, gui_mod.text_dim);
         if (fi.exp_gained > 0) {
             var eb: [48]u8 = undefined;
-            const e = std.fmt.bufPrint(&eb, "{s} +{d}", .{ if (strings) |st| st.get(350) orelse "Experience" else "Experience", fi.exp_gained }) catch "";
+            const e = std.fmt.bufPrint(&eb, "{s} +{d}", .{ if (strings) |st| st.get(og.core.ui_text.id(.experience)) orelse "Experience" else "Experience", fi.exp_gained }) catch "";
             gui_mod.textShadow(f2, t.*, @intFromFloat(X + 67), @intFromFloat(ry + 80), e, .{ 255, 255, 255 });
         }
         for (fi.kills[0..fi.kills_n], 0..) |kl, j| {
             const jx = X + 154 + 85 * og.num.toF32(j);
-            for (monster_icons) |mi| if (mi.id == kl.id) {
-                if (self.icon(mi.name)) |ic| if (ic.len() > 0) try ic.draw(r, 0, jx, ry + 6);
-                break;
-            };
+            if (og.battle.report.iconOf(.{ .id = kl.id, .class = kl.class })) |icon| if (self.icon(icon)) |ic| if (ic.len() > 0) try ic.draw(r, 0, jx, ry + 6);
             var kb: [64]u8 = undefined;
             const kn = std.fmt.bufPrint(&kb, "{s} x{d}", .{ if (strings) |st| st.get(kl.id) orelse "?" else "?", kl.n }) catch "";
             gui_mod.textShadow(f, t.*, @as(i32, @intFromFloat(jx + 46)) - @divTrunc(@as(i32, @intCast(f.measure(kn))), 2), @intFromFloat(ry), kn, col);

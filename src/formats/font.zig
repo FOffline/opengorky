@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Image = @import("image.zig").Image;
+const Image = @import("../image.zig").Image;
 
 const magic = "CZC1";
 

@@ -1,0 +1,40 @@
+Resist(fighter = 113, resist = "fire gas");
+Resist(fighter = 125, resist = "attract tranq gas", armor = -2);
+Resist(fighter = 105, resist = "fire", armor = -2);
+Resist(fighter = 107, armor = -3);
+Resist(fighter = 124, resist = "electricity attract energy freeze gas flammable", armor = -3);
+Resist(fighter = 101, armor = -2);
+Resist(fighter = 113, resist = "attract gas", armor = -2);
+Resist(fighter = 114, resist = "attract", armor = -1);
+Resist(fighter = 131, resist = "attract energy tranq", armor = -3);
+Resist(fighter = 122, resist = "attract energy tranq", armor = -3);
+Resist(fighter = 118, armor = -2);
+Resist(fighter = 128, resist = "gas", armor = -2);
+Resist(fighter = 108, resist = "energy", armor = -1);
+Resist(fighter = 138, resist = "attract energy tranq gas", armor = -3);
+Resist(
+    fighter = 120,
+    resist = "fire electricity attract energy freeze tranq gas flammable",
+    armor = -2,
+);
+Resist(fighter = 100, resist = "fire energy", armor = -2);
+Resist(fighter = 115, resist = "attract", armor = -2);
+Resist(fighter = 116, resist = "attract", armor = -1);
+Resist(fighter = 129, resist = "attract tranq", armor = -2);
+Resist(fighter = 135, resist = "attract tranq", armor = -2);
+Resist(fighter = 137, resist = "attract tranq", armor = -2);
+Resist(fighter = 119, resist = "attract energy tranq", armor = -2);
+Resist(fighter = 139, resist = "fire attract freeze tranq gas", armor = -2);
+Resist(fighter = 130, resist = "electricity energy", armor = -2);
+Resist(fighter = 121, resist = "fire freeze gas flammable", armor = -1);
+Resist(fighter = 132, resist = "fire attract", armor = -3);
+Resist(fighter = 106, resist = "electricity", armor = -1);
+Resist(fighter = 126, resist = "energy freeze tranq", armor = -3);
+Resist(fighter = 136, resist = "attract freeze gas flammable", armor = -3);
+Resist(fighter = 117, armor = -2);
+Resist(fighter = 109, resist = "electricity", armor = -1);
+Resist(fighter = 123, resist = "fire electricity flammable", armor = -3);
+Resist(fighter = 110, resist = "fire electricity attract energy freeze gas flammable", armor = -2);
+Resist(fighter = 102, armor = -1);
+Resist(fighter = 133, resist = "attract tranq gas", armor = -3);
+Resist(fighter = 127, resist = "fire attract energy", armor = -2);

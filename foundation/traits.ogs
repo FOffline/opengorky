@@ -1,0 +1,597 @@
+// foundation: the engine's built-in traits. Every event and decision point
+// the engine calls on a host's components is a method of one of them: host-kind traits
+// (`trait Fighter … for fighter`: `component X for fighter` implements it), roles the
+// engine grants and takes (`role trait Hero`), marks (`mark trait Monitor`: methodless,
+// a component implementing one turns engine code on).
+//
+// Read-only: the engine reads this file (script/traits.zig) and the linker puts it first.
+// Code names all of it foundation::Fighter (or bare after `use foundation;`).
+//
+// A method: `[native] [live] [combine] fn Name(params) "when"
+// [default "with no answer"] { default body }`.
+//   live     the engine calls it already;
+//   native   the engine runs it (a role's): a component can't define it, no body;
+//   combine  how the handlers' results join (all components of a host in attach order,
+//            then the next host): all (default: the result is not used), chain (each
+//            int result replaces the last argument for the next; the last is the answer),
+//            veto (the first false answers no), first (the first non-nil answers),
+//            handled (the first true: done, the engine's own action skipped), sum (the
+//            int results add up). A nil result (no return) is no answer.
+// The default body is what `super.f()` runs and what the engine does when no component
+// answers (`{ }`: nothing, the engine's own). A parameter may carry its meaning
+// (`side "\"hero\" or \"enemy\""`).
+
+trait Object for object
+    "Any object of the world."
+{
+    live fn OnCreate()
+        "the object is made, after its block's values (.var); the level after its other objects; an item or weapon after OnClassInit; a battle device, a spawned object"
+    { }
+}
+
+trait Level : Object for level
+    "A location (and a battle, through Battle)."
+{
+    live fn OnCamera()
+        "before the level's OnCreate; the camera is made from its fields after it"
+    { }
+
+    live fn OnRestore()
+        "after every OnCreate of a new location and each time the party comes back"
+    { }
+
+    live fn OnStart()
+        "once for every new object, after OnRestore"
+    { }
+
+    live fn OnUpdate()
+        "every tick"
+    { }
+
+    live fn OnShown()
+        "at the end of every load, new or returned to"
+    { }
+
+    live fn OnEnter()
+        "the party arrives at the location, after OnShown"
+    { }
+
+    live fn OnAfterBattle(battle)
+        "the party is back after winning battle `battle` (its name)"
+    { }
+
+    live first fn Placement()
+        "the level is placed, before OnRestore: where its actors stand (a list of Place)"
+        default "the level's placement field"
+    { return host.placement; }
+}
+
+trait Battle : Level for battle
+    "A battle; its components are the battle level's."
+{
+    live fn OnEnemiesAppear()
+        "the battle begins, and each enemy turn ends"
+    { }
+
+    live fn OnEnemyTurnOver(turn)
+        "right after OnEnemiesAppear at an enemy turn's end"
+        default "a mid-battle dialogue (MidDialog)"
+    { }
+
+    live fn OnTurnStart(side, turn)
+        "a side's turn begins, after the fighters' events"
+    { }
+
+    live fn OnTurnEnd(side, turn)
+        "a side's turn ends (side \"hero\" or \"enemy\"), after the fighters'"
+    { }
+
+    live fn OnTick()
+        "every battle tick"
+        default "a transformation (Transform)"
+    { }
+
+    live fn OnAttack(attacker, weapon, victims)
+        "a strike reached its targets, before the roll"
+        default "Transform on the first hero hit"
+    { }
+
+    live chain fn OnResist(target, kind, amount)
+        "a target resists a damage kind, after its Fighter.OnResist: the damage it takes anyway"
+        default "0: no damage"
+    { }
+
+    live chain fn OnDamage(attacker, target, weapon, amount)
+        "a strike's damage after OnStrike and OnHit: the damage dealt"
+        default "the engine's damage"
+    { }
+
+    live fn OnVar(name, value)
+        "a battle variable changed, after the fighters'"
+    { }
+
+    live first fn Outcome()
+        "the battle's end is checked: \"won\" or \"lost\" ends it so, another answer keeps it going, nil leaves it to the engine"
+        default "lost when a hero dies, if Value(lose_on_hero_death)"
+    { }
+
+    live fn OnBattleEnd(won)
+        "the battle is over (won: true or false)"
+    { }
+}
+
+trait Game for game
+    "The one game object (outside the location): the project's components for game (game.ogs)."
+{
+    live chain fn OnDamage(
+        attacker "the striking fighter",
+        target "the struck fighter",
+        weapon "the weapon",
+        amount "the damage the engine would deal"
+    )
+        "a strike's damage after armour, defence and freezing, after Battle.OnDamage (combat/strike.zig): return the damage dealt"
+        default "the engine's damage"
+    { }
+
+    live chain fn OnResist(
+        target "the resisting fighter",
+        kind "the damage kind resisted",
+        amount "the damage before the resistance"
+    )
+        "after Battle.OnResist, the target resists the damage kind (\"fire\", \"bullet\", \"energy\", \"freeze\", \"gas\", \"electricity\", \"explosion\"...; built-in: no damage): return the damage it takes anyway"
+        default "0: no damage"
+    { }
+
+    live fn OnTurnStart(
+        side "\"hero\" or \"enemy\"",
+        turn "the battle's turn counter"
+    )
+        "a side's battle turn begins, after Battle.OnTurnStart (side \"hero\" or \"enemy\")"
+    { }
+
+    live fn OnBattleEnd(
+        won "true: won, false: lost"
+    )
+        "the battle is over, after Battle.OnBattleEnd (won true: every enemy down, false: lost)"
+    { }
+
+    live handled fn OnItemUse(
+        user "the hero",
+        item "the item used",
+        target "the object it is used on (nil: none)"
+    )
+        "a hero uses an item (medicine on a hero, an item on an object): return true when the hook did it (the built-in use is skipped)"
+        default "the built-in use"
+    { }
+
+    live fn OnLevelEnter(
+        level "the location's level object"
+    )
+        "the party arrives at a location (made or entered again), after Level.OnEnter"
+    { }
+
+    live fn OnTurnEnd(
+        side "\"hero\" or \"enemy\"",
+        turn "the battle's turn counter"
+    )
+        "a side's battle turn ends, after Battle.OnTurnEnd (side \"hero\" or \"enemy\")"
+    { }
+}
+
+trait Area : Object for area
+    "An active area of a location."
+{
+    live fn OnStart()
+        "once for every new object, after the level's OnRestore"
+    { }
+
+    live veto fn Accepts(item, user)
+        "its examine menu opens: may `user` use `item` (a use_item_N) on it? false drops the row"
+        default "the items of its accepts list"
+    { }
+
+    live handled fn OnAction(name, hero)
+        "a hero chose action `name`, before the method of that name"
+        default "the method named `name` (Open, Take...), if any"
+    { }
+
+    live fn OnExit()
+        "a hero takes the exit"
+    { }
+
+    live fn OnCode(code)
+        "a safe's code was entered"
+    { }
+
+    live fn OnUseItem(item, user)
+        "an item was used on it"
+    { }
+
+    live fn OnFirstOpen(hero)
+        "a box area is explored for the first time"
+        default "the contents of its contents field"
+    { }
+
+    live fn OnEnter(hero)
+        "a hero walked into its polygon (checked after the objects' tick, heroes in party order)"
+    { }
+
+    live fn OnLeave(hero)
+        "a hero walked out of its polygon"
+    { }
+}
+
+trait Item : Object for item
+    "An item (in the world or carried)."
+{
+    live fn OnClassInit()
+        "the item is being made, before OnCreate"
+    { }
+
+    live fn OnStart()
+        "once for every new object, after the level's OnRestore"
+    { }
+
+    live veto fn Accepts(item, user)
+        "its examine menu opens: may `user` use `item` (a use_item_N) on it? false drops the row"
+        default "the items of its accepts list"
+    { }
+
+    live handled fn OnAction(name, hero)
+        "a hero chose action `name`, before the method of that name"
+        default "the method named `name`, if any"
+    { }
+
+    live veto fn CanTake(hero)
+        "before the take action"
+        default "may"
+    { }
+
+    live fn OnTaken(hero)
+        "after the take action (ammo merged)"
+    { }
+
+    live veto fn CanGive(from, to)
+        "one hero gives it to another"
+        default "may, unless either is NoHands"
+    { }
+
+    live handled fn OnUse(user, target)
+        "this item is used, before Game.OnItemUse"
+        default "the built-in use"
+    { }
+
+    live fn OnUseItem(item, user)
+        "another item was used on it"
+    { }
+
+    live fn OnFirstOpen(hero)
+        "a box is explored for the first time"
+        default "the contents of its contents field"
+    { }
+}
+
+trait Weapon : Item for weapon
+    "A weapon."
+{
+    live veto fn CanAim(user, tile)
+        "each aim candidate at tile [x, y], the player's and the AI's (a hot point, counted like ScoreTarget): false drops it"
+        default "the weapon's Pattern"
+    { }
+
+    live chain fn HitChance(user, target, chance)
+        "the hit roll, first in the chance's chain"
+        default "the hit chance and the hero's bonus"
+    { }
+
+    live chain fn BaseDamage(user, target, amount)
+        "the roll's damage to each target, before defence, the back bonus and armour"
+        default "pct x max_damage / 100 and the skill, luck and rage rolls"
+    { }
+
+    live chain fn RechargeTurns(user, turns)
+        "after a shot"
+        default "the WeaponClass recharge"
+    { }
+
+    live fn OnFired(user, tile)
+        "a round was spent"
+    { }
+}
+
+trait Anim : Object for anim
+    "A bitmap animation of a location."
+{
+    live fn OnRestore()
+        "after the level's OnRestore"
+    { }
+
+    live fn OnUpdate()
+        "every tick"
+    { }
+
+    live veto fn CanRender()
+        "after OnRestore and every tick: is it drawn?"
+        default "drawn"
+    { }
+}
+
+trait ActiveAnim : Anim for active_anim
+    "An active bitmap animation."
+{ }
+
+trait Path for path
+    "A path actors walk (no core schema: outside Object)."
+{
+    live fn OnNode(no, dir, walker)
+        "actor `walker` passed point `no` (dir 1: forward, 0: backwards)"
+    { }
+}
+
+trait Actor : Object for actor
+    "An actor (a character or a thing with a model)."
+{
+    live fn OnActorReady()
+        "right after the actor's OnCreate"
+        default "the idles of stances 7/8 copy 0/1"
+    { }
+
+    live fn OnStart()
+        "once for every new object, after the level's OnRestore; not for heroes brought along"
+    { }
+
+    live fn OnUpdate()
+        "every tick"
+    { }
+
+    live fn OnUseItem(item, user)
+        "an item was used on the actor"
+    { }
+}
+
+trait Obstacle : Actor for obstacle
+    "An obstacle (a box, a barrel): a neutral fighter in a battle, without Fighter's events."
+{ }
+
+trait Fighter : Actor for fighter
+    "A fighter."
+{
+    live fn OnSpawn()
+        "the fighter enters the battle (its scripted abilities are attached anew for each battle)"
+    { }
+
+    live fn OnTurnStart(side, turn)
+        "a side's turn begins (side \"hero\" or \"enemy\"; every fighter hears both sides')"
+    { }
+
+    live fn OnTurnEnd(side, turn)
+        "a side's turn ends (side \"hero\" or \"enemy\"; every fighter hears both sides')"
+    { }
+
+    live chain fn OnHit(attacker, weapon, amount)
+        "the fighter is struck for `amount` after armour and defence: return the damage it takes"
+    { }
+
+    live chain fn OnStrike(target, weapon, amount)
+        "the fighter strikes `target` for `amount` (before the target's OnHit): return the damage dealt"
+    { }
+
+    live fn OnDeath(killer)
+        "the fighter dies (killer: the one who hit it last, or nil)"
+    { }
+
+    live fn OnAllyDeath(dead, killer)
+        "a fighter of its side dies"
+    { }
+
+    live fn OnVar(name, value)
+        "a battle variable changed (BattleSetVar, BattleAddVar)"
+    { }
+
+    live veto fn CanWalk()
+        "asked at each side's turn start: return false and it does not walk this turn"
+        default "walks"
+    { }
+
+    live veto fn CanBeStruck(from_tile)
+        "may it be struck from tile from_tile ([x, y])? false: the strike misses"
+        default "open"
+    { }
+
+    live veto fn CanDie(killer)
+        "a blow of any kind (a strike, FighterDamage, a state, a bomb) would bring its health to 0 (killer as OnDeath's): false and it stays at 1"
+        default "dies"
+    { }
+
+    live fn OnRoleGained(role)
+        "a role was granted (the mask is up to date)"
+    { }
+
+    live fn OnRoleLost(role)
+        "a role was taken away"
+    { }
+
+    live chain fn WalkRange(range)
+        "each side's turn start, after CanWalk: its walk range this turn"
+        default "walk_range"
+    { }
+
+    live sum fn TurnPriority(side)
+        "the AI side's order: a stable sort, highest first"
+        default "0"
+    { }
+
+    live first fn ExtraAction()
+        "after an action: a second one this turn?"
+        default "no"
+    { }
+
+    live first fn StandAngle(after_move)
+        "where to face: at the start and after its own move"
+        default "the nearest opponent"
+    { }
+
+    live fn OnMoveEnd()
+        "an AI fighter's own move ends"
+    { }
+
+    live veto fn CanUse(weapon)
+        "the AI picks the weapons it plans with"
+        default "may"
+    { }
+
+    live veto fn CanPush()
+        "a push"
+        default "may, unless the gender is female"
+    { }
+
+    live fn OnDodge(attacker)
+        "closed to the attacker's tile: it dodges before the shot"
+    { }
+
+    live chain fn HitChance(target, weapon, chance)
+        "the chance as the attacker, after Weapon.HitChance"
+    { }
+
+    live chain fn ChanceToBeHit(attacker, weapon, chance)
+        "the chance as the target, after the attacker's"
+    { }
+
+    live chain fn GuardDamage(attacker, weapon, amount)
+        "the target, before the back bonus and armour"
+        default "unchanged"
+    { }
+
+    live chain fn Armor(attacker, weapon, armor)
+        "the target's armour class"
+        default "its own, worn or the table's"
+    { }
+
+    chain fn OnResist(kind, amount)
+        "the target resists a damage kind, before Battle.OnResist"
+        default "0"
+    { }
+
+    live fn OnDamageDealt(target, weapon, lost)
+        "the attacker, when the damage is above 0: lost is the health the target lost"
+    { }
+}
+
+role trait Hero : Fighter
+    "A role: a fighter in the party, or on the heroes' side in a battle."
+{
+    native fn inventory()
+        "the hero's items, in world order"
+        ;
+
+    native fn equipped(place)
+        "what is in hand (hand) or worn (armor), or nil"
+        ;
+
+    native fn party_slot()
+        "the place on the panel from 0; nil outside the party"
+        ;
+
+    native fn skill(weapon)
+        "the skill level with a weapon"
+        ;
+
+    live veto fn CanSelect()
+        "outside a battle: may the hero be selected (portrait, keys)?"
+        default "may"
+    { }
+
+    live chain fn ExperienceGain(amount)
+        "a strike's experience goes into experience"
+        default "1.75 x the health lost (+ the kill bonus); below 0: 0, experience never drops"
+    { }
+
+    live fn OnLevelUp(level)
+        "a new level"
+    { }
+
+    live fn OnSkillUp(weapon, level)
+        "a weapon's skill grows"
+    { }
+
+    live chain fn CounterChance(attacker, chance)
+        "the counter-attack roll, its conditions met (chance against rand() % 1000)"
+    { }
+
+    live veto fn CanCarry(item)
+        "before Item.CanTake"
+        default "may"
+    { }
+
+    live fn OnPickUp(item)
+        "after Item.OnTaken"
+    { }
+}
+
+role trait Enemy : Fighter
+    "A role: a fighter on the enemies' side in the current battle."
+{
+    native fn ai_profile()
+        "the fighter's AiProfile name"
+        ;
+
+    native fn forced_target()
+        "the target it is forced on, or nil"
+        ;
+
+    native fn reward()
+        "the experience for killing it, by the engine's rules"
+        ;
+
+    live first fn PreferTarget()
+        "the AI's plan begins: the answer is its forced target this turn"
+    { }
+
+    live chain fn ScoreTarget(occupant, weapon, score)
+        "the AI scores the fighter on a strike's tile (a hot point: the calls per plan go to the battle log)"
+        default "the Scoring score"
+    { }
+
+    live first fn AiProfile()
+        "the AI's plan begins: an AiProfile(...) record whose fields given go over its profile and scoring this plan (scoring by name, keep, occupant, tile, wakeful, near, the weights and constants)"
+        default "the rules' profile"
+    { }
+
+    live first fn ScoreTile(tile, occupant, weapon, here, aim, damage, pct)
+        "the AI scores a strike's hit tile [x, y] (occupant: the fighter there or nil) from tile `here` aiming at `aim`, the weapon's damage and the tile's pct: the answer in place of its scoring's occupant (a hot point)"
+        default "the scoring's occupant"
+    { }
+
+    live chain fn KillReward(killer, amount)
+        "the kill's experience bonus (not with NoKillCredit)"
+        default "kill_exp_pm x max_hp"
+    { }
+}
+
+mark trait Monitor : Fighter
+    "A strike only deals damage: no back bonus, last attacker, reaction or blood; the AI weighs it by its profile's monitor."
+{ }
+
+mark trait NoKillCredit : Fighter
+    "Killing it gives no experience bonus and no report line."
+{ }
+
+mark trait Immobile : Fighter
+    "Never walks."
+{ }
+
+mark trait StartsUnseen : Fighter
+    "Starts the battle unseen and cannot be pointed at."
+{ }
+
+mark trait Leaves : Fighter
+    "Leaves the field after every enemy round."
+{ }
+
+mark trait NoHands : Fighter
+    "Neither gives nor takes items; no fist."
+{ }
+
+mark trait DoubleStrike : Fighter
+    "Strikes one tile twice with a weapon pair."
+{ }

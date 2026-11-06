@@ -82,7 +82,7 @@ const Pending = union(enum) {
         /// Invisible (0x48a2a6): vanish `vanish` ticks after the hit.
         vanish: u32 = 0,
         vanish_in: ?u32 = null,
-        /// Flash before the hit: tick from the animation start (MonsterAttack.pre).
+        /// Flash before the hit: tick from the animation start (MonsterAttack.flash_delay).
         pre: ?u32 = null,
         launched: bool = false,
         hit1: bool = false,
@@ -106,35 +106,49 @@ const Pending = union(enum) {
 pub const max_fighters = 32;
 
 /// Scratch buffers of one AI plan (combat/ai.zig) for an `n`-tile grid: the threat map,
-/// path-length fields (one per foe, guard point, 4 decoys), the wave buffers and the
-/// per-foe reach. The grid doesn't change during a battle, so they are allocated once.
-const AiScratch = struct {
+/// path-length fields (one per foe, guard point, 4 decoys, Grandma's child's distance to
+/// her), the wave buffers and the per-foe reach. The grid doesn't change during a
+/// battle, so they are allocated once.
+pub const AiScratch = struct {
+    /// Rows of `dist`: foes 0..max_fighters, the guard point, the decoys, the `near` one.
+    pub const guard_row = max_fighters;
+    pub const max_decoys = 4;
+    pub const decoy_row = guard_row + 1;
+    pub const near_row = decoy_row + max_decoys;
+    pub const dist_rows = near_row + 1;
+
     danger: []u16 = &.{},
     dist: []f32 = &.{},
     visited: []u8 = &.{},
     queue: []grid_mod.QEntry = &.{},
     slot: []u8 = &.{},
     left: []f32 = &.{},
+    /// The best strike from each tile this plan (combat/ai.zig attackFrom), computed once.
+    strikes: []TileStrike = &.{},
 
     pub fn ensure(self: *AiScratch, gpa: Allocator, n: usize) !void {
         if (self.danger.len == n) return;
         std.debug.assert(self.danger.len == 0); // grid size is fixed per battle
         errdefer self.deinit(gpa);
         self.danger = try gpa.alloc(u16, n);
-        self.dist = try gpa.alloc(f32, n * (max_fighters + 1 + 4));
+        self.dist = try gpa.alloc(f32, n * dist_rows);
         self.visited = try gpa.alloc(u8, n);
         self.queue = try gpa.alloc(grid_mod.QEntry, 8 * n + 1);
         self.slot = try gpa.alloc(u8, n);
         self.left = try gpa.alloc(f32, n);
+        self.strikes = try gpa.alloc(TileStrike, n);
     }
 
     pub fn deinit(self: *AiScratch, gpa: Allocator) void {
-        inline for (.{ "danger", "dist", "visited", "queue", "slot", "left" }) |f| {
+        inline for (.{ "danger", "dist", "visited", "queue", "slot", "left", "strikes" }) |f| {
             if (@field(self, f).len > 0) gpa.free(@field(self, f));
         }
         self.* = .{};
     }
 };
+
+/// The best strike from a tile (an AI plan's cache): its score, weapon (null: none) and aim.
+pub const TileStrike = struct { done: bool = false, score: i32 = 0, weapon: ?*Object = null, aim: grid_mod.Target = undefined };
 
 const Seq = struct {
     side: Side,
@@ -190,6 +204,9 @@ pub const Battle = struct {
     ai_reach: []f32 = &.{},
     /// AI planning buffers (combat/ai.zig), sized from the grid on first use and reused.
     ai_scratch: AiScratch = .{},
+    /// OpenGorky: each tile's `[x, y]` list for the scripts (combat/events.tileList), made
+    /// once per battle in the runtime's strings (a script may keep one past the battle).
+    tile_lists: []const [2]@import("../script.zig").value.Value = &.{},
     ai_target_buf: [max_targets]grid_mod.Target = undefined,
     ai_target_len: usize = 0,
     /// Heroes act on their own (same AI), for testing battles without a UI.
@@ -227,6 +244,9 @@ pub const Battle = struct {
     cam_pair: ?struct { who: u16, tile: Tile } = null,
     /// Defeat only when everyone died (for the playthrough); in the exe any hero.
     lenient_loss: bool = false,
+    /// OpenGorky: the end a script declared (BattleWin true, BattleLose false), taken at the
+    /// next end check (combat/turns.zig ended).
+    declared: ?bool = null,
     /// Time bombs: large ones (PutLargeTimeBomb) and hero bombs.
     bombs: std.ArrayList(Bomb) = .empty,
     /// Incubus balls lying as charges, oldest first.
@@ -241,13 +261,14 @@ pub const Battle = struct {
     /// A barrel blast strikes on behalf of whoever blew it up (+0x1ab0 → +0xf0,
     /// 0x4ce217): reaction, last attacker and exp are theirs; tiles and roll are the barrel's.
     blast_credit: ?u16 = null,
-    /// Battle with the girl (`levelMode` 8, 0x47c464, 0x4b4afc): the first hero strike
-    /// on a non-hero starts 100 ticks until `03ch_lilith1` turns into Lilith, and 80
-    /// later the dialog `03__museum_child2.dlg`. −10 = not started.
-    lilith_ticks: i32 = -10,
-    lilith_dialog_ticks: i32 = -10,
-    /// Invisible `04mf_invisible1` (04__city_mfd) left the grid at the end of the enemy
-    /// turn (0x498614, flag 0x6c4edc): removed at the next enemy turn start.
+    /// The battle's transformation (rules Transform by `levelMode`; the exe's girl, 0x47c464,
+    /// 0x4b4afc): the first hero strike on a non-hero starts its `delay` ticks, its dialog
+    /// `dialog_delay` later. −10 = not started.
+    transform_ticks: i32 = -10,
+    transform_dialog_ticks: i32 = -10,
+    /// A fighter that `leaves` (core module Fighters: the 04__city_mfd Invisible) left the
+    /// grid at the end of the enemy turn (0x498614, flag 0x6c4edc): removed at the next
+    /// enemy turn start.
     invisible_leaving: bool = false,
     /// Fighter wounded by the last strike (for the repeated reaction, code 7).
     last_hit: ?u16 = null,
@@ -256,6 +277,9 @@ pub const Battle = struct {
     facing_mode: bool = false,
     /// Decoys (class 18 weapon, 0x4b9750 → 0x4bdb40): "fighter" `Distractor<N>`.
     decoys: std.ArrayList(Bomb) = .empty,
+    /// The battle's variables (OpenGorky: BattleSetVar, combat/events.zig),
+    /// until it ends; names in the world's runtime.
+    vars: std.StringArrayHashMapUnmanaged(@import("../script.zig").value.Value) = .empty,
 
     /// Whether the enemy battle music track plays (0x40edc0): enemy turn and their
     /// appearance.
@@ -279,6 +303,7 @@ pub const Battle = struct {
         self.decoys.deinit(self.gpa);
         self.popups.deinit(self.gpa);
         self.blasts.deinit(self.gpa);
+        self.vars.deinit(self.gpa);
         self.gpa.free(self.blocked);
         self.gpa.free(self.occupant);
         self.gpa.free(self.reach_left);
@@ -326,10 +351,11 @@ pub const Battle = struct {
         return f.frozen > 0 and f.alive();
     }
 
-    /// Live Invisible `04mf_invisible1` (looked up by name, 0x42b140 in 0x4985fb/0x49839f).
-    pub fn invisibleMfd(self: *Battle) ?u16 {
+    /// The first live fighter that Leaves after the enemy round (a native mark; the
+    /// exe looks the 04__city_mfd Invisible up by name, 0x42b140 in 0x4985fb/0x49839f).
+    pub fn leaver(self: *Battle) ?u16 {
         for (self.fighters.items, 0..) |f, i| {
-            if (f.alive() and std.ascii.eqlIgnoreCase(f.obj.name, "04mf_invisible1")) return @intCast(i);
+            if (f.alive() and f.obj.implementsC("Leaves")) return @intCast(i);
         }
         return null;
     }

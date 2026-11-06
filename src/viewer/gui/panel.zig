@@ -1,20 +1,6 @@
 //! Battle and exploration panel: buttons, portraits, hand weapon, panel tooltip, cursor, hero frame, caption. Gui methods (see gui.zig).
-
-const rects = [15][4]f32{
-    .{ 4, 21, 35, 61 },    .{ 40, 21, 73, 61 },   .{ 85, 5, 153, 60 },   .{ 155, 6, 175, 60 },
-    .{ 188, 21, 218, 61 }, .{ 224, 21, 257, 61 }, .{ 270, 5, 313, 52 },  .{ 320, 5, 363, 52 },
-    .{ 370, 5, 413, 52 },  .{ 420, 5, 463, 52 },  .{ 470, 5, 513, 52 },  .{ 524, 21, 565, 60 },
-    .{ 574, 21, 602, 60 }, .{ 609, 20, 633, 41 }, .{ 608, 44, 633, 60 },
-};
-/// Hints (string.tab); portraits show the hero's name.
-const tooltips = [15]i32{ 502, 503, 504, 505, 506, 507, 0, 0, 0, 0, 0, 508, 509, 510, 511 };
-/// Pressed button frame and offset (0x4b2380): 35…42.
-const pressed = [15]?struct { frame: usize, dx: f32 }{
-    .{ .frame = 35, .dx = 4 }, .{ .frame = 36, .dx = 4 }, null,                      .{ .frame = 37, .dx = 1 },
-    .{ .frame = 38, .dx = 4 }, .{ .frame = 39, .dx = 4 }, null,                      null,
-    null,                      null,                      null,                      null,
-    .{ .frame = 40, .dx = 2 }, .{ .frame = 41, .dx = 3 }, .{ .frame = 42, .dx = 3 },
-};
+//! The buttons, portrait slots, hints, pressed frames and shutters are the core module
+//! "interface" (core/ui.zig `Panel`).
 
 const std = @import("std");
 const gui_mod = @import("../gui.zig");
@@ -28,16 +14,23 @@ const panel_h = gui_mod.panel_h;
 const Cursor = gui_mod.Cursor;
 const panel_y = gui_mod.panel_y;
 const Button = gui_mod.Button;
-const shutters = gui_mod.shutters;
+const places = gui_mod.panelPlaces;
 
 /// Panel button centre (for hotkeys).
 pub fn rectCenter(btn: Button) [2]f32 {
-    const rc = rect(@backingInt(btn));
+    const rc = rect(placeOf(btn) orelse return .{ 0, 0 });
     return .{ (rc[0] + rc[2]) / 2, (rc[1] + rc[3]) / 2 };
 }
 
+/// The place of button `btn` (null: the panel has none).
+fn placeOf(btn: Button) ?usize {
+    for (places(), 0..) |p, i| if (p.button == btn) return i;
+    return null;
+}
+
+/// Place `i`'s rect on the screen.
 fn rect(i: usize) [4]f32 {
-    const r = rects[i];
+    const r = places()[i].rect;
     return .{ r[0], r[1] + panel_y, r[2], r[3] + panel_y };
 }
 
@@ -47,16 +40,25 @@ fn inside(rc: [4]f32, x: f32, y: f32) bool {
 
 /// The button is a hero portrait.
 pub fn isPortrait(b: Button) bool {
-    return switch (b) {
-        .hero0, .hero1, .hero2, .hero3, .hero4 => true,
-        else => false,
-    };
+    return b.slot() != null;
 }
 
 /// Button under a screen point (first matching rect, 0x4b2440).
 pub fn buttonAt(x: f32, y: f32) ?Button {
-    for (0..rects.len) |i| if (inside(rect(i), x, y)) return @fromBackingInt(@intCast(i));
+    for (places(), 0..) |p, i| if (inside(rect(i), x, y)) return p.button;
     return null;
+}
+
+/// The shutters per place, each at its minimum before the first tick.
+fn shutterState(self: *Gui) *[gui_mod.max_places]f32 {
+    if (self.shutter == null) {
+        var a: [gui_mod.max_places]f32 = @splat(0);
+        for (places(), 0..) |p, i| if (p.shutter) |m| {
+            a[i] = m[0];
+        };
+        self.shutter = a;
+    }
+    return &self.shutter.?;
 }
 
 /// Button availability (0x4b18a0).
@@ -64,10 +66,9 @@ pub fn enabled(w: *og.state.world.World, btn: Button) bool {
     const hero = w.selectedHero() orelse return false;
     const heroes = w.party();
     const party = heroes.slice();
-    const i = @backingInt(btn);
     // A disabled hero (DisableHeroes: inside the tunnel and the worker's room only
     // the selected one) can't be picked; the portrait is shuttered.
-    if (i >= 6 and i <= 10) return i - 6 < party.len and party[i - 6].enabled;
+    if (btn.slot()) |k| return k < party.len and party[k].enabled;
     if (btn == .skills or btn == .stats) return true;
     const b = if (w.battle) |*bt| bt else {
         return switch (btn) {
@@ -79,9 +80,9 @@ pub fn enabled(w: *og.state.world.World, btn: Button) bool {
     const acted = if (b.fighterOf(hero)) |fi| b.fighters.items[fi].acted else false;
     return switch (btn) {
         .inventory, .give, .hand, .short_list, .defend => !busy and !acted,
-        // Push (0x4b1907): not Medusa (119), not a woman (`sex` 1, +0x24580), the hero
-        // hasn't moved yet; not during a counterattack (phase).
-        .push => !busy and !acted and !og.fields.isMedusa(hero) and hero.getInt("sex") != 1,
+        // Push (0x4b1907): its CanPush (native NoPush: Medusa; the core's flag), not a woman
+        // (`sex` 1, +0x24580), the hero hasn't moved yet; not during a counterattack (phase).
+        .push => !busy and !acted and og.state.world.World.nativeOf(hero).ui.can_push and hero.getInt("gender") != 1,
         .turn => true,
         .end_turn => !busy,
         else => true,
@@ -93,16 +94,18 @@ fn tickPanel(self: *Gui, w: *og.state.world.World) void {
     if (w.ticks == self.shutter_tick) return;
     const n = @min(w.ticks -% self.shutter_tick, 30);
     self.shutter_tick = w.ticks;
-    // The inventory button changed direction: "menu_open" / "menu_close" (0x4b24ee).
+    // The inventory button changed direction: UiSounds inventory_open / inventory_close (0x4b24ee).
     const inv_open = enabled(w, .inventory);
     if (self.inv_dir) |prev| if (prev != inv_open) {
-        w.out.sound(w.gpa, if (inv_open) "menu_open" else "menu_close", null);
+        const ss = og.core.modules.ui().sounds;
+        w.out.sound(w.gpa, if (inv_open) ss.inventory_open else ss.inventory_close, null);
     };
     self.inv_dir = inv_open;
-    for (shutters, 0..) |sh, i| {
-        const m = sh orelse continue;
-        const d: f32 = if (enabled(w, @fromBackingInt(@intCast(i)))) -0.6 else 0.6;
-        self.shutter[i] = std.math.clamp(self.shutter[i] + d * og.num.toF32(n), m[0], m[1]);
+    const st = shutterState(self);
+    for (places(), 0..) |p, i| {
+        const m = p.shutter orelse continue;
+        const d: f32 = if (enabled(w, p.button)) -0.6 else 0.6;
+        st[i] = std.math.clamp(st[i] + d * og.num.toF32(n), m[0], m[1]);
     }
 }
 
@@ -110,24 +113,25 @@ fn tickPanel(self: *Gui, w: *og.state.world.World) void {
 pub fn tooltip(self: *Gui, w: *og.state.world.World, strings: ?*const og.formats.strtab.Table) ?[]const u8 {
     self.tip_extra = ""; // else a medicine's "+20HP" sticks to the portrait hint
     const btn = self.hover_btn orelse return null;
-    const i = @backingInt(btn);
     if (!enabled(w, btn)) return null;
-    if (i >= 6 and i <= 10) {
+    if (btn.slot()) |k| {
         const heroes = w.party();
         const party = heroes.slice();
-        if (i - 6 >= party.len) return null;
-        const hero = party[i - 6];
-        if (strings) |st| if (st.get(og.fields.nameId(hero))) |t| return t;
+        if (k >= party.len) return null;
+        const hero = party[k];
+        if (strings) |st| if (st.get(og.fields.classicId(hero))) |t| return t;
         return hero.name;
     }
     // Hand button (0x4b26a7…0x4b26e8): an item in hand shows the item tooltip
     // (0x45c6b0: name and skill "Lv.N"); an empty hand in battle does the same for
-    // the fist "GS_fist_all" (0x5249ec); otherwise "Hand" (504).
+    // the party's shared weapon, what an empty hand strikes with (combat/weapons.zig
+    // defaultWeapon: no owner, place party; the exe's "GS_fist_all", 0x5249ec); otherwise "Hand" (504).
     if (btn == .hand) if (w.selectedHero()) |hero| {
-        const held = og.inventory.equipment.equipped(w, hero, .hand) orelse if (w.battle != null) w.rt.findObject("GS_fist_all") else null;
+        const held = og.inventory.equipment.equipped(w, hero, .hand) orelse if (w.battle != null) sharedWeapon(w) else null;
         if (held) |o| if (gui_short.itemTooltip(self, hero, o, strings)) |t| return t;
     };
-    if (strings) |st| return st.get(tooltips[i]);
+    const hint = og.core.ui_text.idNamed(places()[placeOf(btn) orelse return null].hint) orelse return null;
+    if (strings) |st| return st.get(hint);
     return null;
 }
 
@@ -155,7 +159,7 @@ fn drawPanelSides(self: *Gui, r: *c.SDL_Renderer) !void {
     defer gfx.middleView(r);
     const y0: f32 = 16;
     for ([2]f32{ 0, 640 + gfx.wide }) |x|
-        try gfx.check(c.SDL_RenderTexture9Grid(r, plate, null, 33, 33, 45, 45, 0.35, &.{ .x = x, .y = panel_y + y0, .w = gfx.wide, .h = panel_h - y0 }));
+        try gfx.check(c.SDL_RenderTexture9Grid(r, plate, null, 33, 33, 45, 45, 0.35, &.{ .x = x, .y = gfx.uiY() + panel_y + y0, .w = gfx.wide, .h = panel_h - y0 }));
 }
 
 /// Panel (0x4b1d50): frame 0, portraits (frame 2; 3 when spent in battle), selection
@@ -168,12 +172,12 @@ pub fn drawPanel(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World) !void
     const heroes = w.party();
     if (self.text) |*t| @memset(t.pixels, 0);
     for (heroes.slice(), 0..) |hero, i| {
-        if (i >= 5) break;
-        const rc = rect(6 + i);
+        const rc = rect(placeOf(.portrait(i)) orelse break);
         const sel = std.ascii.eqlIgnoreCase(hero.name, w.selected_hero);
         // Grey portrait (frame 3, 0x4b1de8 → 0x4922d0): in battle — acted
-        // (+0x24610/+0x24614) with less than 1 move left; outside battle — Medusa (0x4b1df1).
-        var exhausted = w.battle == null and og.fields.isMedusa(hero);
+        // (+0x24610/+0x24614) with less than 1 move left; outside battle — one
+        // whose CanSelect says no (native BattleOnly: Medusa, 0x4b1df1; the core's flag).
+        var exhausted = w.battle == null and !og.state.world.World.nativeOf(hero).ui.can_select;
         if (w.battle) |*b| if (b.fighterOf(hero)) |fi| {
             const f = b.fighters.items[fi];
             exhausted = f.acted and f.budget() < 1.0;
@@ -213,17 +217,18 @@ pub fn drawPanel(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World) !void
         try drawGlyphsBase(self, r, &self.hp_glyphs, 1, s, 547, panel_y + 21 + 32);
     }
     // Pressed button only while the mouse is held over it.
-    if (self.pressed_btn) |pb| if (pb == self.hover_btn) if (pressed[@backingInt(pb)]) |pf| {
-        const rc = rect(@backingInt(pb));
+    if (self.pressed_btn) |pb| if (pb == self.hover_btn) if (placeOf(pb)) |i| if (places()[i].pressed) |pf| {
+        const rc = rect(i);
         if (self.panel.len() > pf.frame) try self.panel.draw(r, pf.frame, rc[0] + pf.dx, rc[1] + 1);
     };
 }
 
 /// Panel shutters (0x4b2347), over the hand weapon and the ammo count.
 pub fn drawShutters(self: *Gui, r: *c.SDL_Renderer) !void {
-    for (shutters, 0..) |sh, i| {
-        _ = sh orelse continue;
-        const fr: usize = @intFromFloat(@trunc(self.shutter[i])); // _ftol (0x4b2358)
+    const st = shutterState(self);
+    for (places(), 0..) |p, i| {
+        _ = p.shutter orelse continue;
+        const fr: usize = @intFromFloat(@trunc(st[i])); // _ftol (0x4b2358)
         if (fr >= self.panel.len()) continue;
         const rc = rect(i);
         // Shutter from the button's top-left corner (0x4b2347).
@@ -231,17 +236,15 @@ pub fn drawShutters(self: *Gui, r: *c.SDL_Renderer) !void {
     }
 }
 
-/// Dialog box images: speaker portrait (`icons\\<spriteFile>.spr`; HQ —
-/// "Head Quarters", Lamare — "Lamare", 0x459180) and `dialog_box.spr`.
+/// Dialog box images: speaker portrait (`icons\\<spriteFile>.spr`; a speaker without an
+/// actor: its rules Speaker row's, 0x459180) and `dialog_box.spr`.
 pub fn dialogArt(self: *Gui, w: *og.state.world.World) @import("../level/overlay.zig").DialogArt {
     const st = w.scene.subtitle orelse return .{};
     var art: @import("../level/overlay.zig").DialogArt = .{ .box = &self.dialog_box };
     if (w.actorObject(st.speaker)) |o| {
         art.portrait = self.portrait(o);
-    } else if (std.ascii.eqlIgnoreCase(st.speaker, "HQ")) {
-        art.portrait = self.icon("Head Quarters");
-    } else if (std.ascii.startsWithIgnoreCase(st.speaker, "Lamar")) {
-        art.portrait = self.icon("Lamare");
+    } else if (og.core.modules.speakerPortrait(st.speaker)) |p| {
+        art.portrait = self.icon(p);
     }
     return art;
 }
@@ -262,13 +265,11 @@ pub fn drawSignature(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World) !
 
 /// Panel click: the hero's name if a portrait was hit.
 pub fn heroAt(w: *og.state.world.World, x: f32, y: f32) ?*og.script.object.Object {
-    const btn = buttonAt(x, y) orelse return null;
-    const i = @backingInt(btn);
-    if (i < 6 or i > 10) return null;
+    const k = (buttonAt(x, y) orelse return null).slot() orelse return null;
     const heroes = w.party();
     const party = heroes.slice();
-    if (i - 6 >= party.len) return null;
-    return party[i - 6];
+    if (k >= party.len) return null;
+    return party[k];
 }
 
 /// Bitmap font text with a (10,10,10) shadow at (x, y) or centred on x.
@@ -283,29 +284,29 @@ pub fn drawWeapon(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World) !voi
     const hero = w.selectedHero() orelse return;
     const slot: c.SDL_FRect = .{ .x = 85, .y = panel_y + 5, .w = 68, .h = 55 };
     const wpn = og.inventory.equipment.equipped(w, hero, .hand) orelse {
-        // In battle with no weapon (not Medusa): the fist, frame 1 centred in the slot.
-        if (w.battle != null and !og.fields.isMedusa(hero) and self.panel.len() > 1) {
+        // In battle with no weapon (not one NoHands, a native mark): the fist, frame 1 centred.
+        if (w.battle != null and !hero.implementsC("NoHands") and self.panel.len() > 1) {
             const sz = self.panel.sizes.items[1];
             try self.panel.drawShadowed(r, 1, gfx.Frames.center(slot.x, slot.w, sz[0]), gfx.Frames.center(slot.y, slot.h, sz[1]));
         }
         return;
     };
-    defer if (!og.inventory.equipment.weaponVisible(og.fields.nameId(hero), og.fields.nameId(wpn)) and self.panel.len() > 43) {
+    defer if (!og.inventory.equipment.weaponVisible(hero, wpn) and self.panel.len() > 43) {
         // Unusable by the hero (0x481f50): crossed out, frame 43 at (slot.x − 1,
         // slot.y + 3) = (84, 420) (0x4b22ee).
         self.panel.draw(r, 43, slot.x - 1, slot.y + 3) catch {};
     };
     // Icon frame 1 centred in the slot with its shadow (0x47d6e0, 0x4b212a).
-    if (self.icon(wpn.getString("spriteFile"))) |fr| if (fr.len() > 0) {
+    if (self.icon(wpn.getString("icon"))) |fr| if (fr.len() > 0) {
         const k: usize = if (fr.len() > 1) 1 else 0;
         const size = fr.sizes.items[k];
         try fr.drawShadowed(r, k, gfx.Frames.center(slot.x, slot.w, size[0]), gfx.Frames.center(slot.y, slot.h, size[1]));
     };
     // Rechargeable (0x4b21f4): red battery (frame 45) and the turns left, or green
     // (46) when ready; at (88, 451), the number in font 2 centred at (109, 460).
-    const rt = og.battle.rules.rechargeTurns(wpn.getInt("classType"));
-    if (rt > 0) {
-        const left = og.state.world.World.nativeOf(wpn).fight.recharge;
+    // Rechargeable by its class or attack row, or counting down (a RechargeTurns hook).
+    const left = og.state.world.World.nativeOf(wpn).fight.recharge;
+    if (og.combat.weapons.rechargeOf(hero, wpn) > 0 or left > 0) {
         if (left > 0) {
             if (self.panel.len() > 45) try self.panel.draw(r, 45, 85 + 3, panel_y + 5 + 0x22);
             var rb: [16]u8 = undefined;
@@ -314,7 +315,7 @@ pub fn drawWeapon(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World) !voi
         } else if (self.panel.len() > 46) try self.panel.draw(r, 46, 85 + 3, panel_y + 5 + 0x22);
         return;
     }
-    const id = wpn.getInt("ammoUsed");
+    const id = wpn.getInt("ammo");
     if (id <= 0) return;
     const n = og.inventory.ammo.ammoCount(w, hero.name, id);
     if (self.panel.len() > 44) try self.panel.draw(r, 44, 85 + 3, panel_y + 5 + 0x22);
@@ -335,12 +336,14 @@ pub fn drawHeroFrame(self: *Gui, r: *c.SDL_Renderer, box: [4]f32) !void {
     try self.border.draw(r, 3, box[2] - 7, box[3] - 5);
 }
 
-pub fn drawCursor(self: *Gui, r: *c.SDL_Renderer, x0: f32, y: f32) !void {
+pub fn drawCursor(self: *Gui, r: *c.SDL_Renderer, x0: f32, y0: f32) !void {
     if (self.cursor.len() == 0) return;
-    // Over the whole frame: the pointer can be over the wide frame's sides.
+    // Over the whole frame: the pointer can be over the wide frame's sides (above a tall
+    // canvas's interface box too).
     gfx.wholeView(r);
     defer gfx.middleView(r);
     const x = x0 + gfx.wide;
+    const y = y0 + gfx.uiY();
     const k = if (self.cursor_frame < self.cursor.len()) self.cursor_frame else 0;
     self.cursor_frame = 0;
     if (self.cursor_anchor == .push and self.cursor.len() > 2) {
@@ -369,7 +372,7 @@ fn labelImpl(self: *Gui, r: *c.SDL_Renderer, font: ?og.formats.font.Font, x: f32
     h.update(std.mem.asBytes(&gui_text.fontId(f)));
     h.update(&.{@intFromBool(shadow)});
     const tex = self.texts.get(h.final()) orelse blk: {
-        var img = try og.formats.image.Image.init(self.gpa, tw, th);
+        var img = try og.image.Image.init(self.gpa, tw, th);
         defer img.deinit(self.gpa);
         @memset(img.pixels, 0);
         if (shadow) gui_mod.textShadow(f, img, 0, 0, s, col) else f.draw(img, 0, 0, s, col);
@@ -378,4 +381,13 @@ fn labelImpl(self: *Gui, r: *c.SDL_Renderer, font: ?og.formats.font.Font, x: f32
     // Centred by an integer shift x − (w >> 1) (0x47b640).
     const fx: f32 = if (centered) x - og.num.toF32((tw - 2) >> 1) else x;
     try gfx.check(c.SDL_RenderTexture(r, tex, null, &.{ .x = @round(fx), .y = y, .w = @floatFromInt(tw), .h = @floatFromInt(th) }));
+}
+
+/// The party's shared weapon (the fist: a weapon of no owner, place party).
+fn sharedWeapon(w: *og.state.world.World) ?*og.script.object.Object {
+    for (w.rt.objects.items) |o| {
+        const n = og.state.world.World.nativeOf(o);
+        if (n.kind == .weapon and !n.deleted and og.fields.owner(o).len == 0 and og.inventory.item.placeOf(o) == .party) return o;
+    }
+    return null;
 }

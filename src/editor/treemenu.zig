@@ -4,28 +4,33 @@
 //! from the level (as "New level from this one").
 
 const std = @import("std");
-const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const tx = @import("text.zig");
-const pages = @import("pages.zig");
-const codeview = @import("codeview.zig");
+const entries = @import("entries.zig");
+const doctabs = @import("doctabs.zig");
+const kinds = @import("kinds.zig");
 const videopage = @import("videopage.zig");
 const soundpage = @import("soundpage.zig");
-const ui_main = @import("main.zig");
-const main = @import("app.zig");
-const App = main.App;
-const theme = main.theme;
+const main = @import("main.zig");
+const app_mod = @import("app.zig");
+const App = app_mod.App;
+const levelops = @import("levelops.zig");
+const theme = app_mod.theme;
 const store_mod = @import("store.zig");
 const common_archive = store_mod.common_archive;
 const voices = @import("voices.zig");
+const dialog = @import("opengorky").formats.dialog;
 const clay = @import("clay.zig");
+const gui = @import("widgets.zig");
+const lay = @import("layout.zig");
 
 pub const Kind = enum { level, entry, scene, script, sound, video };
 
-/// A tree row: its kind and name (level, entry id, scene, script entry, sound, video).
+/// A tree row: its kind and name (level, entry `archive|entry` or id, scene, script entry,
+/// sound, video).
 pub const Item = struct {
     kind: Kind,
-    buf: [64]u8 = undefined,
+    buf: [160]u8 = undefined,
     len: usize = 0,
 
     pub fn of(kind: Kind, n: []const u8) Item {
@@ -42,14 +47,18 @@ pub const Item = struct {
 
 pub const Menu = struct { at: [2]f32, item: Item };
 
-/// The document shown now as a tree item (what Cmd+C copies outside the level's objects).
+/// The document shown now as a tree item (what Cmd+C copies outside the level's objects;
+/// none over code).
 pub fn current(app: *App) ?Item {
-    return switch (app.tab) {
-        .battles, .locations => if (app.current) |i| Item.of(.level, app.levels[i].name) else null,
-        .enemies, .items, .heroes => if (app.entry) |i| Item.of(.entry, app.catalog.entries.items[i].id) else null,
-        .scenes => if (app.scenes.dlg.len == 0) if (app.scene) |i| Item.of(.scene, app.catalog.scenes.items[i].name) else null else null,
-        .sounds => if (app.sound_sel.get().len > 0) Item.of(.sound, app.sound_sel.get()) else null,
-        .videos => if (app.video.sel.get().len > 0) Item.of(.video, app.video.sel.get()) else null,
+    doctabs.refresh(app);
+    const d = app.active orelse return null;
+    const k = d.key();
+    return switch (d.tab) {
+        .battles, .locations => Item.of(.level, k),
+        .characters, .items => Item.of(.entry, k),
+        .scenes => if (std.ascii.endsWithIgnoreCase(k, ".dlg")) null else Item.of(.scene, k),
+        .sounds => Item.of(.sound, k),
+        .videos => Item.of(.video, k),
         else => null,
     };
 }
@@ -61,23 +70,24 @@ pub fn copy(app: *App, it: Item) void {
 
 /// The menu for row `it` at the pointer.
 pub fn open(app: *App, it: Item) void {
-    app.tree_menu = .{ .at = .{ app.mouse[0] + 2, @min(app.mouse[1], app.size[1] - 260) }, .item = it };
+    app.tree_menu = .{ .at = .{ app.mouse[0] + 2, @min(app.mouse[1], app.size[1] - lay.width.menu) }, .item = it };
 }
 
 pub fn draw(app: *App, a: Allocator) void {
     const m = app.tree_menu orelse return;
     const it = m.item;
-    ui_main.menuPanel(clay.id("tree_menu"), 250, .{ .offset = .{ .x = m.at[0], .y = m.at[1] }, .zIndex = 100, .attachTo = ui.CLAY_ATTACH_TO_ROOT });
+    gui.menuPanel(clay.id("tree_menu"), lay.width.menu, .{ .offset = .{ .x = m.at[0], .y = m.at[1] }, .zIndex = 100, .attachTo = ui.CLAY_ATTACH_TO_ROOT });
     // Its name lives in this frame (clay draws after this returns).
-    ui_main.menuTitle(a, a.dupe(u8, it.name()) catch "", tx.get(kindName(it.kind)));
-    ui_main.menuLine();
-    if (ui_main.menuRow(app, "tm_open", .file_text, tx.get(tx.tm_open), "", theme.text, true)) openItem(app, it);
-    ui_main.menuLine();
-    if (ui_main.menuRow(app, "tm_copy", .copy, tx.get(tx.cm_copy), ui_main.cmdKey(a, "C"), theme.text, true)) copy(app, it);
+    const title = if (it.kind == .entry) kinds.label(app, .items, it.name()) else it.name();
+    gui.menuTitle(a, a.dupe(u8, title) catch "", tx.get(kindName(it.kind)));
+    gui.menuLine();
+    if (gui.menuRow(app, "tm_open", .file_text, tx.get(tx.tm_open), "", theme.text, true)) openItem(app, it);
+    gui.menuLine();
+    if (gui.menuRow(app, "tm_copy", .copy, tx.get(tx.cm_copy), main.cmdKey(a, "C"), theme.text, true)) copy(app, it);
     const can_paste = app.tree_clip != null;
-    if (ui_main.menuRow(app, "tm_paste", .copy, tx.get(tx.tm_paste), ui_main.cmdKey(a, "V"), theme.text, can_paste)) duplicate(app, app.tree_clip.?);
-    if (ui_main.menuRow(app, "tm_dup", .copy, tx.get(tx.cm_duplicate), ui_main.cmdKey(a, "D"), theme.text, true)) duplicate(app, it);
-    if (ui_main.menuRow(app, "tm_rename", .pencil, tx.get(tx.cm_rename), "", theme.text, it.kind == .scene)) renameScene(app, it.name());
+    if (gui.menuRow(app, "tm_paste", .copy, tx.get(tx.tm_paste), main.cmdKey(a, "V"), theme.text, can_paste)) duplicate(app, app.tree_clip.?);
+    if (gui.menuRow(app, "tm_dup", .copy, tx.get(tx.cm_duplicate), main.cmdKey(a, "D"), theme.text, true)) duplicate(app, it);
+    if (gui.menuRow(app, "tm_rename", .pencil, tx.get(tx.cm_rename), "", theme.text, it.kind == .scene)) renameScene(app, it.name());
     clay.close();
 }
 
@@ -95,42 +105,28 @@ fn kindName(k: Kind) tx.Msg {
 }
 
 /// Row `it` opened as a click on it does.
-pub fn openItem(app: *App, it: Item) void {
+fn openItem(app: *App, it: Item) void {
     const n = it.name();
     switch (it.kind) {
         .level => app.showLevel(n, null),
-        .entry => if (pages.entryById(app, n)) |i| {
-            app.setTab(switch (app.catalog.entries.items[i].kind) {
-                .enemy => .enemies,
-                .hero => .heroes,
-                else => .items,
-            });
-            app.entry = i;
-        } else |_| {},
+        .entry => if (entries.entryByKey(app, n)) |i| doctabs.show(app, kinds.tabOf(app.catalog.entries.items[i].kind), n) else |_| {},
         .scene => app.showScene(n),
-        .script => if (app.store.file(common_archive, n)) |f| codeview.open(app, f, null) else |_| {},
-        .sound => {
-            app.setTab(.sounds);
-            app.sound_sel.set(n);
-        },
-        .video => {
-            app.setTab(.videos);
-            app.video.sel.set(n);
-        },
+        .script => if (app.store.file(common_archive, n)) |f| doctabs.showCode(app, f, null) else |_| {},
+        .sound => doctabs.show(app, .sounds, n),
+        .video => doctabs.show(app, .videos, n),
     }
 }
 
 fn renameScene(app: *App, n: []const u8) void {
     app.showScene(n);
-    app.scenes.naming = true;
-    app.scenes.name.set(n);
+    @import("scenepage.zig").rename(app, n);
 }
 
 /// A copy of `it` beside it, opened (Paste and Duplicate).
 pub fn duplicate(app: *App, it: Item) void {
     const r = switch (it.kind) {
         .level => copyLevel(app, it.name()),
-        .entry => if (pages.entryById(app, it.name())) |i| pages.copyEntry(app, i) else |e| e,
+        .entry => if (entries.entryByKey(app, it.name())) |i| entries.copyEntry(app, i) else |e| e,
         .scene => copyScene(app, it.name()),
         .script => copyScript(app, it.name()),
         .sound => copySound(app, it.name()),
@@ -140,36 +136,21 @@ pub fn duplicate(app: *App, it: Item) void {
 }
 
 /// `base` with `_copy`, `_copy2`… — the first that `taken` does not have (`ext` after it).
-fn freeName(buf: []u8, base: []const u8, ext: []const u8, ctx: anytype, taken: fn (@TypeOf(ctx), []const u8) bool) ![]const u8 {
-    for (1..1000) |n| {
-        const s = if (n == 1) try std.fmt.bufPrint(buf, "{s}_copy{s}", .{ base, ext }) else try std.fmt.bufPrint(buf, "{s}_copy{d}{s}", .{ base, n, ext });
-        if (!taken(ctx, s)) return s;
-    }
-    return error.NoFreeName;
+fn freeName(buf: []u8, base: []const u8, ext: []const u8, ctx: anytype, comptime taken: fn (@TypeOf(ctx), []const u8) bool) ![]const u8 {
+    var bb: [96]u8 = undefined;
+    return @import("freename.zig").freeName(buf, try std.fmt.bufPrint(&bb, "{s}_copy", .{base}), .{ .sep = "", .ext = ext }, ctx, taken);
 }
 
-/// A level made from level `n` (opened first): the editor's "new level from this one".
+/// Level `n` copied whole beside it (levelops.copyLevel), opened.
 fn copyLevel(app: *App, n: []const u8) !void {
-    const i = for (app.levels, 0..) |lv, k| {
-        if (std.ascii.eqlIgnoreCase(lv.name, n)) break k;
-    } else return error.NotFound;
-    const battle = app.levels[i].battle;
-    if (app.current == null or app.current.? != i) {
-        app.setTab(if (battle) .battles else .locations);
-        app.requestOpen(i);
-        // Unsaved edits: the first request only warns.
-        if (app.current == null or app.current.? != i) return;
-    }
     var nb: [32]u8 = undefined;
     // Level names are 24 letters at most: the original's name shortened to fit.
     const base = n[0..@min(n.len, 15)];
     const name = for (2..100) |k| {
         const s = try std.fmt.bufPrint(&nb, "{s}_c{d}", .{ base, k });
-        for (app.levels) |lv| {
-            if (std.ascii.eqlIgnoreCase(lv.name, s)) break;
-        } else break s;
+        if (app.levelIndex(s) == null) break s;
     } else return error.NoFreeName;
-    app.newLevel(app.frame.allocator().dupe(u8, name) catch return);
+    return levelops.copyLevel(app, n, try app.frame.allocator().dupe(u8, name));
 }
 
 /// Scene `n` copied: its script, points and each dialogue it starts (the copy's lines
@@ -181,8 +162,7 @@ fn copyScene(app: *App, n: []const u8) !void {
     var nb: [64]u8 = undefined;
     const new = try freeName(&nb, n, "", app, struct {
         fn taken(ap: *App, s: []const u8) bool {
-            for (ap.catalog.scenes.items) |sc| if (std.ascii.eqlIgnoreCase(sc.name, s)) return true;
-            return false;
+            return ap.sceneIndex(s) != null;
         }
     }.taken);
     var text = try a.dupe(u8, app.store.text(scr));
@@ -228,13 +208,9 @@ fn copyVoices(app: *App, a: Allocator, files: *std.ArrayList(store_mod.NewFile),
     }
 }
 
-/// `city-x.dlg` → `city_x_` (formats/dialog.zig voiceName).
+/// `city-x.dlg` → `city_x_` (formats/dialog.zig voicePrefix).
 fn voiceStem(a: Allocator, dlg: []const u8) ![]const u8 {
-    const stem = dlg[0 .. std.mem.lastIndexOfScalar(u8, dlg, '.') orelse dlg.len];
-    const s = try std.fmt.allocPrint(a, "{s}_", .{stem});
-    std.mem.replaceScalar(u8, s, '-', '_');
-    _ = std.ascii.lowerString(s, s);
-    return s;
+    return dialog.voicePrefix(try a.alloc(u8, dlg.len + 1), dlg);
 }
 
 fn copyScript(app: *App, entry: []const u8) !void {
@@ -247,22 +223,16 @@ fn copyScript(app: *App, entry: []const u8) !void {
         }
     }.taken);
     const nf = try app.store.addNew(&.{.{ .archive = common_archive, .entry = new, .text = try app.gpa.dupe(u8, app.store.text(f)) }});
-    codeview.open(app, nf, null);
+    doctabs.showCode(app, nf, null);
     app.setStatus(tx.st_tree_made, .{ new, entry });
 }
 
 fn copySound(app: *App, n: []const u8) !void {
     const bytes = soundpage.bytesOf(app, app.frame.allocator(), n) orelse return error.NotFound;
     var nb: [64]u8 = undefined;
-    const new = try freeName(&nb, std.fs.path.stem(n), ".wav", app, struct {
-        fn taken(ap: *App, s: []const u8) bool {
-            for (ap.player.names(ap, ap.frame.allocator())) |x| if (std.ascii.eqlIgnoreCase(x, s)) return true;
-            return false;
-        }
-    }.taken);
+    const new = try freeName(&nb, std.fs.path.stem(n), ".wav", app, soundpage.soundTaken);
     _ = try app.store.addNew(&.{.{ .archive = soundpage.archive_path, .entry = new, .text = try app.gpa.dupe(u8, bytes) }});
-    app.setTab(.sounds);
-    app.sound_sel.set(new);
+    doctabs.show(app, .sounds, new);
     app.setStatus(tx.st_tree_made, .{ new, n });
 }
 
@@ -274,22 +244,10 @@ fn copyVideo(app: *App, n: []const u8) !void {
             return false;
         }
     }.taken);
-    const a = app.frame.allocator();
-    var root = try Io.Dir.cwd().openDir(app.io, app.game_dir, .{});
-    defer root.close(app.io);
-    try root.copyFile(try std.fmt.allocPrint(a, "avi/{s}", .{n}), root, try std.fmt.allocPrint(a, "avi/{s}", .{new}), app.io, .{});
+    // Through the store (saved, in the history), as an imported video.
+    const f = try app.store.file(store_mod.video_dir, n);
+    _ = try app.store.addNew(&.{.{ .archive = store_mod.video_dir, .entry = new, .text = try app.gpa.dupe(u8, app.store.text(f)) }});
     app.video.read = false;
-    app.setTab(.videos);
-    app.video.sel.set(new);
+    doctabs.show(app, .videos, new);
     app.setStatus(tx.st_tree_made, .{ new, n });
-}
-
-test freeName {
-    var buf: [32]u8 = undefined;
-    const taken = struct {
-        fn f(_: void, s: []const u8) bool {
-            return std.mem.eql(u8, s, "a_copy.s");
-        }
-    }.f;
-    try std.testing.expectEqualStrings("a_copy2.s", try freeName(&buf, "a", ".s", {}, taken));
 }

@@ -11,16 +11,15 @@ const gui_windows = @import("windows.zig");
 const SkillWindow = gui_windows.SkillWindow;
 const StatsWindow = gui_windows.StatsWindow;
 
-/// Hero skill list: (weapon nameID, level) with an icon.
+/// Hero skill list: (weapon classic_id, level) with an icon.
 fn skillRows(w: *og.state.world.World, hero: *og.script.object.Object, out: []og.state.object.Skill) []og.state.object.Skill {
     var n: usize = 0;
     for (og.state.world.World.nativeOf(hero).growth.skills.items) |sk| {
-        if (sk.level <= 0 or SkillWindow.iconOf(sk.id) == null) continue;
+        if (sk.level <= 0 or SkillWindow.iconOf(w, sk.id) == null) continue;
         if (n == out.len) break;
         out[n] = sk;
         n += 1;
     }
-    _ = w;
     return out[0..n];
 }
 
@@ -42,19 +41,19 @@ pub fn drawSkills(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World, stri
     @memset(t.pixels, 0);
     // Name and "Lv." in font 3 (04_system, 0x4af692, 0x4af653).
     const f = self.sys_font orelse self.font orelse return;
-    const name = if (strings) |st| st.get(og.fields.nameId(hero)) orelse hero.name else hero.name;
+    const name = if (strings) |st| st.get(og.fields.classicId(hero)) orelse hero.name else hero.name;
     const nx: i32 = @as(i32, @intFromFloat(sw.x)) + 125 - @as(i32, @intCast(f.measure(name)));
     gui_mod.textShadow(f, t.*, nx, @as(i32, @intFromFloat(sw.y)) + 77, name, gui_mod.text_light);
     for (0..3) |i| {
         const k = sw.scroll + i;
         if (k >= rows.len) break;
         const rc = SkillWindow.rows[i];
-        if (self.icon(SkillWindow.iconOf(rows[k].id).?)) |fr| if (fr.len() > 1) {
+        if (self.icon(SkillWindow.iconOf(w, rows[k].id).?)) |fr| if (fr.len() > 1) {
             const size = fr.sizes.items[1];
             try fr.drawShadowed(r, 1, gfx.Frames.center(@trunc(sw.x) + rc[0], rc[2] - rc[0], size[0]), gfx.Frames.center(@trunc(sw.y) + rc[1], rc[3] - rc[1], size[1]));
         };
         var tb: [24]u8 = undefined;
-        const lv = std.fmt.bufPrint(&tb, "{s}{d}", .{ if (strings) |st| st.get(577) orelse "Lv." else "Lv.", rows[k].level }) catch continue;
+        const lv = std.fmt.bufPrint(&tb, "{s}{d}", .{ if (strings) |st| st.get(og.core.ui_text.id(.level_short)) orelse "Lv." else "Lv.", rows[k].level }) catch continue;
         gui_mod.textShadow(f, t.*, @as(i32, @intFromFloat(sw.x + rc[2] - 30)), @as(i32, @intFromFloat(sw.y + rc[1] + 10)), lv, gui_mod.text_light);
     }
     try gfx.drawImage(r, &self.win_tex, t.*);
@@ -75,16 +74,17 @@ pub fn skillTooltip(self: *Gui, w: *og.state.world.World, mx: f32, my: f32, stri
 }
 
 /// Window rows: (current, limit) per 0x48fcb0… — exp / level threshold, hp /
-/// max_hp, move, luck %, accuracy %, counterattack %, coolness (rage / max_rage).
+/// max_hp, move, luck %, accuracy %, counterattack % (of Value(stat_cap)), coolness (rage / max_rage).
 fn statRow(hero: *og.script.object.Object, i: usize) [2]f32 {
     const f = og.fields.getF;
+    const cap: f32 = @floatFromInt(og.rules.value(.stat_cap));
     return switch (i) {
         0 => .{ @floatFromInt(og.fields.experience(hero)), @floatFromInt(og.battle.rules.levelThreshold(hero.getInt("level"))) },
         1 => .{ @floatFromInt(og.fields.hp(hero)), @floatFromInt(og.fields.maxHp(hero)) },
         2 => .{ @floatFromInt(og.fields.walkRange(hero)), @floatFromInt(og.fields.walkRange(hero)) },
-        3 => .{ f(hero, "luck"), 100 },
-        4 => .{ f(hero, "accuracy"), 100 },
-        5 => .{ f(hero, "counterAttack"), 100 },
+        3 => .{ f(hero, "luck"), cap },
+        4 => .{ f(hero, "accuracy"), cap },
+        5 => .{ f(hero, "counter_attack"), cap },
         else => blk: {
             const rmax: f32 = @floatFromInt(hero.getInt("max_rage"));
             var cur: f32 = @floatFromInt(hero.getInt("rage"));
@@ -95,13 +95,13 @@ fn statRow(hero: *og.script.object.Object, i: usize) [2]f32 {
 }
 
 /// "+" (0x4b0980): health and coolness always, luck/accuracy/counterattack up to
-/// 100; "−" (0x4b0a90): while above 0, coolness while max_rage ≥ 1 (may go
+/// Value(stat_cap) (100); "−" (0x4b0a90): while above 0, coolness while max_rage ≥ 1 (may go
 /// negative). Remaining = total − Σ|points|; below zero — undo.
 pub fn statsClick(self: *Gui, w: *og.state.world.World, mx: f32, my: f32) void {
     const sw = &self.stats;
     if (!sw.upgrade or !sw.visible) return;
     const hero = w.actorObject(sw.hero) orelse return;
-    w.out.sound(w.gpa, "upgrade_setpoints", null);
+    w.out.sound(w.gpa, og.core.modules.ui().sounds.set_points, null);
     const X = @trunc(sw.x);
     const Y = @trunc(sw.y);
     var o: f32 = 0;
@@ -143,7 +143,7 @@ pub fn statsClick(self: *Gui, w: *og.state.world.World, mx: f32, my: f32) void {
     // Accept (0x4b0bc0): max_hp, luck, accuracy, counterattack, max_rage; leftover points are lost.
     if (mx >= X and mx <= X + 185 and my >= Y + 337 and my <= Y + 367) {
         og.inventory.points.applyLevelPoints(hero, sw.pts);
-        w.out.sound(w.gpa, "invgive", null);
+        w.out.sound(w.gpa, og.core.modules.ui().sounds.give, null);
         sw.upgrade = false;
         sw.close();
     }
@@ -156,7 +156,7 @@ pub fn drawStats(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World, strin
 
 /// Stats window on the inventory screen (0x42dc10): fixed at (450, 10), read-only.
 pub fn drawInventoryStats(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World, hero: []const u8, strings: ?*const og.formats.strtab.Table) !void {
-    if (!self.inv_stats.visible or !std.mem.eql(u8, self.inv_stats.hero, hero)) self.inv_stats.show(450, 10, hero, false, 0);
+    if (!self.inv_stats.visible or !std.mem.eql(u8, self.inv_stats.hero, hero)) self.inv_stats.show(og.core.modules.ui().windows.stats_inventory[0], og.core.modules.ui().windows.stats_inventory[1], hero, false, 0);
     return drawStatsWindow(self, r, w, strings, &self.inv_stats);
 }
 
@@ -174,7 +174,7 @@ fn drawStatsWindow(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World, str
     const f3 = self.sys_font orelse f2;
     const xi: i32 = @intFromFloat(X);
     const yi: i32 = @intFromFloat(Y);
-    const name = if (strings) |st| st.get(og.fields.nameId(hero)) orelse hero.name else hero.name;
+    const name = if (strings) |st| st.get(og.fields.classicId(hero)) orelse hero.name else hero.name;
     gui_mod.textShadow(f3, t.*, xi + 169 - @as(i32, @intCast(f3.measure(name))), yi + 18, name, gui_mod.text_light);
     var b: [96]u8 = undefined;
     const s = struct {
@@ -182,22 +182,23 @@ fn drawStatsWindow(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World, str
             return if (st) |x| x.get(id) orelse fb else fb;
         }
     }.get;
-    // Joan McFadden (nameID 24): one text "%s:\n%s +15%%" (0x52ac28) whose width
-    // (0x47b5e0) sums every character of both lines, so it starts at X + 225 − that
-    // (0x4aff35…0x4affc3): a long Russian line still fits the window.
-    if (og.fields.nameId(hero) == 24) {
-        const both = std.fmt.bufPrint(&b, "{s}:\n{s} +15%", .{ s(strings, 574, "special skill"), s(strings, 575, "healing") }) catch "";
+    // A healer (HealBonus; the exe: Joan McFadden, classic_id 24, 15): one text "%s:\n%s +15%%"
+    // (0x52ac28) whose width (0x47b5e0) sums every character of both lines, so it starts
+    // at X + 225 − that (0x4aff35…0x4affc3): a long Russian line still fits the window.
+    const heal = og.core.entity.heroOf(og.rules.who(hero)).heal_pct;
+    if (heal != 0) {
+        const both = std.fmt.bufPrint(&b, "{s}:\n{s} +{d}%", .{ s(strings, og.core.ui_text.id(.special_skill), "special skill"), s(strings, og.core.ui_text.id(.healing), "healing"), heal }) catch "";
         const x0 = xi + 225 - @as(i32, @intCast(f2.measure(both)));
         const nl = std.mem.indexOfScalar(u8, both, '\n') orelse both.len;
         gui_mod.textShadow(f2, t.*, x0, yi + 32, both[0..nl], gui_mod.text_light);
         if (nl < both.len) gui_mod.textShadow(f2, t.*, x0, yi + 32 + @as(i32, @intCast(f2.height + 1)), both[nl + 1 ..], gui_mod.text_light);
     }
-    const lv = std.fmt.bufPrint(&b, "{s}: {d}", .{ s(strings, 360, "LEVEL"), hero.getInt("level") }) catch "";
+    const lv = std.fmt.bufPrint(&b, "{s}: {d}", .{ s(strings, og.core.ui_text.id(.stat_level), "LEVEL"), hero.getInt("level") }) catch "";
     gui_mod.textShadow(f3, t.*, xi + 110, yi + 74, lv, gui_mod.text_dim);
     const labels = [7]struct { id: i32, fb: []const u8 }{
-        .{ .id = 350, .fb = "Experience" }, .{ .id = 351, .fb = "HP / Max HP" }, .{ .id = 352, .fb = "Walk Range" },
-        .{ .id = 353, .fb = "Luck" },       .{ .id = 354, .fb = "Accuracy" },    .{ .id = 355, .fb = "Counter Attack" },
-        .{ .id = 356, .fb = "Calmness" },
+        .{ .id = og.core.ui_text.id(.experience), .fb = "Experience" },  .{ .id = og.core.ui_text.id(.stat_hp), .fb = "HP / Max HP" },    .{ .id = og.core.ui_text.id(.stat_walk_range), .fb = "Walk Range" },
+        .{ .id = og.core.ui_text.id(.stat_luck), .fb = "Luck" },         .{ .id = og.core.ui_text.id(.stat_accuracy), .fb = "Accuracy" }, .{ .id = og.core.ui_text.id(.stat_counter), .fb = "Counter Attack" },
+        .{ .id = og.core.ui_text.id(.stat_calmness), .fb = "Calmness" },
     };
     for (0..7) |i| {
         const off = 33.5 * og.num.toF32(i);
@@ -225,7 +226,7 @@ fn drawStatsWindow(self: *Gui, r: *c.SDL_Renderer, w: *og.state.world.World, str
     if (sw.upgrade) {
         try self.hero_stats.draw(r, 17, X, Y + 337);
         try self.hero_stats.draw(r, 18, X - 60, Y + 10);
-        const acc = s(strings, 512, "Accept");
+        const acc = s(strings, og.core.ui_text.id(.accept), "Accept");
         // Centred (X+93, Y+348) (0x50b674).
         gui_mod.textShadow(f3, t.*, xi + 93 - @divTrunc(@as(i32, @intCast(f3.measure(acc))), 2), yi + 348, acc, gui_mod.text_dim);
     }

@@ -1,7 +1,6 @@
 //! Strike choreography: the pending attack's countdowns from the animation start to the
 //! hit, projectile flight, second hits and the return to idle.
 
-const fields = @import("../fields.zig");
 const control = @import("control.zig");
 const states = @import("states.zig");
 const strike = @import("strike.zig");
@@ -46,29 +45,31 @@ pub fn stepPending(self: *Battle, w: *World) !void {
             at.tick += 1;
             // Headnail (0x48a72b): the saws spin "obrot" (0x48d760 → 0x44f910), the left
             // after attack_headnail_delay1 (30), the right delay2 (5) later; the hit after
-            // delay3 (8), at tick wait + 1.
-            if (fields.nameId(self.fighters.items[at.who].obj) == 118) {
-                const d1: i64 = @import("../formats.zig").adjust.getInt("attack_headnail_delay1", 30);
-                if (at.tick == d1 + 1) anim.spinLink(w, self.fighters.items[at.who].obj, "pila lewa");
-                if (at.tick == d1 + 5 + 1) anim.spinLink(w, self.fighters.items[at.who].obj, "pila prawa");
-            }
+            // delay3 (8), at tick wait + 1. By its special (rules MonsterAttack `strike`;
+            // core module Fighters `strikes`).
+            if (@import("../core.zig").modules.fighterStrike(generic.fxOf(self.fighters.items[at.who].obj, at.weapon).special)) |st| for (st.spins) |sp| {
+                if (at.tick == @as(i64, sp.at.int()) + 1) anim.spinLink(w, self.fighters.items[at.who].obj, sp.link, sp.anim);
+            };
             // Flash before the hit (Garcia, Schizo's gas) on the same countdown as the hit
             // (hit at tick wait + 1).
             if (at.pre) |p| if (at.tick == p + 1) {
                 at.pre = null;
-                if (w.combat_map) |cm| fx.hits.preFlash(w, self.fighters.items[at.who].obj, generic.fxId(at.weapon), cm.tileCenter(at.aim.tile, 1));
+                if (w.map.combat) |cm| fx.hits.preFlash(w, self.fighters.items[at.who].obj, generic.fxOf(self.fighters.items[at.who].obj, at.weapon), cm.tileCenter(at.aim.tile, 1));
             };
             // Victim lift onto the link point (state 3, 0x496f1f): attach, its idle is the raw
             // name "delirium" (command 0x27 copies it, no RegisterAnimation lookup: the class's
             // "delirium_up" mesh animation, not its logical "delirium" = "deliriumA"); the
-            // animation start swaps it for "deliriumA" for nameID 24 and 29 (0x423355).
+            // animation start swaps it for "deliriumA" for classic_id 24 and 29 (0x423355; core
+            // module Heroes). OpenGorky: the look script's own slot "lifted"
+            // (RegisterAnimation, actor/slots.zig `lifted`) when it binds one.
             if (at.lift) |lf_| if (at.tick == lf_.bind_at) if (at.victim) |vi| {
                 const v = &self.fighters.items[vi];
                 if (v.alive()) {
                     world_mod.actorOf(self.fighters.items[at.who].obj).bind = .{ .victim = v.obj, .link = lf_.link, .z = lf_.z * w.actorScale() };
                     const va = world_mod.actorOf(v.*.obj);
-                    const id = fields.nameId(v.obj);
-                    va.forced_idle = if (id == 24 or id == 29) "deliriumA" else "delirium";
+                    const rules = @import("../rules.zig");
+                    const slot = @import("../actor.zig").slots.lifted;
+                    va.forced_idle = if (rules.og and va.hasMapping(slot)) va.resolve(slot) else @import("../core.zig").modules.liftPose(rules.who(v.obj));
                     va.play(va.forced_idle.?, true, false);
                 }
             };
@@ -78,7 +79,7 @@ pub fn stepPending(self: *Battle, w: *World) !void {
             }
             if (at.until_end and world_mod.actorOf(self.fighters.items[at.who].obj).one_shot) return;
             // Projectile (rocket, grenade, bottle, knife): damage on arrival (0x49b920).
-            if (!at.launched) if (w.combat_map) |cm| {
+            if (!at.launched) if (w.map.combat) |cm| {
                 at.launched = true;
                 const id = fx.launch.launch(w, self.fighters.items[at.who].obj, at.weapon, cm.tileCenter(at.aim.tile, 1));
                 if (id != 0) {
@@ -88,7 +89,7 @@ pub fn stepPending(self: *Battle, w: *World) !void {
                 }
             };
             if (countdown(&at.second_in) == .fire) {
-                if (w.combat_map) |cm| at.flight2 = fx.launch.launchSecond(w, self.fighters.items[at.who].obj, at.weapon, cm.tileCenter(at.aim.tile, 1));
+                if (w.map.combat) |cm| at.flight2 = fx.launch.launchSecond(w, self.fighters.items[at.who].obj, at.weapon, cm.tileCenter(at.aim.tile, 1));
             }
             if (!at.hit1) {
                 if (at.flight != 0 and w.effects.projectileAlive(at.flight)) return;

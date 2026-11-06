@@ -5,6 +5,7 @@ const state_groups = @import("../state.zig").groups;
 const fields = @import("../fields.zig");
 const world = @import("../state.zig").world;
 const World = world.World;
+const hooks = @import("../state.zig").hooks;
 
 /// Leave the location before it is stored (0x41f6c8…0x41f729, then 0x41fe50 → 0x411e60).
 /// Exe order:
@@ -21,7 +22,7 @@ pub fn leave(self: *World, next: []const u8) !void {
     const rand = self.crt();
     // Entering battle from a non-battle location (0x41f219 = 1): 480 × (rand % 2, % 8, % 2)
     // for the transition stripes (0x41f25b…0x41f2ba), before the fighters' idles.
-    if (!combat and std.mem.indexOf(u8, next, "__") != null) for (0..480 * 3) |_| {
+    if (!combat and @import("../core.zig").modules.battleNamed(next)) for (0..480 * 3) |_| {
         _ = rand.next();
     };
     for (self.actorObjects()) |o| {
@@ -50,7 +51,7 @@ pub fn leave(self: *World, next: []const u8) !void {
     }
     self.shadows.clearRetainingCapacity();
     const l = self.level orelse return;
-    if (combat or l.getInt("shadowActive") == 0) return;
+    if (combat or l.getInt("shadows") == 0) return;
     for (self.actorObjects()) |o| {
         const n = World.nativeOf(o);
         if (n.kind != .actor or !n.fighter or n.deleted or !o.enabled or !n.actor.placed) continue;
@@ -70,7 +71,7 @@ pub fn reenter(self: *World) !void {
     self.scene.cutscene = false;
     self.scene.panorama = false;
     // …or without AUTOCAMERA_ON (port-meet_bt goes into battle 01__port_trabant): on return
-    // the camera follows the party again and the mouse scrolls.
+    // the camera follows the party again and the player scrolls it.
     if (self.scene.runner == null) self.scene.autocamera = true;
     self.out.attack_cam = null;
     self.scene.fade = 0;
@@ -80,7 +81,17 @@ pub fn reenter(self: *World) !void {
     for (self.rt.objects.items) |o| if (World.nativeOf(o).hero) {
         o.enabled = true;
     };
-    if (self.level) |l| _ = try self.rt.callIfExists(l, "restore", &.{});
+    if (self.level) |l| {
+        _ = try self.rt.callIfExists(l, "restore", &.{});
+        // OpenGorky: the level's placement data, as on creation (its restore()'s PlaceActor
+        // the converter made data).
+        // Then its `entry`, the selected hero's point.
+        if (self.res.source.level_block.len > 0) {
+            try @import("start.zig").placeModel(self, true);
+            try @import("start.zig").placeEntry(self);
+        }
+        _ = try hooks.on(self, l, "Level.OnRestore", &.{});
+    }
     for (self.shadows.items) |sh| {
         const o = self.actorObject(sh.name) orelse continue;
         const a = world.actorOf(o);
@@ -93,6 +104,7 @@ pub fn reenter(self: *World) !void {
     for (self.rt.objects.items) |o| {
         if (World.nativeOf(o).kind == .level or !World.nativeOf(o).kind.hooks().restore) continue;
         _ = try self.rt.callIfExists(o, "restore", &.{});
+        _ = try hooks.on(self, o, "Anim.OnRestore", &.{});
     }
     try afterSelectGui(self);
 }
@@ -106,6 +118,9 @@ pub fn takeLoadSteps(self: *World) ![]state_groups.LoadStep {
 /// pre-battle dialogue (StartDialog), a video or EndTurnGlobal there.
 pub fn afterSelectGui(self: *World) !void {
     const first = self.out.video_requests.items.len;
-    if (self.level) |l| _ = try self.rt.callIfExists(l, "after_select_gui", &.{});
+    if (self.level) |l| {
+        _ = try self.rt.callIfExists(l, "after_select_gui", &.{});
+        _ = try hooks.on(self, l, "Level.OnShown", &.{});
+    }
     for (self.out.video_requests.items[first..]) |*rq| rq.level_music = true;
 }

@@ -13,7 +13,7 @@
 const std = @import("std");
 const num = @import("../num.zig");
 const Allocator = std.mem.Allocator;
-const Image = @import("image.zig").Image;
+const Image = @import("../image.zig").Image;
 
 /// Neighbour offsets of the bottom-right corner (x, y); other corners rotate by 90°.
 const Off = struct { dx: i32, dy: i32 };

@@ -1,11 +1,12 @@
 //! Fighter reactions: blood on damage, flare gun sparks (constructor 0x4ccbe0).
 
+const std = @import("std");
 const vec = @import("../vec.zig");
 const fields = @import("../fields.zig");
 const World = @import("../state.zig").world.World;
 const Object = @import("../script.zig").object.Object;
 const effects = @import("../effects.zig");
-const adjust = @import("../formats.zig").adjust;
+const adjust = @import("../rules.zig").adjust;
 
 /// Damage to fighter `victim` from `from`: blood (0x4ccbe0).
 pub fn onDamage(w: *World, victim: *Object, from: *Object) void {
@@ -21,13 +22,13 @@ pub fn onDamage(w: *World, victim: *Object, from: *Object) void {
     // by attack_redlight_flash_displacement (300)·aS ignores the camera height here.
     const as = w.actorScale();
     const vp = fields.pos(victim);
-    const level = adjust.getFloat("attack_redlight_flash_level", 300);
-    const range: f32 = @floatFromInt(adjust.getInt("attack_redlight_flash_range", 600));
-    const left = adjust.getInt("attack_redlight_flash_timeout", 10);
+    const level = adjust.float("attack_redlight_flash_level");
+    const range: f32 = @floatFromInt(adjust.int("attack_redlight_flash_range"));
+    const left = adjust.int("attack_redlight_flash_timeout");
     w.effects.addLight(w.gpa, .{ .pos = .{ vp[0], vp[1], vp[2] + level * as }, .color = .{ 1, 0.2, 0.2 }, .range = range * as, .left = @intCast(@max(0, left)) });
 }
 
-/// Flare gun sparks (reaction 0x491920, nameID 46 → 0x491e5e) on live target
+/// Flare gun sparks (reaction 0x491920, classic_id 46 → 0x491e5e) on live target
 /// `victim` from `from`: both points raised by blood_start_level·aS; start 10
 /// behind the target by its angle and 5 toward the attacker (0x4919a0…0x491ad0).
 pub fn flare(w: *World, victim: *Object, from: *Object) void {
@@ -43,10 +44,18 @@ pub fn flare(w: *World, victim: *Object, from: *Object) void {
 /// Particle constructor 0x4ccbe0 with its sound: blood1/2/3 at random (0x4ccdd1).
 fn particles(w: *World, victim: *Object, origin: [3]f32, from: [3]f32, p: effects.particles.Particles) void {
     w.effects.spawnParticles(w.gpa, w.crt(), origin, from, p);
-    const names = [_][]const u8{ "blood1", "blood2", "blood3" };
+    // UiSounds `blood`, one at random (the exe's blood1/2/3).
     // shortcut: the exe passes the sound an address past the last particle (0x4ccdd1
     // → 0x4327f0), 12 bytes of heap, so the position is undefined; we use the fighter's point.
-    w.out.sound(w.gpa, names[w.crt().below(3)], w.screenPos(victim));
+    const names = @import("../core.zig").modules.ui().sounds.blood;
+    var count: u32 = 0;
+    var it = std.mem.tokenizeScalar(u8, names, ' ');
+    while (it.next()) |_| count += 1;
+    if (count == 0) return;
+    const r = w.crt().below(count);
+    it.reset();
+    var k: u32 = 0;
+    while (it.next()) |n| : (k += 1) if (k == r) return w.out.sound(w.gpa, n, w.screenPos(victim));
 }
 
 /// `a` + 5·unit vector toward `b` (0x419850, 0x50a240 = 5).

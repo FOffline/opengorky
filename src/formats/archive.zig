@@ -38,7 +38,8 @@ fn parseIndex(gpa: Allocator, index: []const u8, file_size: u64) (ParseError || 
             .filetime = std.mem.readInt(u64, raw[8..16], .little),
             .name = name_raw[0 .. std.mem.indexOfScalar(u8, name_raw, 0) orelse name_size],
         };
-        if (@as(u64, e.offset) + e.size > file_size) return error.EntryOutOfBounds;
+        // An empty entry reads nothing: mods cut the file before the closing entry's offset.
+        if (e.size != 0 and @as(u64, e.offset) + e.size > file_size) return error.EntryOutOfBounds;
     }
     return entries;
 }
@@ -58,7 +59,7 @@ fn openFileAnyCase(io: Io, dir: Io.Dir, path: []const u8) Io.File.OpenError!Io.F
 }
 
 /// `path` with each part spelled as on disk (matched case-insensitively).
-fn resolveAnyCase(io: Io, dir: Io.Dir, path: []const u8, buf: *[512]u8) error{ FileNotFound, NameTooLong }![]const u8 {
+pub fn resolveAnyCase(io: Io, dir: Io.Dir, path: []const u8, buf: *[512]u8) error{ FileNotFound, NameTooLong }![]const u8 {
     var len: usize = 0;
     var it = std.mem.tokenizeAny(u8, path, "/\\");
     while (it.next()) |part| {
@@ -86,6 +87,7 @@ pub const Archive = struct {
     const OpenError = Io.File.OpenError || Io.File.LengthError || Io.File.ReadPositionalError ||
         ParseError || Allocator.Error;
 
+    /// Archive `path` as the game reads it.
     pub fn open(io: Io, gpa: Allocator, dir: Io.Dir, path: []const u8) OpenError!Archive {
         const file = try openFileAnyCase(io, dir, path);
         errdefer file.close(io);
@@ -119,10 +121,12 @@ pub const Archive = struct {
     /// with a time, script files marked (`isScript`). Older editors wrote otherwise.
     pub fn wellFormed(self: Archive) bool {
         var prev: []const u8 = "";
-        for (self.entries, 0..) |e, i| {
+        for (self.entries) |e| {
             if (e.name.len == 0) continue;
             if (std.ascii.lessThanIgnoreCase(e.name, prev) or e.filetime == 0) return false;
-            if (isScript(e.name) and e.name.len + 1 < name_size and self.index[header_size + i * entry_size + 16 + e.name.len + 1] != 's') return false;
+            // The mark after the name in the index it came from (names point into it).
+            const mark = @intFromPtr(e.name.ptr) - @intFromPtr(self.index.ptr) + e.name.len + 1;
+            if (isScript(e.name) and e.name.len + 1 < name_size and self.index[mark] != 's') return false;
             prev = e.name;
         }
         return true;
@@ -261,12 +265,32 @@ pub fn rewrite(io: Io, gpa: Allocator, dir: Io.Dir, path: []const u8, changes: [
     try Io.Dir.rename(dir, tmp, dir, real, io);
 }
 
+/// Level folders of `dat` in its order.
+pub fn levelDirs(io: Io, gpa: Allocator, dat: Io.Dir) ![][]const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    errdefer freeList(gpa, list.items);
+    defer list.deinit(gpa);
+    var d = dat.openDir(io, ".", .{ .iterate = true }) catch return list.toOwnedSlice(gpa);
+    defer d.close(io);
+    var it = d.iterate();
+    while (try it.next(io)) |e| {
+        if (e.kind != .directory) continue;
+        const p = try gpa.dupe(u8, e.name);
+        errdefer gpa.free(p);
+        try list.append(gpa, p);
+    }
+    return list.toOwnedSlice(gpa);
+}
+
 /// Archive paths relative to `<game>/dat`, sorted by name.
 /// Top-level `dat/*.dat` (`r1/r2/r3.dat`) are engine work files and are skipped.
 pub fn listArchives(io: Io, gpa: Allocator, dat: Io.Dir) ![][]const u8 {
     var list: std.ArrayList([]const u8) = .empty;
     errdefer freeList(gpa, list.items);
     defer list.deinit(gpa);
+    // No game (the editor without a project gives the cwd marker, no open handle to read):
+    // no archives.
+    if (dat.handle == Io.Dir.cwd().handle) return list.toOwnedSlice(gpa);
 
     var walker = try dat.walk(gpa);
     defer walker.deinit();
@@ -321,6 +345,16 @@ test "parseIndex rejects out-of-bounds entry" {
     std.mem.writeInt(u32, buf[0..4], 1, .little);
     writeTestEntry(&buf, 0, header_size + entry_size, 10, "x");
     try std.testing.expectError(error.EntryOutOfBounds, parseIndex(gpa, &buf, buf.len));
+}
+
+test "parseIndex takes an empty entry past the end" {
+    const gpa = std.testing.allocator;
+    var buf: [header_size + entry_size]u8 = @splat(0);
+    std.mem.writeInt(u32, buf[0..4], 1, .little);
+    writeTestEntry(&buf, 0, header_size + entry_size + 12, 0, "");
+    const entries = try parseIndex(gpa, &buf, buf.len);
+    defer gpa.free(entries);
+    try std.testing.expectEqual(1, entries.len);
 }
 
 test "build: index parses back, data aligned" {
@@ -420,6 +454,21 @@ pub fn dropCached(io: Io, dir: Io.Dir, path: ?[]const u8) !usize {
 }
 
 const cache_tail = 300;
+
+/// `a` and `b` name the same archive path, `/` and `\` alike: dat paths are listed with the
+/// system's separator (`\` on Windows), `--start` and players write `/`.
+pub fn samePath(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (x != y and !((x == '/' or x == '\\') and (y == '/' or y == '\\'))) return false;
+    return true;
+}
+
+test samePath {
+    try std.testing.expect(samePath("01_port\\sprite.dat", "01_port/sprite.dat"));
+    try std.testing.expect(samePath("01_port/sprite.dat", "01_port/sprite.dat"));
+    try std.testing.expect(!samePath("01_port/sprite.dat", "01_portXsprite.dat"));
+    try std.testing.expect(!samePath("01_port/sprite.dat", "01_port/sprite.da"));
+}
 
 /// `dat\<level>\sprite.kdt` names archive `<level>/sprite.dat` (case, slashes and the
 /// extension aside).

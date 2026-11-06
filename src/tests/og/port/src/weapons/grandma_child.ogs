@@ -1,0 +1,10 @@
+module weapons {
+    weapon grandma_child {
+        classic_id = 1007;
+        action = Take;
+        two_handed = 2;
+        class = grandma_child;
+        max_damage = 15;
+        damage_kind = bullet;
+    }
+}

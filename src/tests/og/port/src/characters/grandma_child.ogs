@@ -1,0 +1,16 @@
+module characters {
+    fighter grandma_child: grandma {
+        classic_id = 114;
+        look = looks::grandma_child;
+        battle_class = grandma_child;
+        footprint_tiles = 1;
+        hp = 25;
+        max_hp = 25;
+        accuracy = 100;
+        ai_guard_distance_weight = 500;
+        armor = 0;
+        weapon gun: weapons::grandma_child {
+            place = hand;
+        }
+    }
+}

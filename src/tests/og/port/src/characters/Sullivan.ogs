@@ -1,0 +1,18 @@
+module characters {
+    fighter Sullivan {
+        classic_id = 20;
+        look = looks::Sullivan;
+        footprint_tiles = 1;
+        level = 1;
+        hp = 130;
+        max_hp = 130;
+        walk_range = 4;
+        accuracy = 90;
+        max_rage = 10;
+        luck = 30;
+        counter_attack = 10.0;
+        weapon gs_fist_all: weapons::fist {
+            place = party;
+        }
+    }
+}

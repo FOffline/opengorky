@@ -8,15 +8,16 @@ const common = @import("common.zig");
 
 /// Scene check (og.scene_check) for each "level:scene" pair, one line each.
 pub fn checkScenes(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, pairs: []const []const u8) !void {
-    var dat = try common.openDat(io, game_dir, .{});
+    var dat = try common.openDat(io, game_dir);
     defer dat.close(io);
-    var models = try og.actor.model_cache.Cache.open(io, gpa, dat);
+    var models = try og.compose.models.open(io, gpa, dat, null);
     defer models.deinit();
+    const opener: og.loaders.world.Opener = .{ .io = io, .dat = dat };
     for (pairs) |pair| {
         const colon = std.mem.indexOfScalar(u8, pair, ':') orelse continue;
         const level = pair[0..colon];
         const name = pair[colon + 1 ..];
-        var rep = og.scene_check.run(io, gpa, dat, &models, level, name) catch |err| {
+        var rep = og.scene_check.run(io, gpa, opener.factory(), &models, level, name) catch |err| {
             try out.print("SCENE {s} {s} | FAIL {t}\n", .{ level, name, err });
             continue;
         };
@@ -28,13 +29,14 @@ pub fn checkScenes(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8
 
 /// gorky-tool trace: what level `level`'s code does over `ticks` ticks with `commands`.
 pub fn trace(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, level: []const u8, ticks: u32, commands: []const []const u8) !void {
-    var dat = try common.openDat(io, game_dir, .{});
+    var dat = try common.openDat(io, game_dir);
     defer dat.close(io);
-    var models = try og.actor.model_cache.Cache.open(io, gpa, dat);
+    var models = try og.compose.models.open(io, gpa, dat, null);
     defer models.deinit();
+    const opener: og.loaders.world.Opener = .{ .io = io, .dat = dat };
     const cmds = try std.mem.join(gpa, " ", commands);
     defer gpa.free(cmds);
-    var tr = try og.logic_trace.run(io, gpa, dat, &models, level, cmds, ticks);
+    var tr = try og.logic_trace.run(io, gpa, opener.factory(), &models, level, cmds, ticks);
     defer tr.deinit();
     for (tr.events) |e| {
         const name = if (e.kind == .variable) tr.vars[e.index].name else "";

@@ -2,7 +2,7 @@
 //! world point on the floor, heights of cells opened by `WALKAREA`.
 
 const std = @import("std");
-const level_files = @import("../formats.zig").level_files;
+const level_files = @import("../core.zig").map;
 const nav = @import("nav.zig");
 const World = @import("../state.zig").world.World;
 
@@ -21,7 +21,7 @@ pub fn groundAt(self: *World, bg: [2]f32) [3]f32 {
 /// `.wm2` (0x481b81), which party walking would dereference. Deviation: without `.wm2`
 /// floor 1 uses `.wm` like a single-floor location.
 pub fn floorMap(self: *const World, map: u1) ?level_files.WalkMap {
-    return if (map == 1) self.walk_map2 orelse self.walk_map else self.walk_map;
+    return if (map == 1) self.map.walk2 orelse self.map.walk else self.map.walk;
 }
 
 /// Height of the walkable cell under a background point; null if blocked or off-grid.
@@ -86,11 +86,11 @@ test "floor 1 without .wm2 uses .wm like a single-floor location" {
     var c0 = [_]level_files.WalkMap.Cell{.{ .kind = 1, .height = 0 }};
     var c1 = [_]level_files.WalkMap.Cell{.{ .kind = 1, .height = 7 }};
     var w: World = undefined;
-    w.walk_map = .{ .width = 1, .height = 1, .cells = &c0 };
-    w.walk_map2 = null;
+    w.map.walk = .{ .width = 1, .height = 1, .cells = &c0 };
+    w.map.walk2 = null;
     try std.testing.expectEqual(@as(usize, 1), floorMap(&w, @as(u1, 1)).?.cells.len);
     try std.testing.expect(floorMap(&w, @as(u1, 1)).?.cells.ptr == &c0);
-    w.walk_map2 = .{ .width = 1, .height = 1, .cells = &c1 };
+    w.map.walk2 = .{ .width = 1, .height = 1, .cells = &c1 };
     try std.testing.expect(floorMap(&w, @as(u1, 1)).?.cells.ptr == &c1);
     try std.testing.expect(floorMap(&w, @as(i32, 0)).?.cells.ptr == &c0);
 }

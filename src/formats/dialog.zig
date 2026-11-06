@@ -103,7 +103,7 @@ pub fn parseCut(arena: Allocator, text: []const u8, cut: ?usize) Allocator.Error
 }
 
 /// Speaker code (0x4594a0, case-insensitive).
-fn speakerCode(speaker: []const u8) ?[2]u8 {
+pub fn speakerCode(speaker: []const u8) ?[2]u8 {
     const table = [_]struct { []const u8, *const [2]u8 }{
         .{ "Sullivan", "su" },  .{ "Ovitz", "ov" },    .{ "Trantigne", "tr" }, .{ "Bt", "bt" },
         .{ "MacFadden", "ma" }, .{ "Hutchens", "hu" }, .{ "Medusa", "me" },    .{ "Slavsky", "sl" },
@@ -114,13 +114,20 @@ fn speakerCode(speaker: []const u8) ?[2]u8 {
     return null;
 }
 
+/// Voice file prefix of dialogue `dlg_file` (`port-arriving.dlg` → `port_arriving_`):
+/// `.dlg` dropped, `-` as `_`, lower case. `buf` holds at least `dlg_file.len + 1`.
+pub fn voicePrefix(buf: []u8, dlg_file: []const u8) ![]const u8 {
+    const stem = if (std.ascii.endsWithIgnoreCase(dlg_file, ".dlg")) dlg_file[0 .. dlg_file.len - 4] else dlg_file;
+    if (stem.len + 1 > buf.len) return error.NameTooLong;
+    for (stem, 0..) |ch, i| buf[i] = if (ch == '-') '_' else std.ascii.toLower(ch);
+    buf[stem.len] = '_';
+    return buf[0 .. stem.len + 1];
+}
+
 /// Voice file name of line `index` in `voice.dat`.
 pub fn voiceName(buf: []u8, dlg_file: []const u8, code: [2]u8, index: usize) ![]const u8 {
-    const stem = if (std.ascii.endsWithIgnoreCase(dlg_file, ".dlg")) dlg_file[0 .. dlg_file.len - 4] else dlg_file;
-    var s: [64]u8 = undefined;
-    if (stem.len > s.len) return error.NameTooLong;
-    for (stem, 0..) |ch, i| s[i] = if (ch == '-') '_' else std.ascii.toLower(ch);
-    return std.fmt.bufPrint(buf, "{s}_{s}_{d:0>2}.wav", .{ s[0..stem.len], &code, index });
+    var s: [65]u8 = undefined;
+    return std.fmt.bufPrint(buf, "{s}{s}_{d:0>2}.wav", .{ try voicePrefix(&s, dlg_file), &code, index });
 }
 
 test parse {
@@ -154,6 +161,7 @@ test parse {
     try std.testing.expect(d.lines[1].cam == null);
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("port_arriving_su_01.wav", try voiceName(&buf, "port-arriving.dlg", d.lines[1].code, 1));
+    try std.testing.expectEqualStrings("city_x_", try voicePrefix(&buf, "City-X.DLG"));
 }
 
 test "German edition: the line after port_meet_bt line 7 is cut, later voices shift (0x458cd2)" {

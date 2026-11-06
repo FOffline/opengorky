@@ -60,12 +60,14 @@ pub const Lexer = struct {
     /// Line of the last error.
     err_line: u32 = 0,
 
+    /// The text ends at the first NUL, as the exe's C string does: mods pad scripts with
+    /// zeros after the last line.
     pub fn init(src: []const u8) Lexer {
-        return .{ .src = src };
+        return .{ .src = src[0 .. std.mem.indexOfScalar(u8, src, 0) orelse src.len] };
     }
 
     pub fn next(self: *Lexer) Error!Token {
-        try self.skipTrivia();
+        try skipTrivia(self);
         const start = self.pos;
         const line = self.line;
         if (start >= self.src.len) return .{ .tag = .eof, .text = "", .line = line };
@@ -114,7 +116,8 @@ pub const Lexer = struct {
                 var is_float = ch == '.';
                 while (self.pos < self.src.len) : (self.pos += 1) {
                     const d = self.src[self.pos];
-                    if (d == '.' and !is_float) {
+                    // Every dot joins: mods hex-edit a number keeping its length (`106` → `5..`).
+                    if (d == '.') {
                         is_float = true;
                     } else if (!std.ascii.isDigit(d)) break;
                 }
@@ -148,33 +151,35 @@ pub const Lexer = struct {
         }
         return false;
     }
-
-    fn skipTrivia(self: *Lexer) Error!void {
-        while (self.pos < self.src.len) {
-            const ch = self.src[self.pos];
-            if (ch == '\n') {
-                self.line += 1;
-                self.pos += 1;
-            } else if (std.ascii.isWhitespace(ch) or ch == 0x1a) {
-                // 0x1A: DOS EOF at the end of some files.
-                self.pos += 1;
-            } else if (std.mem.startsWith(u8, self.src[self.pos..], "//")) {
-                while (self.pos < self.src.len and self.src[self.pos] != '\n') self.pos += 1;
-            } else if (std.mem.startsWith(u8, self.src[self.pos..], "/*")) {
-                const start_line = self.line;
-                self.pos += 2;
-                while (!std.mem.startsWith(u8, self.src[self.pos..], "*/")) : (self.pos += 1) {
-                    if (self.pos >= self.src.len) {
-                        self.err_line = start_line;
-                        return error.UnterminatedComment;
-                    }
-                    if (self.src[self.pos] == '\n') self.line += 1;
-                }
-                self.pos += 2;
-            } else break;
-        }
-    }
 };
+
+/// Whitespace and `//`, `/* */` comments of lexer `lx` (this one or OGS's: fields `src`,
+/// `pos`, `line`, `err_line`) skipped, lines counted; an unclosed `/*` is an error at its line.
+pub fn skipTrivia(lx: anytype) error{UnterminatedComment}!void {
+    while (lx.pos < lx.src.len) {
+        const ch = lx.src[lx.pos];
+        if (ch == '\n') {
+            lx.line += 1;
+            lx.pos += 1;
+        } else if (std.ascii.isWhitespace(ch) or ch == 0x1a) {
+            // 0x1A: DOS EOF at the end of some files.
+            lx.pos += 1;
+        } else if (std.mem.startsWith(u8, lx.src[lx.pos..], "//")) {
+            while (lx.pos < lx.src.len and lx.src[lx.pos] != '\n') lx.pos += 1;
+        } else if (std.mem.startsWith(u8, lx.src[lx.pos..], "/*")) {
+            const start_line = lx.line;
+            lx.pos += 2;
+            while (!std.mem.startsWith(u8, lx.src[lx.pos..], "*/")) : (lx.pos += 1) {
+                if (lx.pos >= lx.src.len) {
+                    lx.err_line = start_line;
+                    return error.UnterminatedComment;
+                }
+                if (lx.src[lx.pos] == '\n') lx.line += 1;
+            }
+            lx.pos += 2;
+        } else break;
+    }
+}
 
 test "lex statements, comments and directives" {
     var lx: Lexer = .init("#inherit Level\r\n// c\r\nint a; /* x\r\n y */ a=-1.5;\r\nif(a>=2&&b!=\"s\") return(0);");
@@ -191,6 +196,21 @@ test "lex statements, comments and directives" {
         try std.testing.expectEqual(tag, t.tag);
     }
     try std.testing.expectEqualStrings("Level", first.arg());
+}
+
+test "padding dots stay in the number" {
+    var lex = Lexer.init("5..;");
+    const t = try lex.next();
+    try std.testing.expectEqual(Tag.float_literal, t.tag);
+    try std.testing.expectEqualStrings("5..", t.text);
+    try std.testing.expectEqual(Tag.semicolon, (try lex.next()).tag);
+}
+
+test "NUL ends the text" {
+    var lex = Lexer.init("x;\r\n\x00\x00@");
+    try std.testing.expectEqual(Tag.identifier, (try lex.next()).tag);
+    try std.testing.expectEqual(Tag.semicolon, (try lex.next()).tag);
+    try std.testing.expectEqual(Tag.eof, (try lex.next()).tag);
 }
 
 test "dotted names" {

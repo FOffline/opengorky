@@ -4,21 +4,25 @@
 //! is one undo step; the sprite is written back in the game's format (sprite.encode).
 
 const std = @import("std");
+const baseName = @import("doctab.zig").baseName;
 const Allocator = std.mem.Allocator;
 const c = @import("sdl");
 const ui = @import("ui");
 const og = @import("opengorky");
-const Image = og.formats.image.Image;
+const Image = og.image.Image;
 const clay = @import("clay.zig");
+const gui = @import("widgets.zig");
+const frame = @import("frame.zig");
+const lay = @import("layout.zig");
+const ink = @import("render.zig").ink;
 const font_mod = @import("font.zig");
 const tx = @import("text.zig");
-const main = @import("app.zig");
-const App = main.App;
-const theme = main.theme;
-const txt = main.txt;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
+const theme = app_mod.theme;
 const art = @import("art.zig");
 const info = @import("info.zig");
-const refs = @import("refs.zig");
+const uses = @import("uses.zig");
 const sprite_archive = @import("store.zig").sprite_archive;
 
 pub const Tool = enum { pencil, eraser, picker };
@@ -61,21 +65,7 @@ pub const Edit = struct {
 
 /// The `.spr` and `.spz` entries of `archive` (its own and new ones not saved yet), by name.
 pub fn entries(app: *App, a: Allocator, archive: []const u8) []const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    var ar = og.formats.archive.Archive.open(app.io, app.gpa, app.dat, archive) catch null;
-    defer if (ar) |*x| x.close(app.io, app.gpa);
-    if (ar) |x| for (x.entries) |e| if (isSprite(e.name)) out.append(a, a.dupe(u8, e.name) catch continue) catch {};
-    for (app.store.files.items, 0..) |f, i| {
-        if (!std.mem.eql(u8, f.archive, archive) or !isSprite(f.entry) or app.store.gone(i)) continue;
-        if (ar) |x| if (x.find(f.entry) != null) continue;
-        out.append(a, f.entry) catch {};
-    }
-    std.mem.sort([]const u8, out.items, {}, struct {
-        fn lt(_: void, x: []const u8, y: []const u8) bool {
-            return std.ascii.lessThanIgnoreCase(x, y);
-        }
-    }.lt);
-    return out.items;
+    return app.store.listing(a, archive, isSprite, true);
 }
 
 fn isSprite(entry: []const u8) bool {
@@ -90,7 +80,6 @@ pub fn open(app: *App, name: []const u8) !void {
 
 /// Opens sprite `entry` of archive `archive` (`common/sprite.dat`, `<level>/sprite.dat`).
 pub fn openEntry(app: *App, archive: []const u8, entry: []const u8) !void {
-    @import("codeview.zig").park(app);
     app.setTab(.sprites);
     if (app.spr) |e| if (std.mem.eql(u8, app.store.files.items[e.file].archive, archive) and std.ascii.eqlIgnoreCase(e.name, entry)) return;
     if (app.spr) |e| e.destroy(app.gpa);
@@ -161,12 +150,19 @@ pub fn removeFrame(app: *App, k: usize) !void {
 }
 
 /// A new sprite `<dir>\\<png name>.spr` (dir: `icons` or none) in `archive` from a PNG,
-/// one frame, opened; one undo step.
+/// opened; one undo step. One frame, an icon two as the game's items (big and small: the
+/// inventory cells draw frame 1).
 pub fn importNew(app: *App, archive: []const u8, dir: []const u8, path: []const u8) ![]const u8 {
     var img = try art.readPng(app, path);
     defer img.deinit(app.gpa);
     if (img.width > 4096 or img.height > 4096) return error.TooBig;
-    const bytes = try og.formats.sprite.encode(app.gpa, &.{img});
+    const bytes = if (std.mem.eql(u8, dir, "icons")) blk: {
+        var b = try art.fit(app.gpa, img, art.big);
+        defer b.deinit(app.gpa);
+        var s = try art.fit(app.gpa, img, art.small);
+        defer s.deinit(app.gpa);
+        break :blk try og.formats.sprite.encode(app.gpa, &.{ b, s });
+    } else try og.formats.sprite.encode(app.gpa, &.{img});
     errdefer app.gpa.free(bytes);
     const a = app.frame.allocator();
     var base: [40]u8 = undefined;
@@ -228,8 +224,7 @@ fn putDepth(app: *App, e: *Edit, k: usize, img: Image) !void {
         const p = img.pixels[i * 4 ..][0..4];
         std.mem.writeInt(u16, out[start + 4 + i * 2 ..][0..2], @as(u16, p[1]) << 8 | p[2], .little);
     }
-    var lb: [160]u8 = undefined;
-    try app.store.replaceLabeled(e.file, out, std.fmt.bufPrint(&lb, "{s}: {s} {d}", .{ e.name, tx.get(tx.spr_frame_word), k + 1 }) catch e.name);
+    try app.store.replaceLabeled(e.file, out, tx.both(app.frame.allocator(), tx.step_spr_frame, .{ e.name, k + 1 }));
     try load(app, e);
 }
 
@@ -268,6 +263,7 @@ pub fn close(app: *App) void {
 /// The Sprites tab's page: the open sprite's frames and the chosen one zoomed.
 pub fn page(app: *App, a: Allocator) void {
     const e = app.spr orelse return;
+    frame.stage(app);
     clay.open(.{
         .id = clay.id("sprpanel"),
         .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM },
@@ -276,13 +272,13 @@ pub fn page(app: *App, a: Allocator) void {
 
     clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() } } });
     // Frames: a picture of each, its size, from / to PNG.
-    clay.openScroll(.{ .id = clay.id("spr_frames"), .layout = .{ .sizing = .{ .width = clay.fixed(240), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = .{ .left = 10, .right = 10, .top = 10 }, .childGap = 8 }, .border = .{ .color = theme.line, .width = .{ .right = 1 } } });
+    clay.openScroll(.{ .id = clay.id("spr_frames"), .layout = .{ .sizing = .{ .width = clay.fixed(30 * lay.unit), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = .{ .left = lay.space.sm, .right = lay.space.sm, .top = lay.space.sm }, .childGap = lay.space.sm }, .border = .{ .color = theme.line, .width = .{ .right = lay.border.line } } });
     for (e.frames.items, 0..) |img, k| {
         const sel = k == e.frame;
         const fid = clay.idi("spr_fr", @intCast(k));
-        if (main.clickable(app, .{ .id = fid, .layout = .{ .sizing = .{ .width = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 }, .childGap = 6 }, .backgroundColor = theme.field, .cornerRadius = clay.radius(theme.radius) }, sel)) e.frame = k;
-        txt(tx.alloc(a, tx.spr_frame, .{ k + 1, img.width, img.height }), 13, theme.text, font_mod.bold);
-        const s: f32 = @min(1.0, 200 / @as(f32, @floatFromInt(@max(img.width, img.height))));
+        if (gui.clickable(app, .{ .id = fid, .layout = .{ .sizing = .{ .width = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = gui.pad(lay.space.sm, lay.space.sm), .childGap = lay.space.sm }, .backgroundColor = theme.field, .cornerRadius = clay.radius(lay.radius.md) }, sel)) e.frame = k;
+        gui.txt(tx.alloc(a, tx.spr_frame, .{ k + 1, img.width, img.height }), .body, theme.text, font_mod.bold);
+        const s: f32 = @min(1.0, 25 * lay.unit / @as(f32, @floatFromInt(@max(img.width, img.height))));
         clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(@as(f32, @floatFromInt(img.width)) * s), .height = clay.fixed(@as(f32, @floatFromInt(img.height)) * s) } }, .image = .{ .imageData = e.textures.items[k] } });
         clay.close();
     }
@@ -291,17 +287,17 @@ pub fn page(app: *App, a: Allocator) void {
     // The chosen frame zoomed: tools, colours, the canvas.
     clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM } });
     // Clipped: a narrow window cuts the palette rather than pushing the right column out.
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.fixed(40) }, .padding = .{ .left = 10, .right = 10 }, .childGap = 6, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } }, .backgroundColor = theme.header, .clip = .{ .horizontal = true } });
+    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.fixed(lay.height.tab) }, .padding = gui.pad(lay.space.sm, 0), .childGap = lay.space.sm, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } }, .backgroundColor = theme.header, .clip = .{ .horizontal = true } });
     if (e.frames.items.len > 1) playback(app, a, e);
     if (!isDepth(e)) {
         const tools = [_]struct { Tool, tx.Msg }{ .{ .pencil, tx.spr_pencil }, .{ .eraser, tx.spr_eraser }, .{ .picker, tx.spr_picker } };
-        for (tools) |t| if (main.button(app, @tagName(t[0]), tx.get(t[1]), e.tool == t[0])) {
+        for (tools) |t| if (gui.button(app, @tagName(t[0]), tx.get(t[1]), e.tool == t[0])) {
             e.tool = t[0];
         };
         // The colour drawn with, then the sprite's most used ones.
-        clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(12) } } });
-        swatch(app, "spr_cur", e.color, 24, null);
-        for (palette(a, e), 0..) |col, k| swatch(app, std.fmt.allocPrint(a, "spr_pal{d}", .{k}) catch "pal", col, 18, e);
+        clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(lay.space.md) } } });
+        swatch(app, "spr_cur", e.color, lay.height.small, null);
+        for (palette(a, e), 0..) |col, k| swatch(app, std.fmt.allocPrint(a, "spr_pal{d}", .{k}) catch "pal", col, lay.icon.md, e);
     }
     clay.close();
     clay.leaf(.{ .id = clay.id("spr_canvas"), .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() } }, .backgroundColor = theme.viewport, .custom = .{ .customData = e } });
@@ -321,47 +317,47 @@ fn playback(app: *App, a: Allocator, e: *Edit) void {
         e.frame = (e.frame + 1) % n;
         e.play_ms = now;
     }
-    if (main.toolButton(app, "spr_back", .skip_back, "", false, false)) {
+    if (gui.toolButton(app, "spr_back", .skip_back, "", false, false)) {
         e.playing = false;
         e.frame = (e.frame + n - 1) % n;
     }
-    if (main.toolButton(app, "spr_play", if (e.playing) .pause else .play, "", e.playing, false)) {
+    if (gui.toolButton(app, "spr_play", if (e.playing) .pause else .play, "", e.playing, false)) {
         e.playing = !e.playing;
         e.play_ms = now;
     }
-    if (main.toolButton(app, "spr_next", .skip_forward, "", false, false)) {
+    if (gui.toolButton(app, "spr_next", .skip_forward, "", false, false)) {
         e.playing = false;
         e.frame = (e.frame + 1) % n;
     }
-    txt(std.fmt.allocPrint(a, "{d} / {d}", .{ e.frame + 1, n }) catch "", 12, theme.dim, font_mod.regular);
-    clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(12) } } });
+    gui.txt(std.fmt.allocPrint(a, "{d} / {d}", .{ e.frame + 1, n }) catch "", .caption, theme.dim, font_mod.regular);
+    clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(lay.space.md) } } });
 }
 
 /// The right column: the file, the picked frame (PNG out and in, out of the sprite),
 /// a frame added; its Info.
 fn props(app: *App, a: Allocator, e: *Edit) void {
-    main.propsOpen(app, "spr_props");
-    main.propsTitle(tx.get(tx.props), true);
-    main.propRow(tx.get(tx.p_file), app.store.files.items[e.file].archive);
-    main.propRow(tx.get(tx.p_name), e.name);
-    main.propRow(tx.get(tx.p_frames), std.fmt.allocPrint(a, "{d}", .{e.frames.items.len}) catch "");
-    main.propNote(tx.get(if (isDepth(e)) tx.spr_depth_hint else tx.spr_hint));
+    frame.props(app, "spr_props");
+    gui.groupTitle(tx.get(tx.props), true);
+    gui.propRow(tx.get(tx.p_file), app.store.files.items[e.file].archive);
+    gui.propRow(tx.get(tx.p_name), e.name);
+    gui.propRow(tx.get(tx.p_frames), std.fmt.allocPrint(a, "{d}", .{e.frames.items.len}) catch "");
+    gui.note(tx.get(if (isDepth(e)) tx.spr_depth_hint else tx.spr_hint));
     const k = e.frame;
     if (k < e.frames.items.len) {
         const img = e.frames.items[k];
-        main.propsTitle(tx.alloc(a, tx.spr_frame, .{ k + 1, img.width, img.height }), false);
-        if (main.button(app, "spr_in", tx.get(tx.spr_from_png), false)) app.askFile(.{ .kind = .png, .run = onFrameIn, .entry = k });
-        if (main.button(app, "spr_out", tx.get(tx.spr_to_png), false)) app.askFile(.{ .kind = .png_out, .run = onFrameOut, .entry = k });
-        if (e.frames.items.len > 1 and !isDepth(e)) if (main.button(app, "spr_del", tx.get(tx.spr_remove), false)) app.askDelete(.frame, k, e.name);
+        gui.groupTitle(tx.alloc(a, tx.spr_frame, .{ k + 1, img.width, img.height }), false);
+        if (gui.button(app, "spr_in", tx.get(tx.spr_from_png), false)) app.askFile(.{ .kind = .png, .run = onFrameIn, .entry = k });
+        if (gui.button(app, "spr_out", tx.get(tx.spr_to_png), false)) app.askFile(.{ .kind = .png_out, .run = onFrameOut, .entry = k, .name = if (e.frames.items.len > 1) std.fmt.allocPrint(a, "{s}_{d}", .{ std.fs.path.stem(e.name[if (std.mem.lastIndexOfAny(u8, e.name, "/\\")) |x| x + 1 else 0..]), k + 1 }) catch e.name else e.name });
+        if (e.frames.items.len > 1 and !isDepth(e)) if (gui.button(app, "spr_del", tx.get(tx.spr_remove), false)) app.askDelete(.frame, k, e.name);
     }
     if (!isDepth(e)) {
-        main.propsTitle(tx.get(tx.p_actions), false);
-        if (main.button(app, "spr_add", tx.get(tx.spr_add_frame), false)) app.askFile(.{ .kind = .png, .run = onFrameAdd });
+        gui.groupTitle(tx.get(tx.p_actions), false);
+        if (gui.button(app, "spr_add", tx.get(tx.spr_add_frame), false)) app.askFile(.{ .kind = .png, .run = onFrameAdd });
     }
-    main.propsTitle(tx.get(tx.info_title), false);
+    gui.groupTitle(tx.get(tx.info_title), false);
     const archive = app.store.files.items[e.file].archive;
     info.show(app, info.rows(app, std.fmt.allocPrint(a, "sprite:{s}|{s}", .{ archive, e.name }) catch e.name, e, spriteInfo));
-    clay.close();
+    gui.propsEnd();
 }
 
 /// The sprite's Info: its file (and level); the items with it as their icon, the scripts
@@ -369,13 +365,13 @@ fn props(app: *App, a: Allocator, e: *Edit) void {
 fn spriteInfo(e: *Edit, app: *App, list: *info.List) void {
     const archive = app.store.files.items[e.file].archive;
     info.defined(list, archive, e.name, false);
-    const stem = std.fs.path.stem(e.name[if (std.mem.lastIndexOfScalar(u8, e.name, '\\')) |k| k + 1 else 0..]);
+    const stem = std.fs.path.stem(baseName(e.name));
     if (std.mem.eql(u8, archive, sprite_archive)) for (app.catalog.entries.items, 0..) |x, i| {
         if (x.icon.len > 0 and std.ascii.eqlIgnoreCase(x.icon, stem)) list.add(.{ .group = .used, .text = info.entryText(list, x), .to = .{ .entry = i }, .icon = .package });
     };
     if (info.levelOf(archive)) |lv| {
         const other = list.fmt("{s}/other.dat", .{lv});
-        for (refs.naming(app, list.a, other, refs.script, list.fmt("\"{s}\"", .{stem}))) |n| list.add(.{ .group = .used, .text = n, .to = .{ .code = .{ .archive = other, .entry = n } }, .icon = .code });
+        for (uses.naming(list.a, uses.get(app).level(lv), list.fmt("\"{s}\"", .{stem}))) |n| list.add(.{ .group = .used, .text = n, .to = .{ .code = .{ .archive = other, .entry = n } }, .icon = .code });
     }
 }
 
@@ -386,8 +382,8 @@ fn swatch(app: *App, id: []const u8, col: [4]u8, size: f32, e: ?*Edit) void {
         .id = sid,
         .layout = .{ .sizing = .{ .width = clay.fixed(size), .height = clay.fixed(size) } },
         .backgroundColor = .{ .r = @floatFromInt(col[0]), .g = @floatFromInt(col[1]), .b = @floatFromInt(col[2]), .a = 255 },
-        .cornerRadius = clay.radius(3),
-        .border = .{ .color = if (clay.pointerOver(sid)) theme.text else theme.field_border, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } },
+        .cornerRadius = clay.radius(lay.radius.sm),
+        .border = .{ .color = if (clay.pointerOver(sid)) theme.text else theme.field_border, .width = gui.edges(lay.border.line) },
     });
     if (e) |ed| if (clay.pointerOver(sid) and app.clicked) {
         ed.color = col;
@@ -451,13 +447,13 @@ pub fn draw(app: *App, e: *Edit, rect: c.SDL_FRect) void {
         var x: f32 = 0;
         while (x < fw * e.zoom) : (x += cell) {
             const odd = @as(u32, @intFromFloat(x / cell + y / cell)) % 2 == 1;
-            _ = if (odd) c.SDL_SetRenderDrawColor(r, 58, 58, 58, 255) else c.SDL_SetRenderDrawColor(r, 44, 44, 44, 255);
+            ink(r, if (odd) lay.canvas.checker_odd else lay.canvas.checker_even);
             _ = c.SDL_RenderFillRect(r, &.{ .x = e.origin[0] + x, .y = e.origin[1] + y, .w = @min(cell, fw * e.zoom - x), .h = @min(cell, fh * e.zoom - y) });
         }
     }
     _ = c.SDL_RenderTexture(r, e.textures.items[e.frame], null, &.{ .x = e.origin[0], .y = e.origin[1], .w = fw * e.zoom, .h = fh * e.zoom });
     if (e.zoom >= 8) {
-        _ = c.SDL_SetRenderDrawColor(r, 0, 0, 0, 60);
+        ink(r, lay.canvas.pixel_grid);
         var gx: f32 = 0;
         while (gx <= fw) : (gx += 1) _ = c.SDL_RenderLine(r, e.origin[0] + gx * e.zoom, e.origin[1], e.origin[0] + gx * e.zoom, e.origin[1] + fh * e.zoom);
         var gy: f32 = 0;
@@ -500,23 +496,23 @@ pub fn release(app: *App, e: *Edit) void {
     if (!e.stroked) return;
     e.stroked = false;
     var wb: [32]u8 = undefined;
-    commit(app, e, std.fmt.bufPrint(&wb, "{s} {d}", .{ tx.get(tx.spr_frame_word), e.frame + 1 }) catch "frame") catch |err| app.setStatus(tx.st_set_failed, .{err});
+    commit(app, e, std.fmt.bufPrint(&wb, "{s} {d}", .{ tx.get(tx.spr_frame_word), e.frame + 1 }) catch "frame") catch |err| app.failed(err);
 }
 
 // File dialog answers (app.askFile).
-fn onFrameIn(app: *App, ask: main.FileAsk, path: []const u8) !void {
+fn onFrameIn(app: *App, ask: app_mod.FileAsk, path: []const u8) !void {
     try importFrame(app, ask.entry, path);
     app.setStatus(tx.st_frame_set, .{ask.entry + 1});
 }
-fn onFrameOut(app: *App, ask: main.FileAsk, path: []const u8) !void {
+fn onFrameOut(app: *App, ask: app_mod.FileAsk, path: []const u8) !void {
     try exportFrame(app, ask.entry, path);
     app.setStatus(tx.st_exported, .{path});
 }
-fn onFrameAdd(app: *App, _: main.FileAsk, path: []const u8) !void {
+fn onFrameAdd(app: *App, _: app_mod.FileAsk, path: []const u8) !void {
     try addFrame(app, path);
     app.setStatus(tx.st_frame_set, .{app.spr.?.frames.items.len});
 }
-pub fn onNew(app: *App, _: main.FileAsk, path: []const u8) !void {
+pub fn onNew(app: *App, _: app_mod.FileAsk, path: []const u8) !void {
     const e = try importNew(app, app.spr_new.get(), if (app.spr_new_icons) "icons" else "", path);
     app.setStatus(tx.st_sprite_added, .{e});
 }

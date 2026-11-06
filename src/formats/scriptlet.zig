@@ -10,36 +10,12 @@ const Allocator = std.mem.Allocator;
 pub const Arg = union(enum) {
     string: []const u8,
     number: f32,
-
-    pub fn str(self: Arg) []const u8 {
-        return switch (self) {
-            .string => |s| s,
-            .number => "",
-        };
-    }
-
-    /// Like the exe's `atof`: `WALKAREA("ciuch_blokada",0,1")` in `05l_ciuchcia.scr` gives 1.
-    pub fn num(self: Arg) f32 {
-        return switch (self) {
-            .number => |n| n,
-            .string => |s| @import("../script.zig").value.atof(s),
-        };
-    }
-
-    /// Integer via `_ftol`: NaN and 1e30 from a file do not crash the cast.
-    pub fn int(self: Arg) i32 {
-        return @import("../script.zig").value.floatToInt(self.num());
-    }
 };
 
 pub const Command = struct {
     name: []const u8,
     args: []Arg,
     line: u32,
-
-    pub fn arg(self: Command, i: usize) Arg {
-        return if (i < self.args.len) self.args[i] else .{ .string = "" };
-    }
 };
 
 const Error = error{BadSyntax} || Allocator.Error;
@@ -119,9 +95,9 @@ test parse {
     );
     try std.testing.expectEqual(4, cmds.len);
     try std.testing.expectEqualStrings("ANIMATION", cmds[1].name);
-    try std.testing.expectEqualStrings("pontA_out", cmds[1].arg(1).str());
-    try std.testing.expectEqual(100, cmds[2].arg(2).num());
-    try std.testing.expectEqualStrings("Ovitz", cmds[3].arg(0).str());
+    try std.testing.expectEqualStrings("pontA_out", cmds[1].args[1].string);
+    try std.testing.expectEqual(100, cmds[2].args[2].number);
+    try std.testing.expectEqualStrings("Ovitz", cmds[3].args[0].string);
 }
 
 test parsePoints {
@@ -130,15 +106,4 @@ test parsePoints {
     const pts = try parsePoints(arena.allocator(), "ovic_p1,1605,272,12.720011\r\ncam_1,1652,284,0.000000\r\n");
     try std.testing.expectEqual(2, pts.len);
     try std.testing.expectEqual(1605, pts[0].x);
-}
-
-test "int argument wraps like _ftol" {
-    try std.testing.expectEqual(@as(i32, 705032704), (Arg{ .number = 5e9 }).int());
-    try std.testing.expectEqual(@as(i32, 0), (Arg{ .number = std.math.nan(f32) }).int());
-}
-
-test "number argument with trailing junk" {
-    try std.testing.expectEqual(@as(f32, 1), (Arg{ .string = "1\"" }).num());
-    try std.testing.expectEqual(@as(f32, 2.5), (Arg{ .string = " 2.5x" }).num());
-    try std.testing.expectEqual(@as(f32, 0), (Arg{ .string = "abc" }).num());
 }

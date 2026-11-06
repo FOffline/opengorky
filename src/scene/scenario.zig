@@ -7,8 +7,7 @@
 const panoramaHeight = @import("../state.zig").scene.panoramaHeight;
 const std = @import("std");
 const fields = @import("../fields.zig");
-const scriptlet = @import("../formats.zig").scriptlet;
-const dialog = @import("../formats.zig").dialog;
+const scriptlet = @import("../core.zig").scene;
 const world_mod = @import("../state.zig").world;
 const World = world_mod.World;
 const Runner = @import("../state.zig").scene.Runner;
@@ -17,19 +16,12 @@ const flow_cmds = @import("flow_cmds.zig");
 const actor_cmds = @import("actor_cmds.zig");
 const show_cmds = @import("show_cmds.zig");
 
-/// Deliberate deviation from the exe (player's request): in museum-slavsky after
-/// two lines Slavsky stays on his knees for a sway or two, not every repeat of
-/// `ANIMATION("Slavsky","knee_idle",20)`; in the exe that is ≈53 s of silence
-/// (20 × 80 frames, 0x4266e7) and the scene looked stuck. While the scene waits
-/// for the actor (WAITFORACTOR), repeats of this animation are cut: the current
-/// loop finishes (no frame jump), then the next command (knee_up).
-const RepeatTrim = struct { scene: []const u8, actor: []const u8, anim: []const u8 };
-const repeat_trims = [_]RepeatTrim{
-    .{ .scene = "museum-slavsky", .actor = "Slavsky", .anim = "knee_idle" },
-};
-
+/// Deliberate deviations from the exe (a port fix, the Classic reader's rows:
+/// core/modules.zig `repeatTrims`): while the scene waits for the actor (WAITFORACTOR),
+/// repeats of its animation are cut — the current loop finishes (no frame jump), then the
+/// next command.
 fn trimRepeats(scene: []const u8, o: *Object) void {
-    for (repeat_trims) |t| {
+    for (@import("../core.zig").modules.repeatTrims()) |t| {
         if (!std.ascii.eqlIgnoreCase(scene, t.scene) or !std.ascii.eqlIgnoreCase(o.name, t.actor)) continue;
         const a = world_mod.actorOf(o);
         if (std.ascii.eqlIgnoreCase(a.anim, t.anim)) a.repeat_left = 0;
@@ -148,4 +140,10 @@ test exeName {
     try std.testing.expectEqualStrings("FADE_IN", exeName("FADE_INDIALOG_DISPLAY"));
     try std.testing.expectEqualStrings("PLACEHEROES", exeName("PLACEHEROES"));
     try std.testing.expectEqualStrings("SIGNATURE", exeName("SIGNATURE"));
+}
+
+test "core's OG Script names of the scene commands follow the exe table's order (prefix match)" {
+    const names = @import("../core.zig").scene.commands;
+    try std.testing.expectEqual(exe_order.len, names.len);
+    for (exe_order, names) |e, p| try std.testing.expectEqualStrings(e, p.exe);
 }

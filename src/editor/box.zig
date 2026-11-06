@@ -1,13 +1,21 @@
 //! Box contents in a box script (`.itm` including ci_box.s, or a battle `.obs_i`):
 //! slots `itm_N = "name1,name2";` (+ `cnt_itm`) in init(), and the objects they name
 //! created by `Weapon_New("name","cw_x.s")` / `Item_New("name","ca_x.s"[,count])` in
-//! post_init_box() (post_init() for battle boxes). The engine finds contents by the
-//! slot names, so `write` rebuilds both places from one list.
+//! post_init_box() (post_init() for battle boxes); a hero's starting inventory: the
+//! calls with its name as the owner. Both are read from the lifted model (model.zig:
+//! the slots' values, the calls). The engine finds a box's contents by the slot names,
+//! so `write` rebuilds both places from one list (shortcut: by text, the lift cannot
+//! add or drop a call; the rebuilt lines are the old path's bytes).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const placement = @import("placement.zig");
-const vars = @import("vars.zig");
+const model = @import("model.zig");
+const lineAfter = @import("code.zig").lineAfter;
+const App = @import("app.zig").App;
+
+/// The builtins making an object of a class.
+const makers = [_][]const u8{ "Weapon_New", "Item_New" };
 
 pub const Item = struct {
     /// Class file, `cw_crowbar.s`.
@@ -28,37 +36,27 @@ fn creator(text: []const u8) []const u8 {
 }
 
 pub fn isBox(text: []const u8) bool {
-    return std.ascii.findIgnoreCase(text, "ci_box.s") != null or vars.find(text, "itm_1") != null;
+    return std.ascii.findIgnoreCase(text, "ci_box.s") != null or model.find(text, "itm_1") != null;
 }
 
-/// Contents by slot; names missing from the creator are dropped (they make nothing).
-pub fn parse(a: Allocator, text: []const u8) ![]Item {
-    var calls: std.ArrayList(struct { name: []const u8, class: []const u8, count: ?i32 }) = .empty;
-    const body = funcBody(text, creator(text)) orelse return &.{};
-    var lines = std.mem.splitScalar(u8, text[body.start..body.end], '\n');
-    while (lines.next()) |line| {
-        const t = std.mem.trim(u8, line, " \t\r");
-        if (!(std.mem.startsWith(u8, t, "Weapon_New(") or std.mem.startsWith(u8, t, "Item_New("))) continue;
-        var it = std.mem.tokenizeAny(u8, t[std.mem.indexOfScalar(u8, t, '(').? + 1 ..], ",); \t");
-        const name = std.mem.trim(u8, it.next() orelse continue, "\"");
-        const class = std.mem.trim(u8, it.next() orelse continue, "\"");
-        const third = it.next();
-        const count = if (third) |x| std.fmt.parseInt(i32, x, 10) catch null else null;
-        try calls.append(a, .{ .name = name, .class = class, .count = count });
-    }
+/// Contents of box script `file` by slot; names its creator does not make are dropped
+/// (they make nothing).
+pub fn parse(app: *App, a: Allocator, file: usize) ![]Item {
+    const ev = creator(app.store.text(file));
+    const made = model.calls(app, a, file, &makers);
     var items: std.ArrayList(Item) = .empty;
     var n: usize = 1;
     while (n <= 13) : (n += 1) {
         var key: [8]u8 = undefined;
-        const slot = vars.getStr(text, std.fmt.bufPrint(&key, "itm_{d}", .{n}) catch unreachable) orelse continue;
+        const slot = model.ownStr(app, file, std.fmt.bufPrint(&key, "itm_{d}", .{n}) catch unreachable) orelse continue;
         var item: ?Item = null;
         var names = std.mem.tokenizeScalar(u8, slot, ',');
         while (names.next()) |raw| {
             const name = std.mem.trim(u8, raw, " ");
-            const call = for (calls.items) |cl| {
-                if (std.ascii.eqlIgnoreCase(cl.name, name)) break cl;
+            const call = for (made) |cl| {
+                if (std.ascii.eqlIgnoreCase(cl.event, ev) and std.ascii.eqlIgnoreCase(str(cl, 0) orelse continue, name)) break cl;
             } else continue;
-            if (item == null) item = .{ .class = call.class, .count = call.count };
+            if (item == null) item = .{ .class = str(call, 1) orelse continue, .count = int(call, 2) };
             // A name twice in a slot makes one object (seen in 01pr_box2).
             for (item.?.names.items) |x| {
                 if (std.ascii.eqlIgnoreCase(x, name)) break;
@@ -67,6 +65,15 @@ pub fn parse(a: Allocator, text: []const u8) ![]Item {
         if (item) |i| try items.append(a, i);
     }
     return items.items;
+}
+
+/// String argument `k` of a call.
+fn str(c: model.Call, k: usize) ?[]const u8 {
+    return if (k < c.args.len and c.args[k] == .string) c.args[k].string else null;
+}
+
+fn int(c: model.Call, k: usize) ?i32 {
+    return if (k < c.args.len and c.args[k] == .int) c.args[k].int else null;
 }
 
 const Span = placement.Span;
@@ -91,10 +98,6 @@ pub fn funcBody(text: []const u8, name: []const u8) ?Span {
     return null;
 }
 
-fn lineEnd(text: []const u8, i: usize) usize {
-    return if (std.mem.indexOfScalarPos(u8, text, i, '\n')) |e| e + 1 else text.len;
-}
-
 fn isSlotLine(t: []const u8) bool {
     if (std.mem.startsWith(u8, t, "cnt_itm")) return true;
     if (!std.mem.startsWith(u8, t, "itm_")) return false;
@@ -110,13 +113,13 @@ pub fn write(gpa: Allocator, text: []const u8, items: []const Item) ![]u8 {
     const nl = placement.newline(text);
     const body = funcBody(text, creator(text)) orelse return error.NoCreator;
     const init_body = funcBody(text, "init") orelse return error.NoInit;
-    const calls_at = lineEnd(text, body.start - 1);
+    const calls_at = lineAfter(text, body.start - 1);
     const has_slots = blk: {
         var it = std.mem.splitScalar(u8, text, '\n');
         while (it.next()) |l| if (isSlotLine(std.mem.trim(u8, l, " \t\r"))) break :blk true;
         break :blk false;
     };
-    const slots_at = if (has_slots) null else lineEnd(text, init_body.start - 1);
+    const slots_at = if (has_slots) null else lineAfter(text, init_body.start - 1);
 
     var slots: std.ArrayList(u8) = .empty;
     defer slots.deinit(gpa);
@@ -144,7 +147,7 @@ pub fn write(gpa: Allocator, text: []const u8, items: []const Item) ![]u8 {
     var slots_done = false;
     var i: usize = 0;
     while (i < text.len) {
-        const e = lineEnd(text, i);
+        const e = lineAfter(text, i);
         const t = std.mem.trim(u8, text[i..e], " \t\r\n");
         const in_body = i >= body.start and i < body.end;
         if (slots_at == i and !slots_done) {
@@ -167,13 +170,13 @@ pub fn write(gpa: Allocator, text: []const u8, items: []const Item) ![]u8 {
         const decl = std.fmt.bufPrint(&d, "string itm_{d};", .{n}) catch unreachable;
         if (std.mem.indexOf(u8, result, decl) != null) continue;
         const last = std.mem.lastIndexOf(u8, result, "string itm_") orelse {
-            if (try vars.declare(gpa, result, decl)) |next| {
+            if (try model.declare(gpa, result, decl)) |next| {
                 gpa.free(result);
                 result = next;
             }
             continue;
         };
-        const at = lineEnd(result, last);
+        const at = lineAfter(result, last);
         const next = try std.mem.concat(gpa, u8, &.{ result[0..at], decl, nl, result[at..] });
         gpa.free(result);
         result = next;
@@ -182,36 +185,40 @@ pub fn write(gpa: Allocator, text: []const u8, items: []const Item) ![]u8 {
 }
 
 /// A starting inventory: the `Item_New`/`Weapon_New(name, class, "<owner>"[, count])`
-/// calls of a hero script, by class in their order.
-pub fn parseOwned(a: Allocator, text: []const u8, owner: []const u8) ![]Item {
+/// calls of hero script `file`, by class in their order.
+pub fn parseOwned(app: *App, a: Allocator, file: usize, owner: []const u8) ![]Item {
     var items: std.ArrayList(Item) = .empty;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw| {
-        const call = ownedCall(raw, owner) orelse continue;
+    for (ownedCalls(app, a, file, owner)) |call| {
+        const class = str(call, 1).?;
         const it = for (items.items) |*x| {
-            if (std.ascii.eqlIgnoreCase(x.class, call.class)) break x;
+            if (std.ascii.eqlIgnoreCase(x.class, class)) break x;
         } else blk: {
-            try items.append(a, .{ .class = call.class, .count = call.count });
+            try items.append(a, .{ .class = class, .count = int(call, 3) });
             break :blk &items.items[items.items.len - 1];
         };
-        try it.names.append(a, call.name);
+        try it.names.append(a, str(call, 0).?);
     }
     return items.items;
 }
 
-const OwnedCall = struct { name: []const u8, class: []const u8, count: ?i32 };
+/// The calls of `file` making an object for `owner`.
+fn ownedCalls(app: *App, a: Allocator, file: usize, owner: []const u8) []const model.Call {
+    var out: std.ArrayList(model.Call) = .empty;
+    for (model.calls(app, a, file, &makers)) |c| {
+        if (str(c, 0) == null or str(c, 1) == null or !std.ascii.eqlIgnoreCase(str(c, 2) orelse continue, owner)) continue;
+        out.append(a, c) catch {};
+    }
+    return out.items;
+}
 
-/// `Item_New("n","c","Owner"[,N]);` on its own line, for `owner`.
-fn ownedCall(raw: []const u8, owner: []const u8) ?OwnedCall {
-    const t = std.mem.trim(u8, raw, " \t\r");
-    if (!(std.mem.startsWith(u8, t, "Weapon_New(") or std.mem.startsWith(u8, t, "Item_New("))) return null;
-    var it = std.mem.tokenizeAny(u8, t[std.mem.indexOfScalar(u8, t, '(').? + 1 ..], ",); \t");
-    const name = std.mem.trim(u8, it.next() orelse return null, "\"");
-    const class = std.mem.trim(u8, it.next() orelse return null, "\"");
-    const who = std.mem.trim(u8, it.next() orelse return null, "\"");
-    if (!std.ascii.eqlIgnoreCase(who, owner)) return null;
-    const count = if (it.next()) |x| std.fmt.parseInt(i32, x, 10) catch null else null;
-    return .{ .name = name, .class = class, .count = count };
+/// The owner of hero script `file`'s first call making an object, a slice of its text
+/// (as long-lived as the old text was; null: none).
+pub fn ownerOf(app: *App, a: Allocator, file: usize) ?[]const u8 {
+    for (model.calls(app, a, file, &makers)) |c| if (str(c, 2) != null) {
+        const sp = c.arg_spans[2];
+        return app.store.text(file)[sp.start + 1 .. sp.end - 1];
+    };
+    return null;
 }
 
 /// The item whose names include `name`.
@@ -220,56 +227,52 @@ fn holder(items: []const Item, name: []const u8) ?Item {
     return null;
 }
 
-/// `text` with the starting inventory of `owner` changed to `items` in place: lines of
-/// names gone are removed, a count changes only its number, new names go after the
-/// last line of their class (else after the owner's last call, else first in
-/// post_init()); every other line stays as it is.
-pub fn writeOwned(gpa: Allocator, text: []const u8, items: []const Item, owner: []const u8) ![]u8 {
+/// Hero script `file`'s starting inventory of `owner` changed to `items` in place, one
+/// undo step: a count the call has is its literal (through the exporter when nothing else
+/// changes); lines of names gone are removed, a count the call lacks becomes a last
+/// argument, new names go after the last line of their class (else after the owner's
+/// last call, else first in post_init()); every other line stays as it is.
+pub fn writeOwned(app: *App, file: usize, items: []const Item, owner: []const u8) !void {
+    const gpa = app.gpa;
+    const text = app.store.text(file);
     const nl = placement.newline(text);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const old = try parseOwned(a, text, owner);
+    const old = ownedCalls(app, a, file, owner);
     var edits: std.ArrayList(placement.Edit) = .empty;
+    var counts: std.ArrayList(model.ArgSet) = .empty;
     var last_owned: ?usize = null;
-    var i: usize = 0;
-    while (i < text.len) {
-        const e = lineEnd(text, i);
-        if (ownedCall(text[i..e], owner)) |call| {
-            last_owned = e;
-            const now = holder(items, call.name);
-            if (now) |it| {
-                if (it.count != call.count) if (it.count) |cnt| {
-                    // The count: its number, or a new last argument.
-                    const line = text[i..e];
-                    const close = std.mem.lastIndexOfScalar(u8, line, ')') orelse return error.BadLine;
-                    if (call.count != null) {
-                        var end = close;
-                        while (end > 0 and line[end - 1] == ' ') end -= 1;
-                        var k = end;
-                        while (k > 0 and (std.ascii.isDigit(line[k - 1]) or line[k - 1] == '-')) k -= 1;
-                        try edits.append(a, .{ .span = .{ .start = i + k, .end = i + end }, .text = try std.fmt.allocPrint(a, "{d}", .{cnt}) });
-                    } else try edits.append(a, .{ .span = .{ .start = i + close, .end = i + close }, .text = try std.fmt.allocPrint(a, ", {d}", .{cnt}) });
-                };
-            } else try edits.append(a, .{ .span = .{ .start = i, .end = e }, .text = "" });
+    for (old) |call| {
+        var i = call.span.start;
+        while (i > 0 and text[i - 1] != '\n') i -= 1;
+        const e = lineAfter(text, call.span.start);
+        last_owned = e;
+        const now = holder(items, str(call, 0).?) orelse {
+            try edits.append(a, .{ .span = .{ .start = i, .end = e }, .text = "" });
+            continue;
+        };
+        const cnt = now.count orelse continue;
+        if (int(call, 3)) |c| {
+            if (c != cnt) try counts.append(a, .{ .call = call, .index = 3, .value = .{ .int = cnt } });
+        } else {
+            // A new last argument, before the call's `)`.
+            const close = call.span.end - 1;
+            try edits.append(a, .{ .span = .{ .start = close, .end = close }, .text = try std.fmt.allocPrint(a, ", {d}", .{cnt}) });
         }
-        i = e;
     }
     // New names, after their class's last line (else the owner's last call).
     for (items) |it| for (it.names.items) |name| {
-        if (holder(old, name) != null) continue;
+        if (for (old) |call| {
+            if (std.ascii.eqlIgnoreCase(str(call, 0).?, name)) break true;
+        } else false) continue;
         var at: ?usize = null;
-        var k: usize = 0;
-        while (k < text.len) {
-            const e = lineEnd(text, k);
-            if (ownedCall(text[k..e], owner)) |call| if (std.ascii.eqlIgnoreCase(call.class, it.class)) {
-                at = e;
-            };
-            k = e;
-        }
+        for (old) |call| if (std.ascii.eqlIgnoreCase(str(call, 1).?, it.class)) {
+            at = lineAfter(text, call.span.start);
+        };
         const pos = at orelse last_owned orelse blk: {
             const body = funcBody(text, "post_init") orelse return error.NoPostInit;
-            break :blk lineEnd(text, body.start - 1);
+            break :blk lineAfter(text, body.start - 1);
         };
         const f = if (it.weapon()) "Weapon_New" else "Item_New";
         const line = if (it.count) |cnt|
@@ -278,45 +281,21 @@ pub fn writeOwned(gpa: Allocator, text: []const u8, items: []const Item, owner: 
             try std.fmt.allocPrint(a, "\t{s}(\"{s}\", \"{s}\", \"{s}\");{s}", .{ f, name, it.class, owner, nl });
         try edits.append(a, .{ .span = .{ .start = pos, .end = pos }, .text = line });
     };
+    if (edits.items.len == 0) {
+        if (counts.items.len > 0) try model.setArgs(app, file, counts.items, null);
+        return;
+    }
+    // With lines added or cut the counts go as text too (one step).
+    for (counts.items) |x| {
+        const sp = x.call.arg_spans[x.index];
+        try edits.append(a, .{ .span = .{ .start = sp.start, .end = sp.end }, .text = try std.fmt.allocPrint(a, "{d}", .{x.value.int}) });
+    }
     // Inserts at one point keep their order (apply sorts by start, stable for equal ones).
-    return placement.apply(gpa, text, edits.items);
-}
-
-test "inventory: parse by class, write back" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const hro = "function post_init()\r\n{\r\n" ++
-        "\tItem_New(\"su_food\", \"ci_food.s\", \"Sullivan\");\r\n" ++
-        "\tItem_New(\"su_band1\", \"ci_bandage.s\", \"Sullivan\");\r\n" ++
-        "\tItem_New(\"su_band2\", \"ci_bandage.s\", \"Sullivan\");\r\n" ++
-        "\t//==== AMMO ====\r\n" ++
-        "\tItem_New(\"su_am_pistol\", \"ca_pistolammo.s\", \"Sullivan\" , 12);\r\n" ++
-        "};\r\n";
-    const items = try parseOwned(a, hro, "sullivan");
-    try std.testing.expectEqual(3, items.len);
-    try std.testing.expectEqual(2, items[1].names.items.len);
-    try std.testing.expectEqual(12, items[2].count.?);
-    const out = try writeOwned(std.testing.allocator, hro, items, "Sullivan");
-    defer std.testing.allocator.free(out);
-    const back = try parseOwned(a, out, "Sullivan");
-    try std.testing.expectEqual(3, back.len);
-    try std.testing.expectEqual(12, back[2].count.?);
-    // Unchanged: byte for byte.
-    try std.testing.expectEqualStrings(hro, out);
-    // One bandage less, ammo 20, a knife after the food: only those lines change.
-    _ = items[1].names.pop();
-    items[2].count = 20;
-    var knife: Item = .{ .class = "cw_stilleto.s" };
-    try knife.names.append(a, "su_stilleto_1");
-    var list: std.ArrayList(Item) = .empty;
-    try list.appendSlice(a, items);
-    try list.append(a, knife);
-    const out2 = try writeOwned(std.testing.allocator, hro, list.items, "Sullivan");
-    defer std.testing.allocator.free(out2);
-    try std.testing.expect(std.mem.indexOf(u8, out2, "su_band2") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out2, "\"Sullivan\" , 20);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out2, "\"Sullivan\" , 20);\r\n\tWeapon_New(\"su_stilleto_1\", \"cw_stilleto.s\", \"Sullivan\");\r\n};") != null);
+    const out = try placement.apply(gpa, text, edits.items);
+    app.store.replace(file, out) catch |err| {
+        gpa.free(out);
+        return err;
+    };
 }
 
 const sample =
@@ -334,34 +313,22 @@ const sample =
     "  Item_New(\"b_food2\",\"ci_food.s\");\r\n" ++
     "};\r\n";
 
-test "box: parse, change, write back" {
+test "box: write back" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var items = try parse(a, sample);
-    try std.testing.expectEqual(2, items.len);
-    try std.testing.expectEqualStrings("cw_crowbar.s", items[0].class);
-    try std.testing.expectEqual(2, items[1].names.items.len);
-
-    // Unchanged contents keep the script byte for byte (but the spacing of rebuilt lines).
-    const same = try write(std.testing.allocator, sample, items);
-    defer std.testing.allocator.free(same);
-    const again = try parse(a, same);
-    try std.testing.expectEqual(2, again.len);
-
-    // One food less, pistol ammo with a count in a third slot.
-    _ = items[1].names.pop();
+    // The sample's contents (parse reads them from the model), one food less, pistol ammo
+    // with a count in a third slot.
+    var crowbar: Item = .{ .class = "cw_crowbar.s" };
+    try crowbar.names.append(a, "b_crowbar1");
+    var food: Item = .{ .class = "ci_food.s" };
+    try food.names.append(a, "b_food1");
     var ammo: Item = .{ .class = "ca_pistolammo.s", .count = 24 };
     try ammo.names.append(a, "b_ammo1");
-    var list: std.ArrayList(Item) = .empty;
-    try list.appendSlice(a, items);
-    try list.append(a, ammo);
-    const out = try write(std.testing.allocator, sample, list.items);
+    const out = try write(std.testing.allocator, sample, &.{ crowbar, food, ammo });
     defer std.testing.allocator.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "string itm_2;\r\nstring itm_3;\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "  itm_2 = \"b_food1\";\r\n  itm_3 = \"b_ammo1\";\r\n  cnt_itm=3;\r\n};") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Item_New(\"b_food2\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "  Item_New(\"b_ammo1\",\"ca_pistolammo.s\",24);\r\n  //Item_New(\"old\"") != null);
-    const back = try parse(a, out);
-    try std.testing.expectEqual(24, back[2].count.?);
 }

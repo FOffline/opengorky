@@ -15,7 +15,6 @@ const camera_view = @import("../level/camera.zig");
 const battle_view = @import("../battle/view.zig");
 const gui_battle = @import("../battle/gui.zig");
 const devices_mod = og.combat.devices;
-const turns_mod = og.combat.turns;
 const scenes_mod = og.scene.scenes;
 const og = @import("opengorky");
 const c = @import("sdl");
@@ -120,7 +119,7 @@ pub fn mouseUp(v: *Viewer, ctx: *Ctx, ev: c.SDL_Event) !Flow {
         if (ev.button.button == c.SDL_BUTTON_RIGHT or (bx >= 23 and bx <= 616 and by >= 399 and by <= 424)) {
             g.report_open = false;
             g.report_done = true;
-            if (v.level) |*l| l.world.out.sound(l.world.gpa, "invgive", null);
+            if (v.level) |*l| l.world.out.sound(l.world.gpa, og.core.modules.ui().sounds.give, null);
         }
         return .next;
     };
@@ -130,7 +129,7 @@ pub fn mouseUp(v: *Viewer, ctx: *Ctx, ev: c.SDL_Event) !Flow {
         if (ev.button.button == c.SDL_BUTTON_RIGHT) {
             v.safe.?.close(w);
         } else if (try v.safe.?.release(w, ev.button.x, ev.button.y)) {
-            w.out.sound(w.gpa, "safekey", null);
+            w.out.sound(w.gpa, og.core.modules.ui().sounds.safe_key, null);
         }
         return .next;
     }
@@ -141,7 +140,7 @@ pub fn mouseUp(v: *Viewer, ctx: *Ctx, ev: c.SDL_Event) !Flow {
         if (ev.button.button == c.SDL_BUTTON_RIGHT) {
             if (m.screen == .ingame and v.level != null) {
                 m.open = false;
-                v.uiSound("click");
+                v.uiSound(og.core.modules.ui().sounds.click);
             } else m.back();
             v.menuSound();
             return .next;
@@ -162,28 +161,28 @@ pub fn mouseUp(v: *Viewer, ctx: *Ctx, ev: c.SDL_Event) !Flow {
             ctx.press_ui = false;
             return .next;
         }
-        if (v.gui != null) if (v.level) |*l| if (l.world.mouse.push) {
-            l.world.mouse.push = false;
+        if (v.gui != null) if (v.level) |*l| if (l.mode.push) {
+            l.mode.push = false;
             return .next;
         };
         // Quick list: close (and cancel give).
-        if (v.gui) |g| if (g.short_open or (if (v.level) |*l| l.world.mouse.give != null else false)) {
+        if (v.gui) |g| if (g.short_open or (if (v.level) |*l| l.mode.give != null else false)) {
             g.short_open = false;
-            if (v.level) |*l| l.world.mouse.give = null;
+            if (v.level) |*l| l.mode.give = null;
             return .next;
         };
         if (v.inventory) |inv| if (inv.open) return .next;
         if (v.level) |*l| {
-            if (l.world.mouse.use != null) {
-                l.world.mouse.use = null;
+            if (l.mode.use != null) {
+                l.mode.use = null;
             } else if (l.world.battle != null and ctx.drag_dist < 4) {
-                try turns_mod.rightClick(&l.world.battle.?, l.world);
+                try l.mode.battleRight(&l.world.battle.?, l.world);
             } else if (l.world.battle == null and ctx.drag_dist < 4) {
                 const bg = camera_view.bgMouse(v, .{ ev.button.x, ev.button.y });
                 // Game: right click — walk up and open the examine menu (0x4514c0).
                 if (l.world.examine_menus) {
-                    if (og.world.actions.clickPlay(l.world, bg, true) catch false) l.clickMarker(bg);
-                } else _ = og.world.actions.clickAction(l.world, bg, 1) catch false;
+                    if (og.world.actions.playAt(l.world, bg, true, &l.mode.use) catch false) l.clickMarker(bg);
+                } else _ = og.world.actions.actAt(l.world, bg, 1, &l.mode.use) catch false;
             }
         }
         return .next;
@@ -212,7 +211,7 @@ pub fn mouseUp(v: *Viewer, ctx: *Ctx, ev: c.SDL_Event) !Flow {
         // panel it works as usual).
         if (v.gui) |g| if (g.short_open and my < gui_mod.panel_hit_y) {
             g.short_open = false;
-            l.world.mouse.give = null;
+            l.mode.give = null;
             return .next;
         };
         if (ctx.press_ui) {
@@ -221,14 +220,14 @@ pub fn mouseUp(v: *Viewer, ctx: *Ctx, ev: c.SDL_Event) !Flow {
         }
         const on_panel = v.gui != null and !v.gui.?.panel_hidden and !l.world.scene.cutscene and !l.world.scene.panorama and my >= gui_mod.panel_hit_y;
         // Give mode: a field click picks the hero under the cursor (a miss does nothing).
-        if (!on_panel and v.gui != null and l.world.mouse.give != null) {
+        if (!on_panel and v.gui != null and l.mode.give != null) {
             if (panel_actions.heroUnderMouse(v, l)) |to| try panel_actions.giveTo(v, to);
             return .next;
         }
         // Push mode: an obstacle cell (0x452ac0); on success the mode ends.
-        if (!on_panel and v.gui != null and l.world.mouse.push) if (l.world.battle) |*b| {
+        if (!on_panel and v.gui != null and l.mode.push) if (l.world.battle) |*b| {
             if (battle_view.tileAt(l, camera_view.bgMouse(v, .{ mx, my }))) |t| if (try devices_mod.push(b, l.world, t)) {
-                l.world.mouse.push = false;
+                l.mode.push = false;
             };
             return .next;
         };
@@ -248,7 +247,7 @@ pub fn motion(v: *Viewer, ctx: *Ctx, ev: c.SDL_Event) !Flow {
         const sel: u8 = if (v.mouse[1] < 340) 0 else 1;
         if (sel != g.go_sel) {
             g.go_sel = sel;
-            v.uiSound("menu1");
+            v.uiSound(og.core.modules.ui().sounds.menu_open);
         }
     };
     if (v.level) |*l| {

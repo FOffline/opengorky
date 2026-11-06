@@ -1,0 +1,7 @@
+level "01_port" {
+    fn OnUpdate() {
+        if (ponton == 1) {
+            ponton = 0;
+        }
+    }
+}

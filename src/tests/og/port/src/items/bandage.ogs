@@ -1,0 +1,6 @@
+module items {
+    item bandage {
+        kind = medicine;
+        hp = 20;
+    }
+}

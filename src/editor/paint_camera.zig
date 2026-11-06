@@ -1,49 +1,50 @@
 //! A level's view settings in the edit mode: a battle's grid (size, split) and camera
 //! (the gizmo dragged, initCamera keys), a location's ortho camera, the background .cfg.
 
+const level_og = @import("level_og.zig");
 const std = @import("std");
 const screen = @import("paint.zig").screen;
-const stepper = @import("paint.zig").stepper;
 const Ring = @import("paint.zig").Ring;
 const Paint = @import("paint.zig").Paint;
 const Allocator = std.mem.Allocator;
 const c = @import("sdl");
-const ui = @import("ui");
 const og = @import("opengorky");
-const lf = og.formats.level_files;
+const map_io = og.loaders.map;
+const core_map = og.core.map;
 const clay = @import("clay.zig");
+const gui = @import("widgets.zig");
+const stepper = gui.stepper;
+const lay = @import("layout.zig");
+const ink = @import("render.zig").ink;
 const font_mod = @import("font.zig");
 const tx = @import("text.zig");
-const main = @import("app.zig");
-const App = main.App;
-const theme = main.theme;
-const txt = main.txt;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
+const theme = app_mod.theme;
 const Doc = @import("level.zig").Doc;
-const newlevel = @import("newlevel.zig");
-const paint = @import("paint.zig");
 
 /// A location's camera (orthographic, initCamera()): the tilt the background was drawn
 /// at (`rotxy`, −30° in the game's) and the depth planes. 3D characters are drawn with
 /// it over the picture, so it has to match the picture.
 fn orthoPanel(app: *App, a: Allocator, d: *Doc) void {
-    clay.text(tx.get(tx.cam_ortho_hint), .{ .textColor = theme.dim, .fontSize = 12, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
-    const lev = app.store.text(d.lev);
-    const rows = [_]struct { tx.Msg, []const u8, f32 }{ .{ tx.cam_tilt, "rotxy", 180.0 / std.math.pi }, .{ tx.cam_front, "frontPlane", 1 }, .{ tx.cam_back, "backPlane", 1 } };
+    gui.txtWrap(tx.get(tx.cam_ortho_hint), .caption, theme.dim, font_mod.regular);
+    const rows = [_]struct { tx.Msg, []const u8, f32 }{ .{ tx.cam_tilt, "ortho_rotation_radians", 180.0 / std.math.pi }, .{ tx.cam_front, "near_plane", 1 }, .{ tx.cam_back, "far_plane", 1 } };
     inline for (rows) |r| {
-        clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .childGap = 6, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-        clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(140) } } });
-        txt(tx.get(r[0]), 13, theme.text, font_mod.regular);
-        clay.close();
-        const v = (newlevel.cameraVar(lev, r[1]) orelse 0) * r[2];
-        if (numBox(app, a, "lp_ortho_" ++ r[1], "", v, 120)) |nv| {
-            const t = newlevel.setCameraVar(app.gpa, lev, r[1], nv / r[2]) catch |err| {
-                clay.close();
-                return app.setStatus(tx.st_set_failed, .{err});
-            };
-            app.store.replaceLabeled(d.lev, t, r[1]) catch |err| {
-                app.gpa.free(t);
-                app.setStatus(tx.st_set_failed, .{err});
-            };
+        gui.fieldRow(tx.get(r[0]));
+        const v = (d.camValue(r[1]) orelse 0) * r[2];
+        if (gui.numberField(app, a, "lp_ortho_" ++ r[1], "", v, lay.width.field)) |nv| {
+            if (level_og.blockFile(d) != null) {
+                d.setCamera(&.{.{ r[1], nv / r[2] }}) catch |err| app.failed(err);
+            } else {
+                const t = d.withCamera(app.gpa, &.{.{ r[1], nv / r[2] }}) catch |err| {
+                    clay.close();
+                    return app.failed(err);
+                };
+                app.store.replaceLabeled(d.lev, t, r[1]) catch |err| {
+                    app.gpa.free(t);
+                    app.failed(err);
+                };
+            }
         }
         clay.close();
     }
@@ -58,15 +59,12 @@ pub fn backgroundCfg(app: *App, a: Allocator) void {
     const entry = std.fmt.allocPrint(a, "background\\{s}.cfg", .{d.name}) catch return;
     const f = app.store.file(archive, entry) catch return;
     const t = app.store.text(f);
-    clay.text(tx.get(tx.bg_cfg_hint), .{ .textColor = theme.dim, .fontSize = 12, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
+    gui.txtWrap(tx.get(tx.bg_cfg_hint), .caption, theme.dim, font_mod.regular);
     const keys: []const []const u8 = if (std.mem.indexOf(u8, t, "\ntl ") != null or std.mem.startsWith(u8, t, "tl ")) &.{ "vx", "vy", "vz", "tx", "ty", "tz", "tl" } else &.{ "gscale", "g0", "g1", "frontPlane", "backPlane" };
     for (keys) |k| {
         const v = cfgValue(t, k) orelse continue;
-        clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .childGap = 6, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-        clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(110) } } });
-        txt(k, 13, theme.text, font_mod.regular);
-        clay.close();
-        if (numBox(app, a, std.fmt.allocPrint(a, "bgcfg_{s}", .{k}) catch k, "", v, 140)) |nv| {
+        gui.fieldRow(k);
+        if (gui.numberField(app, a, std.fmt.allocPrint(a, "bgcfg_{s}", .{k}) catch k, "", v, lay.width.field)) |nv| {
             const nt = cfgSet(app.gpa, t, k, nv) catch {
                 clay.close();
                 return;
@@ -108,11 +106,10 @@ fn cfgSet(gpa: Allocator, t: []const u8, key: []const u8, v: f32) ![]u8 {
 /// The battle grid: cells free or blocked (the brush), and where the grid lies — its
 /// centre, turn, cell size, size in cells. A placement change is one undo step.
 pub fn gridPanel(app: *App, a: Allocator, p: *Paint) void {
-    clay.open(.{ .layout = .{ .childGap = 6 } });
-    if (main.button(app, "lp_on", tx.get(tx.lp_grid_free), p.walk_on)) p.walk_on = true;
-    if (main.button(app, "lp_off", tx.get(tx.lp_grid_blocked), !p.walk_on)) p.walk_on = false;
+    gui.note(tx.get(tx.lp_grid_hint));
+    gui.fieldRow(tx.get(tx.lp_brush_mode));
+    if (gui.segmented(app, "lp_grid_mode", &.{ tx.get(tx.lp_grid_free), tx.get(tx.lp_grid_blocked) }, if (p.walk_on) 0 else 1)) |k| p.walk_on = k == 0;
     clay.close();
-    clay.text(tx.get(tx.lp_grid_hint), .{ .textColor = theme.dim, .fontSize = 12, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
     const g = &(p.grid orelse return);
     const step = g.cell_size[0] / 4;
     const Edit = struct { id: []const u8, label: []const u8, cur: f32, d: f32 };
@@ -130,7 +127,7 @@ pub fn gridPanel(app: *App, a: Allocator, p: *Paint) void {
     for (rows, 0..) |r, k| {
         const v = stepper(app, a, r.id, r.label, r.cur, r.d);
         if (v == 0) continue;
-        const before = lf.encodeCombatMap(app.gpa, g.*) catch return;
+        const before = map_io.encodeCombatMap(app.gpa, g.*) catch return;
         p.undo.append(app.gpa, .{ .layer = .grid, .whole = before }) catch {
             app.gpa.free(before);
             return;
@@ -150,15 +147,29 @@ pub fn gridPanel(app: *App, a: Allocator, p: *Paint) void {
 /// `g` cut into `dw` columns / `dh` rows more or fewer over the same floor: the cell
 /// size follows, each new cell takes the old cell under its middle. (In a battle the
 /// cell size also sets the models' size: actorScale = xSize/350, 0x4b49f0.)
-fn splitGrid(gpa: Allocator, g: *lf.CombatMap, dw: i32, dh: i32) !void {
+fn splitGrid(gpa: Allocator, g: *core_map.CombatMap, dw: i32, dh: i32) !void {
     const w: u32 = @intCast(std.math.clamp(@as(i32, @intCast(g.width)) + dw, 1, 255));
     const h: u32 = @intCast(std.math.clamp(@as(i32, @intCast(g.height)) + dh, 1, 255));
     const cells = try gpa.alloc(bool, w * h);
+    errdefer gpa.free(cells);
     for (0..h) |y| for (0..w) |x| {
         const ox = (2 * x + 1) * g.width / (2 * w);
         const oy = (2 * y + 1) * g.height / (2 * h);
         cells[y * w + x] = g.blocked[oy * g.width + ox];
     };
+    // Heights follow the cells: each new cell takes its old cell's.
+    var hs: std.ArrayList([3]i32) = .empty;
+    errdefer hs.deinit(gpa);
+    for (0..h) |y| for (0..w) |x| {
+        const ox: i32 = @intCast((2 * x + 1) * g.width / (2 * w));
+        const oy: i32 = @intCast((2 * y + 1) * g.height / (2 * h));
+        for (g.heights) |ht| if (ht[0] == ox and ht[1] == oy) {
+            try hs.append(gpa, .{ @intCast(x), @intCast(y), ht[2] });
+            break;
+        };
+    };
+    gpa.free(g.heights);
+    g.heights = try hs.toOwnedSlice(gpa);
     g.cell_size = .{ g.cell_size[0] * @as(f32, @floatFromInt(g.width)) / @as(f32, @floatFromInt(w)), g.cell_size[1] * @as(f32, @floatFromInt(g.height)) / @as(f32, @floatFromInt(h)) };
     gpa.free(g.blocked);
     g.blocked = cells;
@@ -174,14 +185,13 @@ pub fn cameraStep(app: *App, key: []const u8, dv: f32) !void {
     inline for (Doc.camera_keys) |k| if (std.mem.eql(u8, k, key)) {
         v = og.fields.getF(l, k);
     };
-    const t = try newlevel.setCameraVar(app.gpa, app.store.text(d.lev), key, (v orelse return error.NoSuchKey) + dv);
-    try app.store.replace(d.lev, t);
+    try d.setCamera(&.{.{ key, (v orelse return error.NoSuchKey) + dv }});
 }
 
 /// `g` split into `w` × `h` cells over the same floor (CLI; the panel steps by one).
 pub fn gridSplitTo(app: *App, p: *Paint, w: u32, h: u32) !void {
     const g = &(p.grid orelse return error.NoGrid);
-    try p.undo.append(app.gpa, .{ .layer = .grid, .whole = try lf.encodeCombatMap(app.gpa, g.*) });
+    try p.undo.append(app.gpa, .{ .layer = .grid, .whole = try map_io.encodeCombatMap(app.gpa, g.*) });
     try splitGrid(app.gpa, g, @as(i32, @intCast(w)) - @as(i32, @intCast(g.width)), @as(i32, @intCast(h)) - @as(i32, @intCast(g.height)));
 }
 
@@ -193,36 +203,44 @@ pub fn cameraPanel(app: *App, a: Allocator, p: *Paint, titled: bool) void {
     const d = app.doc orelse return;
     const l = d.world.level orelse return;
     if (d.world.cam != .persp) return orthoPanel(app, a, d);
-    if (titled) main.panelHeader(tx.get(tx.lp_camera));
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM, .padding = .{ .left = 2, .right = 2, .top = 8 }, .childGap = 8 } });
-    if (titled) clay.text(tx.get(tx.lp_camera_hint), .{ .textColor = theme.dim, .fontSize = 12, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
+    if (titled) {
+        gui.subhead(tx.get(tx.lp_camera));
+        gui.note(tx.get(tx.lp_camera_hint));
+    }
     // As the concept's: position and target as X Y Z, then the single values.
     const Row = struct { label: tx.Msg, keys: []const []const u8, prefixes: []const []const u8 };
     const rows = [_]Row{
-        .{ .label = tx.cam_position, .keys = &.{ "viewX", "viewY", "viewZ" }, .prefixes = &.{ "X", "Y", "Z" } },
-        .{ .label = tx.cam_target, .keys = &.{ "aimX", "aimY", "aimZ" }, .prefixes = &.{ "X", "Y", "Z" } },
-        .{ .label = tx.cam_fov, .keys = &.{"angle"}, .prefixes = &.{"°"} },
-        .{ .label = tx.cam_floor, .keys = &.{"zLevel"}, .prefixes = &.{""} },
-        .{ .label = tx.cam_bank, .keys = &.{"camBan"}, .prefixes = &.{"°"} },
+        .{ .label = tx.cam_position, .keys = &.{ "eye_x", "eye_y", "eye_z" }, .prefixes = &.{ "X", "Y", "Z" } },
+        .{ .label = tx.cam_target, .keys = &.{ "target_x", "target_y", "target_z" }, .prefixes = &.{ "X", "Y", "Z" } },
+        .{ .label = tx.cam_fov, .keys = &.{"fov"}, .prefixes = &.{"°"} },
+        .{ .label = tx.cam_floor, .keys = &.{"floor_z"}, .prefixes = &.{""} },
+        .{ .label = tx.cam_bank, .keys = &.{"camera_bank"}, .prefixes = &.{"°"} },
     };
     var set: ?struct { key: []const u8, v: f32 } = null;
     for (rows) |r| {
-        clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .childGap = 6, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-        clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(110) } } });
-        txt(tx.get(r.label), 13, theme.text, font_mod.regular);
-        clay.close();
+        // X Y Z: under their label, the whole row (beside it they are too narrow for the
+        // camera's numbers).
+        if (r.keys.len == 3) {
+            gui.fieldRow(tx.get(r.label));
+            clay.close();
+            gui.row(lay.space.sm);
+        } else gui.fieldRow(tx.get(r.label));
         for (r.keys, r.prefixes) |k, pre| {
             const v = camVar(l, k);
-            if (numBox(app, a, std.fmt.allocPrint(a, "lp_cam_{s}", .{k}) catch k, pre, v, if (r.keys.len == 3) 0 else 120)) |nv| set = .{ .key = k, .v = nv };
+            if (gui.numberField(app, a, std.fmt.allocPrint(a, "lp_cam_{s}", .{k}) catch k, pre, v, if (r.keys.len == 3) 0 else lay.width.field)) |nv| set = .{ .key = k, .v = nv };
         }
         clay.close();
     }
-    clay.close();
     const s = set orelse return;
-    const t = newlevel.setCameraVar(app.gpa, app.store.text(d.lev), s.key, s.v) catch |err| return app.setStatus(tx.st_set_failed, .{err});
+    if (level_og.blockFile(d) != null) {
+        d.setCamera(&.{.{ s.key, s.v }}) catch |err| return app.failed(err);
+        p.pending = .reload;
+        return;
+    }
+    const t = d.withCamera(app.gpa, &.{.{ s.key, s.v }}) catch |err| return app.failed(err);
     app.store.replaceLabeled(d.lev, t, std.fmt.allocPrint(a, "{s} = {d:.3}", .{ s.key, s.v }) catch null) catch |err| {
         app.gpa.free(t);
-        return app.setStatus(tx.st_set_failed, .{err});
+        return app.failed(err);
     };
     p.pending = .reload;
 }
@@ -231,43 +249,6 @@ pub fn cameraPanel(app: *App, a: Allocator, p: *Paint, titled: bool) void {
 fn camVar(l: anytype, k: []const u8) f32 {
     inline for (Doc.camera_keys) |ck| if (std.mem.eql(u8, ck, k)) return og.fields.getF(l, ck);
     return 0;
-}
-
-/// A number field (as the concept's X / Y / Z boxes): its value with a dim prefix; a
-/// click types a new one (Enter, Tab or a click elsewhere sets it, Escape drops it).
-/// Returns the new value when set. `w` 0: the row's share.
-pub fn numBox(app: *App, a: Allocator, id: []const u8, prefix: []const u8, cur: f32, w: f32) ?f32 {
-    const h = std.hash.Wyhash.hash(0, id);
-    const fid = clay.id(id);
-    const editing = if (app.num_edit) |e| e.id == h else false;
-    clay.open(.{
-        .id = fid,
-        .layout = .{ .sizing = .{ .width = if (w > 0) clay.fixed(w) else clay.grow(), .height = clay.fixed(30) }, .padding = .{ .left = 8, .right = 8 }, .childGap = 6, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } },
-        .backgroundColor = theme.field,
-        .cornerRadius = clay.radius(theme.radius),
-        .border = .{ .color = if (editing) theme.accent else if (clay.pointerOver(fid)) theme.button_edge else theme.field_border, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } },
-    });
-    const over = clay.hovered();
-    if (prefix.len > 0) txt(prefix, 12, theme.dim, font_mod.regular);
-    // Whole numbers without decimals (a brush size), the rest to three places.
-    const shown = if (@round(cur) == cur) std.fmt.allocPrint(a, "{d:.0}", .{cur}) else std.fmt.allocPrint(a, "{d:.3}", .{cur});
-    if (editing) txt(std.fmt.allocPrint(a, "{s}|", .{app.num_edit.?.text()}) catch "", 13, theme.text, font_mod.regular) else txt(shown catch "", 13, theme.text, font_mod.regular);
-    clay.close();
-    if (editing) {
-        app.num_seen = true;
-        const e = &app.num_edit.?;
-        if (e.done or (app.clicked and !over)) {
-            const v = std.fmt.parseFloat(f32, e.text()) catch null;
-            app.num_edit = null;
-            if (v) |x| if (std.math.isFinite(x) and x != cur) return std.math.clamp(x, -1e5, 1e5);
-        }
-    } else if (over and app.clicked) {
-        var e: main.NumEdit = .{ .id = h };
-        e.len = if (std.fmt.bufPrint(&e.buf, "{d}", .{cur})) |t| t.len else |_| 0;
-        app.num_edit = e;
-        app.num_seen = true;
-    }
-    return null;
 }
 
 /// The camera gizmo, in the middle of the view: rings turn the camera about its aim
@@ -281,7 +262,7 @@ fn gizmoCenter(rect: c.SDL_FRect) [2]f32 {
 }
 
 /// The gizmo's part under window point `m`.
-pub fn ringAt(rect: c.SDL_FRect, m: [2]f32) ?Ring {
+fn ringAt(rect: c.SDL_FRect, m: [2]f32) ?Ring {
     const o = gizmoCenter(rect);
     const dx = m[0] - o[0];
     const dy = m[1] - o[1];
@@ -324,18 +305,18 @@ pub fn drawGizmo(app: *App, p: *const Paint, d: *const Doc, rect: c.SDL_FRect) v
     // Where it turns about: the aim (camera → world is (X, Z, Y) / cameraScale).
     if (d.world.cam == .persp) if (d.world.level) |l| {
         const s = d.world.cam.persp.scale;
-        const q = d.world.cam.project(.{ og.fields.getF(l, "aimX") / s, og.fields.getF(l, "aimZ") / s, og.fields.getF(l, "aimY") / s });
+        const q = d.world.cam.project(.{ og.fields.getF(l, "target_x") / s, og.fields.getF(l, "target_z") / s, og.fields.getF(l, "target_y") / s });
         const a = screen(d, rect, .{ q.x, q.y });
-        _ = c.SDL_SetRenderDrawColor(r, 255, 210, 60, 255);
+        ink(r, lay.canvas.aim);
         _ = c.SDL_RenderLine(r, a[0] - 8, a[1], a[0] + 8, a[1]);
         _ = c.SDL_RenderLine(r, a[0], a[1] - 8, a[0], a[1] + 8);
     };
-    ellipse(r, o, gizmo_r * 1.25, gizmo_r * 1.25, .{ 80, 140, 255 }, hot == .roll);
-    ellipse(r, o, gizmo_r, gizmo_r * 0.35, .{ 90, 220, 90 }, hot == .yaw);
-    ellipse(r, o, gizmo_r * 0.35, gizmo_r, .{ 240, 80, 80 }, hot == .pitch);
-    _ = c.SDL_SetRenderDrawColor(r, 0, 0, 0, 200);
+    ellipse(r, o, gizmo_r * 1.25, gizmo_r * 1.25, lay.canvas.roll, hot == .roll);
+    ellipse(r, o, gizmo_r, gizmo_r * 0.35, lay.canvas.yaw, hot == .yaw);
+    ellipse(r, o, gizmo_r * 0.35, gizmo_r, lay.canvas.pitch, hot == .pitch);
+    ink(r, lay.canvas.marker_edge);
     _ = c.SDL_RenderFillRect(r, &.{ .x = o[0] - 11, .y = o[1] - 11, .w = 22, .h = 22 });
-    _ = c.SDL_SetRenderDrawColor(r, 255, 255, 255, if (hot == .pan) 255 else 190);
+    ink(r, lay.canvas.alpha(lay.canvas.white, if (hot == .pan) 255 else 190));
     _ = c.SDL_RenderFillRect(r, &.{ .x = o[0] - 8, .y = o[1] - 8, .w = 16, .h = 16 });
 }
 
@@ -417,7 +398,7 @@ pub fn cameraDrag(p: *Paint, d: *Doc, rect: c.SDL_FRect, m: [2]f32) void {
     _ = camSet(p, d, l, v);
 }
 
-pub fn mul(a: [3]f32, k: f32) [3]f32 {
+fn mul(a: [3]f32, k: f32) [3]f32 {
     return .{ a[0] * k, a[1] * k, a[2] * k };
 }
 
@@ -456,31 +437,37 @@ pub fn camCommit(app: *App, p: *Paint) void {
     const d = app.doc orelse return;
     const l = d.world.level orelse return;
     const v = camKeys(l);
-    var t = app.gpa.dupe(u8, app.store.text(d.lev)) catch return;
+    var kv: [Doc.camera_keys.len]struct { []const u8, f32 } = undefined;
+    var n: usize = 0;
     inline for (Doc.camera_keys, 0..) |k, i| if (v[i] != base[i]) {
-        const n = newlevel.setCameraVar(app.gpa, t, k, v[i]) catch |err| {
-            app.gpa.free(t);
-            return app.setStatus(tx.st_set_failed, .{err});
-        };
-        app.gpa.free(t);
-        t = n;
+        kv[n] = .{ k, v[i] };
+        n += 1;
     };
-    app.store.replace(d.lev, t) catch |err| {
-        app.gpa.free(t);
-        return app.setStatus(tx.st_set_failed, .{err});
-    };
+    d.setCamera(kv[0..n]) catch |err| return app.failed(err);
     // The fighters' marks are placed on load.
     p.pending = .reload;
 }
 
 /// `g` with `dw` columns / `dh` rows more (new cells free) or fewer (1…255 each).
-fn resizeGrid(gpa: Allocator, g: *lf.CombatMap, dw: i32, dh: i32) !void {
+fn resizeGrid(gpa: Allocator, g: *core_map.CombatMap, dw: i32, dh: i32) !void {
     const w: u32 = @intCast(std.math.clamp(@as(i32, @intCast(g.width)) + dw, 1, 255));
     const h: u32 = @intCast(std.math.clamp(@as(i32, @intCast(g.height)) + dh, 1, 255));
     const cells = try gpa.alloc(bool, w * h);
+    errdefer gpa.free(cells);
     for (0..h) |y| for (0..w) |x| {
         cells[y * w + x] = if (x < g.width and y < g.height) g.blocked[y * g.width + x] else false;
     };
+    // Heights of cells cut off go with them (the `.cm` lists cells by x, y).
+    var n: usize = 0;
+    for (g.heights) |ht| n += @intFromBool(ht[0] >= 0 and ht[1] >= 0 and ht[0] < w and ht[1] < h);
+    const hs = try gpa.alloc([3]i32, n);
+    n = 0;
+    for (g.heights) |ht| if (ht[0] >= 0 and ht[1] >= 0 and ht[0] < w and ht[1] < h) {
+        hs[n] = ht;
+        n += 1;
+    };
+    gpa.free(g.heights);
+    g.heights = hs;
     gpa.free(g.blocked);
     g.blocked = cells;
     g.width = w;

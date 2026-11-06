@@ -3,24 +3,23 @@
 
 const std = @import("std");
 const Object = @import("script.zig").object.Object;
+const rules = @import("rules.zig");
 
 /// `string.tab` row and object kind (heroes 1–39, monsters 100–139, items…).
-pub fn nameId(o: *Object) i32 {
-    return o.getInt("nameID");
+pub fn classicId(o: *Object) i32 {
+    return o.getInt("classic_id");
 }
 
-/// Medusa (nameID 119): no give/receive, no push, never tired outside battle.
-pub fn isMedusa(o: *Object) bool {
-    return nameId(o) == 119;
+/// OpenGorky: an obstacle's own `explodable` (1: a barrel whatever its class, its blast
+/// shown whatever its blast weapon; 0: never explodes); null: the exe's (`explosive`, the
+/// blast shown only for weapon classic_id 1002).
+pub fn explodable(o: *Object) ?bool {
+    if (!rules.og or o.getVar("explodable") == null) return null;
+    return o.getInt("explodable") != 0;
 }
 
-/// The invisible monster (nameID 120).
-pub fn isInvisibleMonster(o: *Object) bool {
-    return nameId(o) == 120;
-}
-
-pub fn setNameId(o: *Object, v: i32) void {
-    o.setInt("nameID", v);
+pub fn setClassicId(o: *Object, v: i32) void {
+    o.setInt("classic_id", v);
 }
 
 pub fn hp(o: *Object) i32 {
@@ -37,21 +36,28 @@ pub fn maxHp(o: *Object) i32 {
 
 /// Count of an ammo pack (`type` 10) or other stackable item.
 pub fn counter(o: *Object) i32 {
-    return o.getInt("counter");
+    return o.getInt("count");
 }
 
 pub fn setCounter(o: *Object, v: i32) void {
-    o.setInt("counter", v);
+    o.setInt("count", v);
 }
 
-/// Item owner name (`Owner`); empty = nobody's.
+/// The exe's one `type` of an item (+0x368): an item's `kind`, a weapon's `damage_kind`
+/// (Item_GetType gives a weapon's damage kind).
+pub fn itemType(o: *Object) i32 {
+    if (o.getVar("kind")) |v| return v.value.toInt();
+    return o.getInt("damage_kind");
+}
+
+/// Item owner name (`owner`); empty = nobody's.
 pub fn owner(o: *Object) []const u8 {
-    return o.getString("Owner");
+    return o.getString("owner");
 }
 
 /// Sets `Owner` if the object has it; the caller owns the string's lifetime.
 pub fn setOwner(o: *Object, name: []const u8) void {
-    if (o.getVar("Owner")) |v| v.value = .{ .string = name };
+    if (o.getVar("owner")) |v| v.value = .{ .string = name };
 }
 
 /// Walk cells per round.
@@ -75,21 +81,21 @@ pub fn setAngle(o: *Object, v: f32) void {
 
 /// Held-item model (`meshFile`); empty for model-less monster weapons.
 pub fn meshFile(o: *Object) []const u8 {
-    return o.getString("meshFile");
+    return o.getString("mesh");
 }
 
 /// Fighter size (affects hit chance, 0x4cedc2).
 pub fn charSize(o: *Object) i32 {
-    return o.getInt("charSize");
+    return o.getInt("footprint_tiles");
 }
 
 /// Fighter can't move (wall bosses).
 pub fn moveLock(o: *Object) bool {
-    return o.getInt("moveLock") != 0;
+    return o.getInt("move_locked") != 0;
 }
 
 pub fn clearMoveLock(o: *Object) void {
-    o.setInt("moveLock", 0);
+    o.setInt("move_locked", 0);
 }
 
 pub fn experience(o: *Object) i32 {
@@ -155,4 +161,18 @@ test facing {
 /// Item owner check (`Owner`, case-insensitive).
 pub fn ownerIs(o: *Object, name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(owner(o), name);
+}
+
+test explodable {
+    const gpa = std.testing.allocator;
+    var o: Object = .{ .name = "o", .class = undefined };
+    defer o.vars.deinit(gpa);
+    defer rules.og = false;
+    rules.og = true;
+    try std.testing.expect(explodable(&o) == null);
+    try o.declare(gpa, "explodable", .{ .type = .int, .value = .{ .int = 1 } });
+    try std.testing.expect(explodable(&o).?);
+    // Classic: the exe's, whatever the object says.
+    rules.og = false;
+    try std.testing.expect(explodable(&o) == null);
 }

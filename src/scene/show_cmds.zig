@@ -3,11 +3,10 @@
 
 const std = @import("std");
 const num = @import("../num.zig");
-const scriptlet = @import("../formats.zig").scriptlet;
-const dialog = @import("../formats.zig").dialog;
-const archive = @import("../formats.zig").archive;
+const scriptlet = @import("../core.zig").scene;
 const world_mod = @import("../state.zig").world;
 const World = world_mod.World;
+const entity = @import("../core.zig").entity;
 const Runner = @import("../state.zig").scene.Runner;
 
 /// Fade-out/in frames (0x4200b0: step 0.1).
@@ -87,7 +86,7 @@ pub fn execShow(self: *Runner, w: *World, c: scriptlet.Command, n: []const u8) !
         const line = d.lines[i];
         w.scene.subtitle = .{ .speaker = line.speaker, .text = line.text };
         w.scene.dialog_cam = if (std.mem.eql(u8, self.name, "dialog")) line.cam else null;
-        w.scene.splitPages(w.res.dialog_font, line.text);
+        w.scene.splitPages(if (entity.dialog_font) |*f| f else null, line.text);
         w.scene.line_open = true;
         // Our text estimate (2 ticks a character, at least 2 s); the host
         // replaces it by the voice file size (scenes.voiceStarted). "..." is
@@ -98,8 +97,7 @@ pub fn execShow(self: *Runner, w: *World, c: scriptlet.Command, n: []const u8) !
             self.wait = .dialog;
             return true;
         }
-        var buf: [96]u8 = undefined;
-        const voice = try dialog.voiceName(&buf, self.dialog_file, line.code, d.voiceIndex(i));
+        const voice = line.voice orelse return error.NameTooLong;
         try w.out.voice_events.append(w.gpa, try w.arena_state.allocator().dupe(u8, voice));
         self.wait = .dialog;
         return true;
@@ -154,16 +152,10 @@ pub fn execShow(self: *Runner, w: *World, c: scriptlet.Command, n: []const u8) !
     return false;
 }
 
-pub fn loadDialog(self: *World, file: []const u8) !dialog.Dialog {
-    // Combat levels' StartDialog() gives the name without extension.
+pub fn loadDialog(self: *World, file: []const u8) !scriptlet.Dialog {
     if (self.scene.dialog_cache.get(file)) |d| return d;
-    var buf: [archive.name_size]u8 = undefined;
-    const e = self.res.lang.find(file) orelse
-        self.res.lang.find(std.fmt.bufPrint(&buf, "{s}.dlg", .{file}) catch file) orelse
-        return error.NotFound;
     const a = self.arena_state.allocator();
-    const language = if (self.strings) |t| @import("../formats.zig").strtab.language(t.*) else 0;
-    const d = try dialog.parseCut(a, try self.res.lang.readAlloc(self.io, a, e), dialog.editionCut(file, language));
+    const d = try self.res.scenes.loadDialog(a, file, entity.texts.language);
     try self.scene.dialog_cache.put(a, try a.dupe(u8, file), d);
     return d;
 }

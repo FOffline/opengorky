@@ -26,11 +26,11 @@ pub fn checkLevelUp(v: *Viewer) void {
     const heroes = w.party();
     for (heroes.slice()) |hero| {
         if (og.state.world.World.nativeOf(hero).growth.stat_points <= 0) continue;
-        g.stats.show(250, 40, hero.name, true, og.inventory.points.takeLevelPoints(hero));
+        g.stats.show(og.core.modules.ui().windows.level_up[0], og.core.modules.ui().windows.level_up[1], hero.name, true, og.inventory.points.takeLevelPoints(hero));
         w.gui_hold = true;
-        w.out.sound(w.gpa, "battle_menuslide_in", null);
+        w.out.sound(w.gpa, og.core.modules.ui().sounds.menu_slide_in, null);
         if (l.scene) |*sc| v.upgrade_music = sc.music_name;
-        w.out.music_events.append(w.gpa, .{ .name = "upgradeparameters", .once = true }) catch {};
+        w.out.music_events.append(w.gpa, .{ .name = og.core.modules.ui().music.level_up, .once = true }) catch {};
         return;
     }
 }
@@ -40,12 +40,22 @@ pub fn checkLevelUp(v: *Viewer) void {
 pub fn menuMusic(v: *Viewer) void {
     const snd = v.sound orelse return;
     const m = v.menu orelse return;
-    // Credits (GUI_CREDITS, 0x42c5e0) — "credits"; main menu without a level — "menu".
+    const camp = og.rules.campaign();
+    // The campaign's video before the credits (OpenGorky), once each time they open.
+    if (m.open and m.screen == .credits) {
+        if (camp.credits_video.len > 0 and !v.credits_video_played) {
+            v.credits_video_played = true;
+            flow.queueVideos(v, camp.credits_video);
+            v.nextVideo();
+        }
+    } else v.credits_video_played = false;
+    // Credits (GUI_CREDITS, 0x42c5e0) — "credits"; main menu without a level — "menu"
+    // (the campaign's tracks).
     const name: ?[]const u8 = if (v.video != null or !m.open)
         null
     else if (m.screen == .credits)
-        "credits"
-    else if (v.level == null) "menu" else null;
+        camp.credits_music
+    else if (v.level == null) camp.menu_music else null;
     if (v.menu_music) |id| {
         const same = if (name) |n| std.mem.eql(u8, n, v.menu_music_name) else false;
         if (same and snd.mixer.find(id) != null) return;
@@ -128,9 +138,9 @@ pub fn update(v: *Viewer) void {
         }
         if (!l.failed) if (v.game.pendingLevel()) |next| {
             // Entering battle from a regular level: the saw transition first.
-            if (v.transition == null and !v.shot_run and std.mem.indexOf(u8, next, "__") != null and !l.world.isCombat()) {
+            if (v.transition == null and !v.shot_run and og.core.modules.battleNamed(next) and !l.world.isCombat()) {
                 v.transition = .{};
-                l.world.out.music_events.append(l.world.gpa, .{ .name = "screenoff4", .once = true }) catch {};
+                l.world.out.music_events.append(l.world.gpa, .{ .name = og.core.modules.ui().music.battle_enter, .once = true }) catch {};
                 return;
             }
             if (v.transition) |tr| {

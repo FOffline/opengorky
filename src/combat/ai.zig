@@ -21,16 +21,22 @@
 //!   with a strike: `+ aicPlayerDist ×` distance (step away after striking).
 //!
 //! Special fighters (`classType` 1, 6–18; method +0xe0) score their own way
-//! (`Eval`): based on "scoring A" (0x4dcb40), no decoy, no +5 to damage and no ×2
+//! (`Scoring`): based on "scoring A" (0x4dcb40), no decoy, no +5 to damage and no ×2
 //! for `classType` 5; on top, rules for Garcia, Smoke Rider, Grandma and children,
-//! Incubus, Cripple, Guard, Schizo and Messiah.
+//! Incubus, Cripple, Guard, Schizo and Messiah. The scorings are the "AI" core module
+//! (core/modules.zig `Ai`, core/behaviour.zig `scorings` by the rules' AiProfile `scoring`):
+//! records of the pieces run here.
 
 const std = @import("std");
 const num = @import("../num.zig");
 const fields = @import("../fields.zig");
+const anim = @import("anim.zig");
+const natives = @import("natives.zig");
+const events = @import("events.zig");
+const strike = @import("strike.zig");
 const weapons = @import("weapons.zig");
 const battle_mod = @import("../battle.zig").battle;
-const Class = @import("../battle.zig").fighter.Class;
+const modules = @import("../core.zig").modules;
 const immunity = @import("../battle.zig").immunity;
 const Battle = battle_mod.Battle;
 const Fighter = @import("../battle.zig").fighter.Fighter;
@@ -39,11 +45,11 @@ const object = @import("../script.zig").object;
 const value = @import("../script.zig").value;
 const Object = object.Object;
 const rules = @import("../battle.zig").rules;
-const WeaponClass = @import("../battle.zig").weapon_class.WeaponClass;
+const weaponKind = @import("../core.zig").modules.weaponKind;
 const grid = @import("../battle.zig").grid;
-const patterns = @import("../battle.zig").patterns;
 const generic = @import("../battle.zig").generic;
-const strike = @import("strike.zig");
+/// The rows of the plan's distance buffer (Battle.ai_scratch.dist).
+const Rows = battle_mod.AiScratch;
 
 const Tile = grid.Tile;
 /// Best strike found higher up the path (passed down by value).
@@ -54,31 +60,58 @@ const Carry = struct {
     aim: grid.Target = undefined,
 };
 
-/// Tile scoring kind by `classType` (table 0x4bcbb0).
-const Eval = enum { generic, a, garcia, smokerider, grandma, grandma_child, incubus, cripple, guard, schizo, messiah };
+const Profile = @import("../rules.zig").AiProfile;
 
-pub fn evalOf(f: Fighter) Eval {
-    if (f.side != .enemy) return .generic;
-    return switch (Class.of(f.obj)) {
-        .garcia => .garcia,
-        .smokerider => .smokerider,
-        .grandma => .grandma,
-        .grandma_child => .grandma_child,
-        .stinger, .fatman, .puppet, .judge, .judge_child => .a,
-        .incubus => .incubus,
-        .cripple => .cripple,
-        .guard => .guard,
-        .schizo => .schizo,
-        .messiah => .messiah,
-        // Port-only generic fighter: strategy from the `ai` field (battle/generic.zig).
-        .generic => switch (generic.aiOf(f.obj)) {
-            .standard, .stationary => .generic,
-            .focused => .a,
-            .sleep_hunter => .guard,
-        },
-        else => .generic,
-    };
+/// The scoring and its constants (rules ai.ss): heroes (autoplay) score as an ordinary
+/// monster; the generic fighter by its `ai` field (battle/generic.zig).
+fn profileOf(f: Fighter) Profile {
+    return generic.aiProfile(f.obj, f.side == .enemy);
 }
+
+/// The fighter's profile and scoring this plan: the rules' (its profile's `scoring` the
+/// core module `Ai`'s row), then an enemy's code's: its Enemy.AiProfile() answer (an
+/// `AiProfile(…)` record, the fields it gives over them: a scoring by name and its parts too).
+const Mind = struct { prof: Profile, ev: Scoring };
+
+pub fn mindOf(w: *World, f: Fighter) Mind {
+    var m: Mind = .{ .prof = profileOf(f), .ev = undefined };
+    var over: ?value.Value.Map = null;
+    if (f.side == .enemy and f.obj.implementsC("AiProfile")) if (natives.ask(w, f.obj, "Enemy.AiProfile", .{}) catch null) |v| if (v == .map) {
+        over = v.map.*;
+    };
+    if (over) |mp| for (mp.keys, mp.values) |k, v| if (k == .string and std.mem.eql(u8, k.string, "scoring") and v == .string) {
+        m.prof.scoring = v.string;
+    };
+    m.ev = modules.aiScoring(m.prof.scoring.?).*;
+    const mp = over orelse return m;
+    for (mp.keys, mp.values) |k, v| {
+        if (k != .string or v == .nil) continue;
+        const n = k.string;
+        inline for (@typeInfo(Profile).@"struct".field_names) |fname| if (comptime !std.mem.eql(u8, fname, "scoring")) if (std.mem.eql(u8, n, fname)) {
+            const T = @FieldType(Profile, fname);
+            if (T == ?i32) @field(m.prof, fname) = v.toInt();
+            if (T == ?bool) @field(m.prof, fname) = v.truth();
+        };
+        if (std.mem.eql(u8, n, "wakeful")) m.ev.wakeful = v.truth();
+        if (std.mem.eql(u8, n, "near") and v == .string) m.ev.near = v.string;
+        if (v == .string) {
+            if (std.mem.eql(u8, n, "keep")) if (std.meta.stringToEnum(@TypeOf(m.ev.keep), v.string)) |x| {
+                m.ev.keep = x;
+            };
+            if (std.mem.eql(u8, n, "occupant")) if (std.meta.stringToEnum(@TypeOf(m.ev.occupant), v.string)) |x| {
+                m.ev.occupant = x;
+            };
+            if (std.mem.eql(u8, n, "tile")) if (std.meta.stringToEnum(@TypeOf(m.ev.tile), v.string)) |x| {
+                m.ev.tile = x;
+            };
+        }
+    }
+    return m;
+}
+
+/// How a fighter weighs its strikes and its place (core/behaviour.zig `Scoring`): the
+/// pieces it names are run here.
+const Scoring = @import("../core.zig").behaviour.Scoring;
 
 const Params = struct {
     attack: i32,
@@ -90,31 +123,38 @@ const Params = struct {
 
 /// Weapon for the search (script fields read once).
 const WInfo = struct {
-    pat: ?*const patterns.Weapon,
+    pat: ?*const @import("../rules.zig").Pattern,
     md: i32,
     class: i32,
     secondary: bool,
     /// Damage kind code (immunity.damageCode), for the heroes' autoplay.
     dcode: ?immunity.Resist,
+    /// Aims at most that many tiles away (0: any; rules MonsterAttack `range`).
+    range: i32 = 0,
+    /// The weapon's CanAim is asked at each aim (OpenGorky: one of its components has it).
+    can_aim: bool = false,
 };
 
 /// Fighter for scoring hit tiles.
 const FInfo = struct {
-    class: Class,
+    /// A Monitor (its native: core/natives.zig).
+    monitor: bool,
     hp: i32,
     name_id: i32,
+    /// Its kind for what the heroes have discovered of it (immunity.Known).
+    who: @import("../rules.zig").Who,
     /// Effect of its weapon in hand (rules.weaponEffect).
     weff: ?rules.Effect,
 };
 
 fn weaponInfo(wpn: *Object) WInfo {
-    const class = wpn.getInt("classType");
+    const class = wpn.getInt("class");
     return .{
-        .pat = patterns.find(class),
+        .pat = @import("../battle.zig").weapon_class.pattern(wpn),
         .md = wpn.getInt("max_damage"),
         .class = class,
-        .secondary = wpn.getInt("secondaryWeapon") != 0,
-        .dcode = immunity.damageCode(.from(wpn.getInt("type"))),
+        .secondary = wpn.getInt("secondary") != 0,
+        .dcode = immunity.damageCode(.from(wpn.getInt("damage_kind"))),
     };
 }
 
@@ -146,17 +186,27 @@ const Search = struct {
     foe_dist: [][]f32,
     guard_dist: []f32,
     foe_tile: [battle_mod.max_fighters]Tile = undefined,
-    decoy_tile: [4]Tile = undefined,
+    decoy_tile: [Rows.max_decoys]Tile = undefined,
     /// Wave 0x49a630 buffers: visited tiles and the queue.
     visited: []u8,
     queue: []grid.QEntry,
     /// Decoys on the field and distances to them (0x499620): an attracted enemy
     /// doesn't strike and walks to the nearest, `−2000 × aicPlayerDist × path`.
-    decoy_dist: [4][]f32 = undefined,
+    decoy_dist: [Rows.max_decoys][]f32 = undefined,
     n_decoys: usize = 0,
-    eval: Eval = .generic,
+    ev: *const Scoring,
+    /// The profile's constants (rules ai.ss, all set).
+    prof: Profile = .{},
     /// Grandma (for the children): distance field to her.
     grandma_dist: ?[]f32 = null,
+    /// Its ScoreTarget is asked at each fighter scored (OpenGorky: a component has it).
+    score_target: bool = false,
+    score_tile: bool = false,
+    /// The best strike from each tile, this plan's (AiScratch.strikes).
+    strikes: []battle_mod.TileStrike = &.{},
+    /// Calls of the hot points this plan, noted when any.
+    score_calls: u32 = 0,
+    aim_calls: u32 = 0,
 };
 
 /// Turn plan of fighter `who`.
@@ -171,21 +221,23 @@ pub fn plan(b: *Battle, w: *World, who: u16) !battle_mod.Plan {
     for (&dist_rows, 0..) |*r, i| r.* = dist_all[i * n ..][0..n];
     const visited = b.ai_scratch.visited;
     const queue = b.ai_scratch.queue;
+    var mind = mindOf(w, me);
+    const prof = mind.prof;
     var s: Search = .{
         .b = b,
         .w = w,
         .who = who,
         .me = me,
-        .p = params(me),
+        .p = params(me, prof),
         .danger = danger,
         .foe_dist = &dist_rows,
-        .guard_dist = dist_all[battle_mod.max_fighters * n ..][0..n],
+        .guard_dist = dist_all[Rows.guard_row * n ..][0..n],
         .visited = visited,
         .queue = queue,
-        .can_attack = me.obj.getInt("attackLock") == 0 and !me.disabled(),
-        .can_move = !fields.moveLock(me.obj) and !me.disabled() and
-            !(generic.is(me.obj) and generic.aiOf(me.obj) == .stationary),
-        .eval = evalOf(me),
+        .can_attack = me.obj.getInt("attack_locked") == 0 and !me.disabled(),
+        .can_move = me.canWalk(),
+        .ev = &mind.ev,
+        .prof = prof,
     };
     const nat = World.nativeOf(me.obj);
     if (s.p.mode == 3) s.guard = nat.fight.guard_point;
@@ -198,14 +250,36 @@ pub fn plan(b: *Battle, w: *World, who: u16) !battle_mod.Plan {
         s.foes[s.n_foes] = @intCast(i);
         s.n_foes += 1;
     }
+    // Its target (Grandma's child's killer; a script's FighterSetTarget) weighs as
+    // AITargetLock's where the scoring weighs one (Grandma's `avenge` reads it itself).
+    if (s.locked == null) if (me.grandma_target) |t| for (s.foes[0..s.n_foes]) |o| if (o == t) {
+        s.locked = t;
+    };
+    // OpenGorky: its PreferTarget() (Enemy), a fighter it weighs so this plan.
+    if (s.locked == null and me.obj.implementsC("PreferTarget")) if (try natives.ask(w, me.obj, "Enemy.PreferTarget", .{})) |v| if (v == .ref) {
+        if (b.fighterOf(Object.of(v.ref))) |t| for (s.foes[0..s.n_foes]) |o| if (o == t) {
+            s.locked = t;
+            battle_mod.note(b, "  PreferTarget {s}: {s}", .{ me.obj.name, b.fighters.items[t].obj.name });
+        };
+    };
+    s.score_target = me.obj.implementsC("ScoreTarget");
+    s.strikes = b.ai_scratch.strikes;
+    @memset(s.strikes, .{});
+    s.score_tile = me.side == .enemy and me.obj.implementsC("ScoreTile");
     s.n_weapons = weapons.weaponsOf(w, me, &s.weapons).len;
     filterWeapons(&s);
-    for (s.weapons[0..s.n_weapons], 0..) |wpn, i| s.winfo[i] = weaponInfo(wpn);
+    for (s.weapons[0..s.n_weapons], 0..) |wpn, i| {
+        s.winfo[i] = weaponInfo(wpn);
+        // OpenGorky: the attack's reach for the AI (rules MonsterAttack `range`).
+        if (generic.rowOf(me.obj, wpn)) |r| s.winfo[i].range = r.range;
+        s.winfo[i].can_aim = wpn.implementsC("CanAim");
+    }
     for (b.fighters.items, 0..) |f, i| s.finfo[i] = .{
-        .class = Class.of(f.obj),
+        .monitor = f.obj.implementsC("Monitor"),
         .hp = f.hp(),
-        .name_id = fields.nameId(f.obj),
-        .weff = if (f.weapon) |fw| rules.weaponEffect(fw.getInt("classType")) else null,
+        .name_id = fields.classicId(f.obj),
+        .who = @import("../rules.zig").who(f.obj),
+        .weff = if (f.weapon) |fw| rules.weaponEffect(fw.getInt("class")) else null,
     };
     try buildDanger(&s);
 
@@ -214,19 +288,19 @@ pub fn plan(b: *Battle, w: *World, who: u16) !battle_mod.Plan {
     g.remove(me.tile, me.size);
     for (s.foes[0..s.n_foes], 0..) |fi, k| s.foe_tile[k] = b.fighters.items[fi].tile;
     // Grandma's child stays close to her (0x4e0602).
-    if (s.eval == .grandma_child) for (b.fighters.items) |f| {
-        if (!f.alive() or !std.ascii.eqlIgnoreCase(f.obj.name, "grandma")) continue;
-        const d = dist_all[(battle_mod.max_fighters + 1 + 3) * n ..][0..n];
+    if (s.ev.near.len > 0) for (b.fighters.items) |f| {
+        if (!f.alive() or !std.ascii.eqlIgnoreCase(f.obj.name, s.ev.near)) continue;
+        const d = dist_all[Rows.near_row * n ..][0..n];
         distanceField(&s, d, f.tile, f.size);
         s.grandma_dist = d;
         break;
     };
     // Decoys affect enemies (heroes have no AI in the original).
     // Fighters resistant to decoys (code 3, 0x498d4d) are not attracted.
-    if (s.eval == .generic and me.side == .enemy and me.attracted and !w.immunity.immune(fields.nameId(me.obj), .attract)) {
+    if (s.prof.decoys.? and me.side == .enemy and me.attracted and !w.immunity.immune(@import("../rules.zig").who(me.obj), .attract)) {
         for (b.decoys.items) |d| {
             if (s.n_decoys == s.decoy_dist.len) break;
-            s.decoy_dist[s.n_decoys] = dist_all[(battle_mod.max_fighters + 1 + s.n_decoys) * n ..][0..n];
+            s.decoy_dist[s.n_decoys] = dist_all[(Rows.decoy_row + s.n_decoys) * n ..][0..n];
             s.decoy_tile[s.n_decoys] = d.tile;
             s.n_decoys += 1;
         }
@@ -237,44 +311,46 @@ pub fn plan(b: *Battle, w: *World, who: u16) !battle_mod.Plan {
     }
     search(&s, 0, me.tile, me.budget(), .{});
     s.best.foe_dist = nearestFoe(&s, me.tile);
+    if (s.score_calls > 0) battle_mod.note(b, "  ScoreTarget {s}: {d} calls", .{ me.obj.name, s.score_calls });
+    if (s.aim_calls > 0) battle_mod.note(b, "  CanAim {s}: {d} calls", .{ me.obj.name, s.aim_calls });
     return s.best;
 }
 
-/// Weapon by scoring kind: Garcia's long one (`secondaryWeapon`) only below half
-/// health (0x4dfe8d); Schizo only the first; Messiah without the hand blocked by
-/// a box (1019: obstacle at (10,19), 1020: at (10,17)).
+/// Weapons by the scoring (`Scoring.keep`) the fighter's CanUse allows.
 fn filterWeapons(s: *Search) void {
     var n: usize = 0;
     for (s.weapons[0..s.n_weapons]) |wpn| {
-        const keep = switch (s.eval) {
-            .garcia => (wpn.getInt("secondaryWeapon") != 0) == (s.me.hp() * 2 < fields.maxHp(s.me.obj)),
-            .schizo => n == 0,
-            .messiah => !(WeaponClass.of(wpn) == .messiah_left and obstacleAt(s.b, .{ 10, 19 })) and
-                !(WeaponClass.of(wpn) == .messiah_right and obstacleAt(s.b, .{ 10, 17 })),
-            else => true,
+        const keep = switch (s.ev.keep) {
+            .all, .free_arms => true,
+            .by_health => keepByHealth(s, wpn),
+            .first => n == 0,
         };
-        if (!keep) continue;
+        if (!keep or !canUse(s, wpn)) continue;
         s.weapons[n] = wpn;
         n += 1;
     }
     s.n_weapons = n;
 }
 
-/// An `.obs` obstacle stands on the tile (type 4, not an item box).
-pub fn obstacleAt(b: *Battle, t: Tile) bool {
-    const o = b.grid().at(t);
-    if (o == grid.Grid.none) return false;
-    const f = b.fighters.items[o];
-    return f.side == .neutral and f.obj.getVar("cnt_itm") == null;
+/// Garcia's long one (`secondaryWeapon`) only below half health (0x4dfe8d).
+fn keepByHealth(s: *const Search, wpn: *Object) bool {
+    return (wpn.getInt("secondary") != 0) == (s.me.hp() * 2 < fields.maxHp(s.me.obj));
 }
 
-fn params(f: Fighter) Params {
+/// Its CanUse(weapon): native Arms, the Messiah's, not the arm a box blocks (1019 by
+/// (10,19), 1020 by (10,17)). Out of memory reads as may (no error path here).
+fn canUse(s: *const Search, wpn: *Object) bool {
+    const v = (natives.ask(s.w, s.me.obj, "Fighter.CanUse", .{wpn.ref()}) catch return true) orelse return true;
+    return v.truth();
+}
+
+fn params(f: Fighter, prof: Profile) Params {
     var p: Params = .{
-        .attack = f.obj.getInt("aicAttack"),
-        .defense = f.obj.getInt("aicDefense"),
-        .player_dist = f.obj.getInt("aicPlayerDist"),
-        .guard_dist = f.obj.getInt("aicGuardDist"),
-        .mode = f.obj.getInt("aiMode"),
+        .attack = prof.attack_weight orelse f.obj.getInt("ai_attack_weight"),
+        .defense = prof.threat_weight orelse f.obj.getInt("ai_threat_weight"),
+        .player_dist = prof.opponent_distance_weight orelse f.obj.getInt("ai_opponent_distance_weight"),
+        .guard_dist = prof.guard_distance_weight orelse f.obj.getInt("ai_guard_distance_weight"),
+        .mode = prof.mode orelse f.obj.getInt("ai_mode"),
     };
     // Heroes without their own parameters (autobattle) act as an ordinary monster.
     if (p.attack == 0 and p.defense == 0 and p.player_dist == 0) p = .{ .attack = 10, .defense = 2, .player_dist = 100, .guard_dist = 100, .mode = 0 };
@@ -293,7 +369,7 @@ fn buildDanger(s: *Search) !void {
         @memset(slot, 0);
         var list: [16]*Object = undefined;
         const ws = weapons.threatWeaponsOf(s.w, f, &list);
-        grid.reach(g, left, f.tile, f.size, fi, @floatFromInt(fields.walkRange(f.obj)));
+        grid.reach(g, left, f.tile, f.size, fi, @floatFromInt(f.walkRange()));
         var wi: [16]WInfo = undefined;
         for (ws, 0..) |wpn, i| wi[i] = weaponInfo(wpn);
         for (0..b.height) |y| for (0..b.width) |x| {
@@ -345,44 +421,23 @@ fn search(s: *Search, depth: usize, t: Tile, budget: f32, carry_in: Carry) void 
 /// 0x499170: tile score.
 fn evaluate(s: *Search, depth: usize, t: Tile, carry: *Carry) void {
     const b = s.b;
-    const g = b.grid();
     // Smoke Rider tries its weapons even without "can strike" (0x4de890).
-    const try_attack = s.can_attack or s.eval == .smokerider;
-    if (try_attack) for (s.weapons[0..s.n_weapons], s.winfo[0..s.n_weapons]) |wpn, *wi| {
-        const pat = wi.pat orelse continue;
-        const md = wi.md;
-        for (grid.targets(g, pat, t, s.who, true, false, &s.targets_buf)) |aim| {
-            // A sleeping Smoke Rider sees only a ±π/4 cone from its facing.
-            if (s.eval == .smokerider and !s.can_attack and !inCone(s, t, aim.tile)) continue;
-            var eff: [128]Tile = undefined;
-            var sum: i32 = 0;
-            if (s.eval == .smokerider and !s.can_move) sum = dist2(t, aim.tile);
-            for (grid.effectTiles(g, pat, aim, &eff)) |et| {
-                const o = g.at(et);
-                if (s.eval == .incubus) {
-                    sum +%= incubusTile(s, o, et, t, aim, md);
-                    continue;
-                }
-                if (o == grid.Grid.none) continue;
-                // Heroes' autoplay (gorky-tool only; in the game the player controls heroes):
-                // the Messiah is hurt only from tile (10,18) (0x4cee33), so from other tiles he
-                // isn't a target, or the heroes would shoot past him for the whole battle.
-                if (s.me.side == .hero and s.finfo[o].class == .messiah and !strike.messiahOpen(t)) continue;
-                // A 2×2 fighter covers several tiles; the original counts each.
-                sum +%= occupantScore(s, o, wi, md, aim.pct);
-            }
-            const score = s.p.attack *% sum;
-            if (score > carry.score) carry.* = .{ .score = score, .depth = depth, .weapon = wpn, .aim = aim };
-        }
-    };
-    // The Guard ignores threat (no call to 0x494f90).
-    const danger: i32 = if (s.eval == .guard) 0 else s.danger[grid.tileIndex(b.width, t)];
+    const try_attack = s.can_attack or s.ev.wakeful;
+    if (try_attack) {
+        // The best strike from `t` is the tile's alone (not the path's): computed once a
+        // plan; the path's carry takes it as the exe's aim loop would (strictly better).
+        const c = &s.strikes[grid.tileIndex(b.width, t)];
+        if (!c.done) c.* = attackFrom(s, t);
+        if (c.weapon != null and c.score > carry.score) carry.* = .{ .score = c.score, .depth = depth, .weapon = c.weapon, .aim = c.aim };
+    }
+    // The Guard ignores threat (no call to 0x494f90): profile `threat`.
+    const danger: i32 = if (!s.prof.threat.?) 0 else s.danger[grid.tileIndex(b.width, t)];
     var score = carry.score -% s.p.defense *% danger;
     if (s.grandma_dist) |gd| {
         const d = at(s, gd, t);
         if (d > 3) score -%= s.p.guard_dist *% value.floatToInt(d);
     }
-    if (s.n_decoys > 0) score -%= 2000 *% s.p.player_dist *% value.floatToInt(nearestDecoy(s, t));
+    if (s.n_decoys > 0) score -%= s.prof.decoy_pull.? *% s.p.player_dist *% value.floatToInt(nearestDecoy(s, t));
     if (carry.weapon == null) {
         if (s.p.mode == 3 and s.guard != null) {
             const d = pathLen(s, s.guard_dist, s.guard.?, t);
@@ -390,7 +445,7 @@ fn evaluate(s: *Search, depth: usize, t: Tile, carry: *Carry) void {
         } else {
             score -%= s.p.player_dist *% value.floatToInt(nearestFoe(s, t));
         }
-    } else if (s.me.side == .enemy and s.eval != .guard) {
+    } else if (s.me.side == .enemy and s.prof.step_away.?) {
         // After the strike, step away (the Guard stays).
         score +%= s.p.player_dist *% value.floatToInt(nearestFoe(s, t));
     }
@@ -402,49 +457,146 @@ fn evaluate(s: *Search, depth: usize, t: Tile, carry: *Carry) void {
     }
 }
 
-/// Contribution of fighter `o` on a hit tile by scoring kind.
-fn occupantScore(s: *Search, o: u16, wi: *const WInfo, md: i32, pct: u8) i32 {
-    const f = s.b.fighters.items[o];
-    const foe = f.side != s.me.side and f.side != .neutral;
-    const p: i32 = pct;
-    switch (s.eval) {
-        .generic => {
-            const base = (md +% 5) *% p;
-            if (s.locked != null and o == s.locked.?) return @divTrunc(base *% 100, 100);
-            if (foe) {
-                var k: i32 = if (s.finfo[o].class == .monitor) 2 else 1;
-                if (s.me.side == .hero) k *= heroPriority(s.w.immunity, &s.finfo[o], wi, md);
-                return @divTrunc(base *% k, 100);
+/// The best strike from tile `t` (the first of the highest score; none: weapon null).
+fn attackFrom(s: *Search, t: Tile) battle_mod.TileStrike {
+    const g = s.b.grid();
+    var best: battle_mod.TileStrike = .{ .done = true, .score = std.math.minInt(i32) };
+    for (s.weapons[0..s.n_weapons], s.winfo[0..s.n_weapons]) |wpn, *wi| {
+        const pat = wi.pat orelse continue;
+        const md = wi.md;
+        for (grid.targets(g, pat, t, s.who, true, false, &s.targets_buf)) |aim| {
+            if (wi.range > 0 and @max(@abs(aim.tile[0] - t[0]), @abs(aim.tile[1] - t[1])) > wi.range) continue;
+            // A sleeping Smoke Rider sees only a ±π/4 cone from its facing.
+            if (s.ev.wakeful and !s.can_attack and !inCone(s, t, aim.tile)) continue;
+            if (wi.can_aim and !canAim(s, wpn, aim.tile)) continue;
+            var eff: [128]Tile = undefined;
+            var sum: i32 = 0;
+            if (s.ev.wakeful and !s.can_move) sum = dist2(t, aim.tile);
+            for (grid.effectTiles(g, pat, aim, &eff)) |et| {
+                const o = g.at(et);
+                // OpenGorky: its scoring's component scores the tile (Enemy.ScoreTile).
+                if (s.score_tile) if (tileScore(s, et, o, wpn, t, aim, md)) |v| {
+                    sum +%= if (o != grid.Grid.none and s.score_target) scoreTarget(s, o, wpn, v) else v;
+                    continue;
+                };
+                if (s.ev.tile == .whole) {
+                    sum +%= classic(incubusTile(s, o, et, t, aim, md));
+                    continue;
+                }
+                if (o == grid.Grid.none) continue;
+                // Heroes' autoplay (gorky-tool only; in the game the player controls heroes):
+                // the Messiah is hurt only from tile (10,18) (0x4cee33: `open_from`), so from
+                // other tiles he isn't a target, or the heroes would shoot past him all battle.
+                if (s.me.side == .hero and s.b.fighters.items[o].obj.implementsC("CanBeStruck")) if (strike.closedTo(s.w, s.b.fighters.items[o], t)) continue;
+                // A 2×2 fighter covers several tiles; the original counts each.
+                const sc = occupantScore(s, o, wi, md, aim.pct);
+                sum +%= if (s.score_target) scoreTarget(s, o, wpn, sc) else sc;
             }
-            return @divTrunc((0 -% base) *% 10, 100);
-        },
-        // Scoring A and its variants: damage × pct / 100, AITargetLock target ×100 (not
-        // for the Cripple), others −10×.
-        .a, .garcia, .smokerider, .grandma_child, .cripple => {
-            const base = md *% p;
-            if (s.eval != .cripple and s.locked != null and o == s.locked.?) return base;
-            if (foe) return @divTrunc(base, 100);
-            return @divTrunc((0 -% base) *% 10, 100);
-        },
-        // Grandma strikes only her target (her child's killer).
-        .grandma => return if (s.me.grandma_target != null and o == s.me.grandma_target.?) md *% p else 0,
-        // Guard (0x4e2260): melee (`secondaryWeapon`) +100 per sleeping hero, the
-        // sleep shot +1 per awake one (0x4e2374…0x4e239b).
-        .guard => {
-            if (f.side != .hero) return 0;
-            const asleep = f.asleep > 0;
-            return if (wi.secondary) (if (asleep) 100 else 0) else (if (asleep) 0 else 1);
-        },
-        .schizo => return if (f.side == .hero) 10 else -100,
-        .messiah => return if (foe) @divTrunc(md *% p, 100) else 0,
-        .incubus => return 0,
+            const score = s.p.attack *% sum;
+            if (score > best.score) best = .{ .done = true, .score = score, .weapon = wpn, .aim = aim };
+        }
     }
+    return best;
+}
+
+/// The weapon's CanAim(user, tile) for an aim at `tile` (a hot point, counted). Out of
+/// memory reads as may (no error path here).
+fn canAim(s: *Search, wpn: *Object, tile: Tile) bool {
+    s.aim_calls += 1;
+    const xy = events.tileList(s.w, tile) catch return true;
+    const v = (natives.ask(s.w, wpn, "Weapon.CanAim", .{ s.me.obj.ref(), value.Value{ .list = xy } }) catch return true) orelse return true;
+    return v.truth();
+}
+
+/// Its ScoreTile(tile, occupant, weapon, here, aim, damage, pct) for hit tile `et` (fighter
+/// `o` on it or none) of an aim from `here`: the answer, null for none (the scoring's own).
+/// Out of memory reads as no answer.
+fn tileScore(s: *Search, et: Tile, o: u16, wpn: *Object, here: Tile, aim: grid.Target, md: i32) ?i32 {
+    const w = s.w;
+    const occ: value.Value = if (o == grid.Grid.none) .nil else s.b.fighters.items[o].obj.ref();
+    const args = .{ value.Value{ .list = events.tileList(w, et) catch return null }, occ, wpn.ref(), value.Value{ .list = events.tileList(w, here) catch return null }, value.Value{ .list = events.tileList(w, aim.tile) catch return null }, value.Value{ .int = md }, value.Value{ .int = aim.pct } };
+    const v = (natives.ask(w, s.me.obj, "Enemy.ScoreTile", args) catch return null) orelse return null;
+    return v.toInt();
+}
+
+/// Its ScoreTarget(occupant, weapon, score) over the scoring's `score` of fighter `o` (a
+/// hot point, counted). Out of memory reads as no answer.
+fn scoreTarget(s: *Search, o: u16, wpn: *Object, score: i32) i32 {
+    s.score_calls += 1;
+    const v = (natives.ask(s.w, s.me.obj, "Enemy.ScoreTarget", .{ s.b.fighters.items[o].obj.ref(), wpn.ref(), value.Value{ .int = score } }) catch return score) orelse return score;
+    return v.toInt();
+}
+
+/// Contribution of fighter `o` on a hit tile, by scoring (`Scoring.occupant`).
+fn occupantScore(s: *const Search, o: u16, wi: *const WInfo, md: i32, pct: u8) i32 {
+    return switch (s.ev.occupant) {
+        .generic => occupantGeneric(s, o, wi, md, pct),
+        .a => occupantA(s, o, wi, md, pct),
+        .no_lock => occupantNoLock(s, o, wi, md, pct),
+        .avenge => classic(occupantAvenge(s, o, md, pct)),
+        .sleep_hunter => classic(occupantSleepHunter(s, o, wi)),
+        .heroes_only => classic(if (s.b.fighters.items[o].side == .hero) @as(i32, 10) else -100),
+        .foes => if (isFoe(s, o)) @divTrunc(md *% @as(i32, pct), 100) else 0,
+        .none => 0,
+    };
+}
+
+/// A Classic piece's score `v` (the exe's special scorings: an OpenGorky project's are its
+/// components' ScoreTile, the converter's): counted where an OpenGorky project uses it.
+fn classic(v: i32) i32 {
+    if (@import("../rules.zig").og) @import("../rules.zig").classicPath("ai: a Classic scoring piece");
+    return v;
+}
+
+fn isFoe(s: *const Search, o: u16) bool {
+    const f = s.b.fighters.items[o];
+    return f.side != s.me.side and f.side != .neutral;
+}
+
+/// The profile's constants (rules ai.ss): +5, ×100, a monitor ×2, an ally −10×.
+fn occupantGeneric(s: *const Search, o: u16, wi: *const WInfo, md: i32, pct: u8) i32 {
+    const p: i32 = pct;
+    const base = (md +% s.prof.damage_bonus.?) *% p;
+    if (s.locked != null and o == s.locked.?) return @divTrunc(base *% s.prof.lock.?, 100);
+    if (isFoe(s, o)) {
+        var k: i32 = if (s.finfo[o].monitor) s.prof.monitor.? else 1;
+        if (s.me.side == .hero) k *= heroPriority(s.w.immunity, &s.finfo[o], wi, md);
+        return @divTrunc(base *% k, 100);
+    }
+    return @divTrunc((0 -% base) *% s.prof.ally_penalty.?, 100);
+}
+
+/// Scoring A and its variants: damage × pct / 100, AITargetLock target ×100 (not for the
+/// Cripple), others −10× (the profile's: no +5, a monitor ×1).
+fn occupantA(s: *const Search, o: u16, wi: *const WInfo, md: i32, pct: u8) i32 {
+    if (s.locked != null and o == s.locked.?) return @divTrunc((md +% s.prof.damage_bonus.?) *% @as(i32, pct) *% s.prof.lock.?, 100);
+    return occupantNoLock(s, o, wi, md, pct);
+}
+
+fn occupantNoLock(s: *const Search, o: u16, _: *const WInfo, md: i32, pct: u8) i32 {
+    const base = (md +% s.prof.damage_bonus.?) *% @as(i32, pct);
+    if (isFoe(s, o)) return @divTrunc(base *% (if (s.finfo[o].monitor) s.prof.monitor.? else 1), 100);
+    return @divTrunc((0 -% base) *% s.prof.ally_penalty.?, 100);
+}
+
+/// Grandma strikes only her target (her child's killer).
+fn occupantAvenge(s: *const Search, o: u16, md: i32, pct: u8) i32 {
+    return if (s.me.grandma_target != null and o == s.me.grandma_target.?) md *% @as(i32, pct) else 0;
+}
+
+/// Guard (0x4e2260): melee (`secondaryWeapon`) +100 per sleeping hero, the sleep shot +1
+/// per awake one (0x4e2374…0x4e239b).
+fn occupantSleepHunter(s: *const Search, o: u16, wi: *const WInfo) i32 {
+    const f = s.b.fighters.items[o];
+    if (f.side != .hero) return 0;
+    const asleep = f.asleep > 0;
+    return if (wi.secondary) (if (asleep) 100 else 0) else (if (asleep) 0 else 1);
 }
 
 /// Incubus (0x4e2b50) scores a hit tile: occupied −10×; empty, on the first
 /// activation `200 − damage·pct·d/100` (d = nearest hero, dx² + dy²), on the second
 /// `(path tile − aim)² · damage·pct/100`.
-fn incubusTile(s: *Search, o: u16, et: Tile, here: Tile, aim: grid.Target, md: i32) i32 {
+fn incubusTile(s: *const Search, o: u16, et: Tile, here: Tile, aim: grid.Target, md: i32) i32 {
     const p: i32 = aim.pct;
     if (o != grid.Grid.none) return @divTrunc(-10 *% md *% p, 100);
     if (!s.me.second) {
@@ -479,7 +631,7 @@ fn heroPriority(known: *immunity.Known, f: *const FInfo, wi: *const WInfo, max_d
     // Target immune to the weapon's damage kind: pointless; like a player we know
     // only what was discovered.
     if (wi.dcode) |code| {
-        if (known.isKnown(f.name_id, code)) return 0;
+        if (known.isKnown(f.who, code)) return 0;
     }
     var k: i32 = 1;
     if (f.weff) |e| {
@@ -572,4 +724,10 @@ fn distanceField(s: *Search, d: []f32, to: Tile, to_size: u32) void {
             }
         };
     }
+}
+
+test "distance rows: Grandma's child's row is none of the decoys' nor the guard's (4 decoys, OpenGorky)" {
+    for (0..Rows.max_decoys) |k| try std.testing.expect(Rows.decoy_row + k != Rows.near_row and Rows.decoy_row + k > Rows.guard_row);
+    try std.testing.expect(Rows.guard_row >= battle_mod.max_fighters and Rows.near_row < Rows.dist_rows);
+    try std.testing.expectEqual(Rows.max_decoys, @typeInfo(@FieldType(Search, "decoy_dist")).array.len);
 }

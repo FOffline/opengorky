@@ -1,4 +1,4 @@
-//! `--shot` and `--frames`: prepare the scene without a player window (console,
+//! `--shot` and `--frames` (each on its own): prepare the scene without a player window (console,
 //! world ticks, camera) and write PNGs. Interactive steps go through `--input`.
 
 const std = @import("std");

@@ -5,9 +5,10 @@ const state_object = @import("../state.zig").object;
 const fields = @import("../fields.zig");
 const world_mod = @import("../state.zig").world;
 const World = world_mod.World;
-const WorldState = @import("../save.zig").WorldState;
+const WorldState = @import("../world.zig").saved.WorldState;
 const snapshot = @import("../world.zig").snapshot;
 const sources = @import("../world.zig").sources;
+const start = @import("../world.zig").start;
 const walk = @import("../world.zig").walk;
 const inventory = @import("../inventory.zig");
 
@@ -18,22 +19,33 @@ pub fn apply(ws: *const WorldState, w: *World) !void {
         var obj = w.rt.findObject(e.name);
         if (obj == null) {
             if (e.kind == .ambient) continue;
-            const cls = w.rt.loadClass(e.class_file) catch blk: {
-                // Class from another location's archive (items picked up there).
-                if (!try sources.addForeignSource(w, e.class_file)) {
+            if (w.block_item != null) {
+                // An OpenGorky project: made again from its block (saved.zig writes it).
+                const o = try start.recreateBlock(w, e.name, e.class_file, null) orelse {
                     try w.countMissing("class ", e.class_file);
                     continue;
-                }
-                break :blk w.rt.loadClass(e.class_file) catch |err| {
-                    try w.classMissing(e.class_file, err);
-                    continue;
                 };
-            };
-            var nat = state_object.nativeFor(std.fs.path.extension(e.class_file));
-            nat.kind = e.kind;
-            // A recreated actor (hero who joined elsewhere: MacFadden, Medusa) gets init() as in
-            // party transfer; vars then come from the save.
-            obj = try snapshot.recreate(w, e.name, cls, nat, e.kind == .actor);
+                World.nativeOf(o).kind = e.kind;
+                if (e.kind == .actor) try snapshot.created(w, o);
+                obj = o;
+            } else {
+                const cls = w.rt.loadClass(e.class_file) catch blk: {
+                    // Class from another location's archive (items picked up there).
+                    if (!try sources.addForeignSource(w, e.class_file)) {
+                        try w.countMissing("class ", e.class_file);
+                        continue;
+                    }
+                    break :blk w.rt.loadClass(e.class_file) catch |err| {
+                        try w.classMissing(e.class_file, err);
+                        continue;
+                    };
+                };
+                var nat = state_object.nativeFor(std.fs.path.extension(e.class_file));
+                nat.kind = e.kind;
+                // A recreated actor (hero who joined elsewhere: MacFadden, Medusa) gets init() as in
+                // party transfer; vars then come from the save.
+                obj = try snapshot.recreate(w, e.name, cls, nat, e.kind == .actor);
+            }
         }
         const o = obj.?;
         const n = World.nativeOf(o);
@@ -52,8 +64,24 @@ pub fn apply(ws: *const WorldState, w: *World) !void {
         // Item animation (open/closed box) jumps to its last frame; otherwise the fresh
         // post_init's "closed" would remain.
         if ((e.kind == .item or e.kind == .weapon) and e.anim.len > 0) n.actor.holdLast(try ra.dupe(u8, e.anim), e.anim_reverse);
-        try snapshot.restore(w, o, e.vars, e.skills, e.stat_points);
     }
+    // Vars once every object is there: a reference finds one made again further on.
+    for (ws.objects) |e| {
+        const o = w.rt.findObject(e.name) orelse continue;
+        try snapshot.restore(w, o, e.vars, e.skills, e.stat_points);
+        // Its components' (an instance its host lacks now, the code changed: its values go).
+        try snapshot.restoreComps(&w.rt, w.level_name, o, e.comps, "save");
+    }
+    // The subscriptions are the save's, in its order (those the objects made as the world
+    // was made go, the `game` object's stay: saved.zig); one of an instance not there, or
+    // of a method it lacks now, is dropped.
+    var kept: usize = 0;
+    for (w.rt.subs.items) |sb| if (sb.inst.owner.?.host == null) {
+        w.rt.subs.items[kept] = sb;
+        kept += 1;
+    };
+    w.rt.subs.shrinkRetainingCapacity(kept);
+    try snapshot.attachSubs(&w.rt, ws.subs, "save");
     // Objects the save lacks: ones scripts made again (Item_New in post_init) are deleted;
     // a script file of the archive newer than the save (a mod's hero, enemy, box) stays
     // as created, as in the exe.
@@ -78,6 +106,8 @@ pub fn apply(ws: *const WorldState, w: *World) !void {
     }
     // Area walkability (0x47a040): forbids first, then allows.
     for ([_]bool{ false, true }) |allow| for (ws.walk) |wa| if (wa.allow == allow) try walk.setWalkInArea(w, wa.name, allow, wa.floor);
+    // The party is the save's.
+    try @import("../world.zig").party.syncRoles(w);
 }
 
 /// Repairs saves made before disabled objects got post_init: a hero who joined on his own

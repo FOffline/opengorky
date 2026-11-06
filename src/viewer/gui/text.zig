@@ -27,7 +27,7 @@ pub const TextCache = struct {
         return null;
     }
 
-    pub fn put(self: *TextCache, r: *c.SDL_Renderer, key: u64, img: og.formats.image.Image) !*c.SDL_Texture {
+    pub fn put(self: *TextCache, r: *c.SDL_Renderer, key: u64, img: og.image.Image) !*c.SDL_Texture {
         const tex = try gfx.textureFromImage(r, img);
         var slot: usize = 0;
         var oldest: u64 = std.math.maxInt(u64);

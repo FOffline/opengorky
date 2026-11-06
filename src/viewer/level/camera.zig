@@ -37,14 +37,14 @@ pub fn cameraTick(self: *Viewer, l: *LevelView) void {
     if (w.out.zoom) |z| {
         w.out.zoom = null;
         self.zoom_target = z.to;
-        self.zoom_rate = if (z.time) |t| (if (t != 0) @abs(z.to - self.zoom) / (t * 0.3) else 1) else og.formats.adjust.getFloat("zoom_speed", 0.1);
+        self.zoom_rate = if (z.time) |t| (if (t != 0) @abs(z.to - self.zoom) / (t * 0.3) else 1) else og.rules.adjust.float("zoom_speed");
     }
     // Scene end (0x4790ad): zoom back to 1 at zoom_speed 0.1, after the same tick's
     // DOLLY (the scene's last command must not leave 2×).
     if (w.out.zoom_reset) {
         w.out.zoom_reset = false;
         self.zoom_target = 1;
-        self.zoom_rate = og.formats.adjust.getFloat("zoom_speed", 0.1);
+        self.zoom_rate = og.rules.adjust.float("zoom_speed");
     }
     if (w.out.camera_snap) {
         w.out.camera_snap = false;
@@ -115,13 +115,13 @@ pub fn cameraTick(self: *Viewer, l: *LevelView) void {
         // Enemy attack (0x454cf1 → 0x45c270): to the midpoint between it and the target.
         // Bomb blast (0x45c160): cell centre + 160·aS at (320, 240).
         if (w.battle.?.cameraTile()) |t| {
-            if (w.combat_map) |cm| {
+            if (w.map.combat) |cm| {
                 const tc = cm.tileCenter(t, 1);
                 const q = level.headAt(w, tc);
                 glide(self, .{ q[0] - cx, q[1] - cy });
             }
         } else if (w.battle.?.cameraPair()) |cp| {
-            if (l.actorGoal(cp.obj)) |g| if (w.combat_map) |cm| {
+            if (l.actorGoal(cp.obj)) |g| if (w.map.combat) |cm| {
                 const tc = cm.tileCenter(cp.tile, 1);
                 const q = level.headAt(w, tc);
                 glide(self, .{ (g[0] + q[0] - level.head_focus[0]) / 2, (g[1] + q[1] - level.head_focus[1]) / 2 });
@@ -131,7 +131,7 @@ pub fn cameraTick(self: *Viewer, l: *LevelView) void {
             const m = self.mouse;
             if (m[0] < 15 - gfx.wide) self.scroll[0] -= (15 - gfx.wide - m[0]) * 1.7;
             if (m[0] > 625 + gfx.wide) self.scroll[0] += (m[0] - 625 - gfx.wide) * 1.7;
-            if (m[1] < 10) self.scroll[1] -= (10 - m[1]) * 1.7;
+            if (m[1] < 10 - gfx.uiY()) self.scroll[1] -= (10 - gfx.uiY() - m[1]) * 1.7;
             if (m[1] > 470) self.scroll[1] += (m[1] - 470) * 1.7;
         }
     } else {
@@ -141,7 +141,7 @@ pub fn cameraTick(self: *Viewer, l: *LevelView) void {
             const m = self.mouse;
             if (m[0] < 20 - gfx.wide) self.scroll[0] -= 25;
             if (m[0] > 620 + gfx.wide) self.scroll[0] += 25;
-            if (m[1] < 15) self.scroll[1] -= 25;
+            if (m[1] < 15 - gfx.uiY()) self.scroll[1] -= 25;
             if (m[1] > 465) self.scroll[1] += 25;
         }
     }
@@ -165,7 +165,9 @@ pub fn worldMouse(self: *Viewer) [2]f32 {
 }
 fn unzoom(self: *Viewer, pt: [2]f32) [2]f32 {
     const z = viewZoom(self);
-    return .{ (pt[0] - cx) / z + cx, (pt[1] - cy) / z + cy };
+    // An interface-box point (the box at a tall canvas's bottom) about the world's centre.
+    const y = pt[1] + gfx.uiY() - gfx.tall;
+    return .{ (pt[0] - cx) / z + cx, (y - cy) / z + cy };
 }
 /// Screen point → background coordinates: unzoomed (0x451630) plus scroll.
 pub fn bgMouse(self: *Viewer, pt: [2]f32) [2]f32 {
@@ -187,16 +189,17 @@ fn clampScroll(self: *Viewer, l: *LevelView) void {
     const z = viewZoom(self);
     // Half the world width on screen (the wide frame's, zoomed): the view keeps on the background.
     const half = (cx + gfx.wide) / z;
-    const my = cy - cy / z;
+    const half_y = (cy + gfx.tall) / z;
+    const my = half_y - cy;
     const panel_shown = self.gui != null and !self.gui.?.panel_hidden and !l.world.scene.cutscene and !l.world.scene.panorama;
     // `scaling = adaptive` too, so the bottom cells clear the panel (its sides: `drawPanelSides`).
     const panel: f32 = if (panel_shown) 50 / z else 0;
     // A wide frame (`scaling = adaptive`) keeps its sides on the background too.
     const min_x = half - cx;
     const max_x = @max(min_x, og.num.toF32(size[0]) - cx - half);
-    const max_y = @max(-my, og.num.toF32(size[1]) - screen_h + my + panel);
+    const max_y = @max(my, og.num.toF32(size[1]) - cy - half_y + panel);
     self.scroll[0] = std.math.clamp(self.scroll[0], min_x, max_x);
-    self.scroll[1] = std.math.clamp(self.scroll[1], -my, max_y);
+    self.scroll[1] = std.math.clamp(self.scroll[1], my, max_y);
 }
 /// Wheel step: touchpads and high-precision wheels send many small events, and
 /// horizontal ones with y = 0. A step once a whole notch accumulates (|y| ≥ 1),

@@ -9,8 +9,8 @@ const Allocator = std.mem.Allocator;
 const og = @import("opengorky");
 const code = @import("code.zig");
 const voices = @import("voices.zig");
-const main = @import("app.zig");
-const App = main.App;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
 const tx = @import("text.zig");
 const store_mod = @import("store.zig");
 
@@ -54,10 +54,14 @@ pub const Op = union(enum) {
     delete,
     up,
     down,
+    /// OpenGorky: the line's voice is recording `voice.dat` entry this (`x.wav`).
+    voice: []const u8,
 };
 
 /// Op `op` on line `k` of dialogue file `f` (`name`: its entry, for the voices).
 pub fn apply(app: *App, f: usize, name: []const u8, k: usize, op: Op) !void {
+    if (app.store.root != null) return applyOg(app, f, name, k, op);
+    if (op == .voice) return error.NotOnClassic;
     const a = app.frame.allocator();
     const t = app.store.text(f);
     const bs = try blocks(a, t);
@@ -114,6 +118,7 @@ pub fn apply(app: *App, f: usize, name: []const u8, k: usize, op: Op) !void {
             from.items[i] = i + 1;
             from.items[i + 1] = i;
         },
+        .voice => unreachable,
     }
     errdefer app.gpa.free(new);
     // The voices before and after (names by number and speaker code).
@@ -124,8 +129,124 @@ pub fn apply(app: *App, f: usize, name: []const u8, k: usize, op: Op) !void {
     if (op != .text and op != .speaker) try renumberScenes(app, a, name, from.items, bs.len);
 }
 
+/// OpenGorky: op `op` on line `k` (its `Line(…)` row) of dialog block file `f` (`name`: the
+/// `x.dlg` the scenes start it by). Each line names its own voice (`voice = ~s"voice/…"`),
+/// so a line moved keeps it with no file renamed; a new line has none. The scenes' line
+/// numbers follow (renumberScenes). One undo step.
+fn applyOg(app: *App, f: usize, name: []const u8, k: usize, op: Op) !void {
+    const a = app.frame.allocator();
+    const model_og = @import("model_og.zig");
+    const b = model_og.blockOf(app, a, f) orelse return error.NoDialog;
+    var rows: std.ArrayList(*const og.script.ir.Expr) = .empty;
+    for (b.e.rows) |r| if (r.kind == .call and std.mem.eql(u8, r.kind.call.text, "Line") and !r.span.none()) try rows.append(a, r);
+    if (k >= rows.items.len) return error.NoLine;
+    const t = app.store.text(b.text_file);
+    const r = rows.items[k];
+    var from: std.ArrayList(?usize) = .empty;
+    for (0..rows.items.len) |i| try from.append(a, i);
+    const new: []u8 = switch (op) {
+        .text, .speaker, .voice => |s| blk: {
+            const key = switch (op) {
+                .text => "text",
+                .speaker => "who",
+                else => "voice",
+            };
+            const v = std.mem.trim(u8, s, " \t\r\n:");
+            if (op == .speaker and v.len == 0) return error.NoSpeaker;
+            const lit = try a.create(og.script.ir.Expr);
+            lit.* = .{ .line = 0, .kind = .{ .lit = .{ .string = if (op == .voice) try std.fmt.allocPrint(a, "voice/{s}", .{v}) else v } }, .sigil = if (op == .voice) .sound else .none };
+            break :blk try std.mem.concat(app.gpa, u8, &.{ t[0..r.span.start], try lineWith(a, r.kind.call, key, lit), ";", t[r.span.end..] });
+        },
+        .add_after => blk: {
+            // The speaker's, "..." said, on a line of its own at the row's indent.
+            const ls = lineStart(t, r.span.start);
+            const who = for (r.kind.call.named) |n| {
+                if (std.mem.eql(u8, n.name, "who")) break model_og.exprText(a, n.value);
+            } else "\"Sullivan\"";
+            try from.insert(a, k + 1, null);
+            break :blk try std.mem.concat(app.gpa, u8, &.{ t[0..r.span.end], "\n", t[ls..r.span.start], "Line(who = ", who, ", text = \"...\");", t[r.span.end..] });
+        },
+        .delete => blk: {
+            _ = from.orderedRemove(k);
+            const ls = lineStart(t, r.span.start);
+            const le = if (std.mem.indexOfScalarPos(u8, t, r.span.end, '\n')) |e| e + 1 else t.len;
+            break :blk try std.mem.concat(app.gpa, u8, &.{ t[0..ls], t[le..] });
+        },
+        .up, .down => blk: {
+            if (op == .up and k == 0) return;
+            const i = if (op == .up) k - 1 else k;
+            if (i + 1 >= rows.items.len) return;
+            const x = rows.items[i].span;
+            const y = rows.items[i + 1].span;
+            from.items[i] = i + 1;
+            from.items[i + 1] = i;
+            break :blk try std.mem.concat(app.gpa, u8, &.{ t[0..x.start], t[y.start..y.end], t[x.end..y.start], t[x.start..x.end], t[y.end..] });
+        },
+    };
+    app.store.group();
+    defer app.store.endGroup("{s}: {s} {d}", .{ name, @tagName(op), k });
+    try app.store.replace(b.text_file, new);
+    if (op == .add_after or op == .delete or op == .up or op == .down) try renumberScenes(app, a, name, from.items, rows.items.len);
+}
+
+/// OpenGorky: line `k` of dialog block file `f` (`name`: its `x.dlg`), which has no voice,
+/// given sound file `path` as a new recording `voice/<prefix><code>_<nn>.wav` (its speaker's
+/// code and number as the game names them, `_2`… when taken): imported, and only then the
+/// line's `voice = ~s"…"` set. One undo step; nothing changed when the import fails.
+pub fn voiceFromFile(app: *App, f: usize, name: []const u8, k: usize, path: []const u8) !void {
+    const a = app.frame.allocator();
+    const model_og = @import("model_og.zig");
+    const b = model_og.blockOf(app, a, f) orelse return error.NoDialog;
+    var n: usize = 0;
+    const who = for (b.e.rows) |r| {
+        if (r.kind != .call or !std.mem.eql(u8, r.kind.call.text, "Line") or r.span.none()) continue;
+        if (n == k) break og.core.schema.recordField(r.kind.call, "who");
+        n += 1;
+    } else return error.NoLine;
+    const speaker = if (who) |w| og.core.schema.text(w) orelse "" else "";
+    var bb: [96]u8 = undefined;
+    const base = try og.formats.dialog.voiceName(&bb, name, og.formats.dialog.speakerCode(speaker) orelse .{ 'x', 'x' }, k);
+    var nb: [100]u8 = undefined;
+    const vn = try @import("freename.zig").freeName(&nb, base[0 .. base.len - 4], .{ .ext = ".wav" }, app, struct {
+        fn taken(ap: *App, s: []const u8) bool {
+            return voices.has(ap, s);
+        }
+    }.taken);
+    const owned = try a.dupe(u8, vn);
+    app.store.group();
+    defer app.store.endGroup("{s}: voice {d}", .{ name, k });
+    try voices.importTo(app, owned, path);
+    try applyOg(app, f, name, k, .{ .voice = owned });
+}
+
+/// Call `c` (a `Line(…)`) as text with its named argument `key` made `v` (added last when
+/// it has none).
+fn lineWith(a: Allocator, c: og.script.ir.Call, key: []const u8, v: *const og.script.ir.Expr) ![]const u8 {
+    var named: std.ArrayList(og.script.ir.Named) = .empty;
+    try named.appendSlice(a, c.named);
+    for (named.items) |*n| {
+        if (std.mem.eql(u8, n.name, key)) {
+            n.value = v;
+            break;
+        }
+    } else try named.append(a, .{ .name = key, .value = v });
+    const e = try a.create(og.script.ir.Expr);
+    e.* = .{ .line = 0, .kind = .{ .call = .{ .id = 0, .text = c.text, .args = c.args, .named = named.items } } };
+    return @import("model_og.zig").exprText(a, e);
+}
+
+fn lineStart(t: []const u8, at: usize) usize {
+    return if (std.mem.lastIndexOfScalar(u8, t[0..at], '\n')) |k| k + 1 else 0;
+}
+
+/// An OpenGorky scene's text (`src/scenes/<x>.ogs`).
+fn ogScene(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "scenes/") and std.mem.endsWith(u8, name, ".ogs");
+}
+
 /// Scenes showing this dialogue (`DIALOG_INIT(…, "name")`) by number: each
-/// `DIALOG_DISPLAY(n)` / `DIALOG_SHOW(n)` after it to the line's new number.
+/// `DIALOG_DISPLAY(n)` / `DIALOG_SHOW(n)` after it to the line's new number (OpenGorky:
+/// `DIALOG_DISPLAY(2.0);` of the project's scenes).
 fn renumberScenes(app: *App, a: Allocator, name: []const u8, from: []const ?usize, old_len: usize) !void {
     // Old number → new.
     const to = try a.alloc(?usize, old_len);
@@ -135,8 +256,12 @@ fn renumberScenes(app: *App, a: Allocator, name: []const u8, from: []const ?usiz
     };
     var lost: usize = 0;
     // Only scenes naming the file are read into the Store.
-    for (@import("refs.zig").naming(app, a, store_mod.common_archive, @import("refs.zig").scene, name)) |entry| {
-        const fi = app.store.file(store_mod.common_archive, entry) catch continue;
+    const og_project = app.store.root != null;
+    const archive = if (og_project) store_mod.og_src else store_mod.common_archive;
+    const scene_files = if (og_project) app.store.listing(a, store_mod.og_src, ogScene, false) else @import("refs.zig").naming(app, a, store_mod.common_archive, @import("refs.zig").scene, name);
+    for (scene_files) |entry| {
+        const fi = app.store.file(archive, entry) catch continue;
+        if (og_project and std.ascii.findIgnoreCase(app.store.text(fi), name) == null) continue;
         const t = app.store.text(fi);
         var out: std.ArrayList(u8) = .empty;
         var cur_is = false;
@@ -146,10 +271,12 @@ fn renumberScenes(app: *App, a: Allocator, name: []const u8, from: []const ?usiz
             const le = std.mem.indexOfScalarPos(u8, t, pos, '\n') orelse t.len;
             const line = t[pos..@min(le + 1, t.len)];
             const trimmed = std.mem.trimStart(u8, line, " \t");
-            if (std.ascii.startsWithIgnoreCase(trimmed, "DIALOG_INIT(")) cur_is = std.ascii.findIgnoreCase(trimmed, name) != null;
-            const cmd: ?[]const u8 = if (std.ascii.startsWithIgnoreCase(trimmed, "DIALOG_DISPLAY(")) "DIALOG_DISPLAY(" else if (std.ascii.startsWithIgnoreCase(trimmed, "DIALOG_SHOW(")) "DIALOG_SHOW(" else null;
-            if (cur_is) if (cmd) |c| {
-                const ns = (line.len - trimmed.len) + c.len;
+            const scenes = @import("scenes.zig");
+            if (scenes.isCmd(trimmed, "DIALOG_INIT")) cur_is = std.ascii.findIgnoreCase(trimmed, name) != null;
+            // `DIALOG_DISPLAY(n)` / `dialog::Say(n)`, `DIALOG_SHOW(n)` / `dialog::Show(n)`.
+            const shows = scenes.isCmd(trimmed, "DIALOG_DISPLAY") or scenes.isCmd(trimmed, "DIALOG_SHOW");
+            if (cur_is and shows) if (scenes.lineCmd(trimmed)) |c| {
+                const ns = (line.len - trimmed.len) + c.args;
                 var ne = ns;
                 while (ne < line.len and std.ascii.isDigit(line[ne])) ne += 1;
                 const n = std.fmt.parseInt(usize, line[ns..ne], 10) catch std.math.maxInt(usize);

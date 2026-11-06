@@ -10,11 +10,11 @@ const Object = object_mod.Object;
 pub const model_cache = @import("actor/model_cache.zig");
 pub const skin = @import("actor/skin.zig");
 pub const camera = @import("actor/camera.zig");
-pub const gltf = @import("actor/gltf.zig");
 pub const slots = @import("actor/slots.zig");
 pub const command = @import("actor/command.zig");
 const fields = @import("fields.zig");
-const adjust = @import("formats.zig").adjust;
+const rules = @import("rules.zig");
+const adjust = rules.adjust;
 
 pub const max_states = 10;
 /// The exe has 9 states with animation sets (0..8): RegisterAnimation (0x422960) and
@@ -30,15 +30,26 @@ const Idle = struct { anim: []const u8, weight: u32, broken: bool = false };
 const Mapping = struct { logical: []const u8, actual: []const u8 };
 
 /// RegisterExtraBody slot (+0x2e64: still flag, +0x2e68 mesh, +0x2e6c its player): the
-/// player's transition state like the actor's `last_frame`, `blend_from` and `poses`.
+/// player's transition state like the actor's `last_frame`, `blend_from`, `plays` and
+/// `from_drawn` (the drawn poses are the viewer's, keyed by `mesh`: one per registration).
 const ExtraBody = struct {
     mesh: []const u8,
     still: bool,
     last_frame: u32 = 0,
     blend_from: u32 = 0,
-    poses: [2]std.ArrayList([12]f32) = .{ .empty, .empty },
-    pose_drawn: u1 = 0,
-    pose_from: ?u1 = null,
+    plays: u32 = 0,
+    from_drawn: bool = false,
+};
+
+/// An actor's walk speed for one animation name (OpenGorky, ActorSetWalkSpeed).
+const NamedSpeed = struct {
+    name: [32]u8 = undefined,
+    len: u8 = 0,
+    v: f32 = 1,
+
+    fn is(self: *const NamedSpeed, anim: []const u8) bool {
+        return self.len > 0 and std.ascii.eqlIgnoreCase(self.name[0..self.len], anim);
+    }
 };
 
 pub const Actor = struct {
@@ -65,6 +76,8 @@ pub const Actor = struct {
     /// ActorSetWalkSpeed (0x422b50): speed per walk-animation logical slot (+0x2fbc),
     /// default 1 (0x42261b).
     speeds: [slots.logical_count]f32 = @splat(1.0),
+    /// OpenGorky: the speeds by animation name (no exe slots); a name without one: 1.
+    named_speeds: [16]NamedSpeed = @splat(.{}),
     /// Current walk animation (logical name; ActorSetWalkAnimation changes it on paths).
     walk_anim: []const u8 = "walk",
     /// Floor: 0 — `.wm`, 1 — `.wm2` (TestActorMapChange).
@@ -130,19 +143,22 @@ pub const Actor = struct {
     /// the frame drawn last (set each tick by `noteShown`).
     blend_from: u32 = 0,
     last_frame: u32 = 0,
+    /// `last_frame` and `blend_from` as drawn (`drawFrame`): other than them only in
+    /// OpenGorky while a slot's missing animation shows an idle (the viewer's transition).
+    drawn: u32 = 0,
+    draw_from: u32 = 0,
     /// Shift (model axes) and turn of the off-place animation that just ended (+0x2fb0,
     /// +0x2fa0, 0x42671d): position and angle already took them, so the next `play` takes
     /// them out of the start pose (`blend_shift`, 0x423439…0x4235c3) — else the body jumps
     /// ahead and the matrix lerp across the turn squashes the model.
     off_place: [4]f32 = @splat(0),
     blend_shift: [4]f32 = @splat(0),
-    /// The drawn bone matrices, two buffers like the player's +0x10/+0x14: the viewer
-    /// writes each drawn pose into `poses[pose_drawn]` (+0x4); a `play` mid-transition
-    /// starts the next one from that pose (`pose_from`, +0x8 = +0x4, 0x44f9e2) instead
-    /// of `blend_from`, and the next draw writes the other buffer (0x44fe00).
-    poses: [2]std.ArrayList([12]f32) = .{ .empty, .empty },
-    pose_drawn: u1 = 0,
-    pose_from: ?u1 = null,
+    /// `play`s so far (wrapping) and whether the last one came mid-transition: then the
+    /// next transition starts from the pose drawn last (+0x8 = +0x4, 0x44f9e2) instead of
+    /// `blend_from`. The drawn bone matrices themselves (the player's +0x10/+0x14) are the
+    /// viewer's (viewer/level/place.zig); logic never reads them.
+    plays: u32 = 0,
+    from_drawn: bool = false,
     loop: bool = true,
     /// One-shot animation: return to idle when it ends.
     one_shot: bool = false,
@@ -214,7 +230,7 @@ pub const Actor = struct {
     /// LinkActor (0x42ab60): the parent draws this actor at its mesh point (0x4297b4 —
     /// point matrix 0x4290f0, then this actor's mesh in its own animation), the actor
     /// itself is not drawn or shadowed (link count +0x2f7c: 0x42b210, 0x42a080).
-    link_point: ?@import("formats.zig").mesh.HoldMode = null,
+    link_point: ?@import("core.zig").model.HoldMode = null,
     link_offset: [3]f32 = .{ 0, 0, 0 },
     link_angle: f32 = 0,
     /// Vibrato(actor, amplitude, speed) (0x4cd9c0, tick 0x4cda90): vertical draw offset
@@ -228,7 +244,9 @@ pub const Actor = struct {
     fx: command.Fx = .none,
     /// Materialization ticks (+0x3260) / shock ticks left.
     fx_ticks: u32 = 0,
-    /// Invisible monster (nameID 120): visible while walking, when hit, dying and
+    /// The shock's light range and height (attack_shocker_light_range, _level).
+    shock_light: [2]f32 = .{ 600, 500 },
+    /// Invisible monster (classic_id 120): visible while walking, when hit, dying and
     /// attacking; disappears when idle (0x4230c0).
     invisible: bool = false,
     /// Materialization start sound ("in_fadein" / "in_fadeout") for the world.
@@ -236,7 +254,9 @@ pub const Actor = struct {
     /// Transformation (ACTOR_MORPH, 0x42b5a0): ticks until the class and model change
     /// (morf_life2 = 50); the actor fades by 14 alpha per tick (0x426342).
     morph_left: u32 = 0,
-    morph: ?struct { class: []const u8, mesh: []const u8, idle: []const u8 } = null,
+    /// `keep_hp` (OpenGorky's FighterTransform): the health it has at the change stays
+    /// (combat/states.zig morphDone).
+    morph: ?struct { class: []const u8, mesh: []const u8, idle: []const u8, keep_hp: bool = false } = null,
     /// Time to change the class (the world calls applyMorph).
     morph_due: bool = false,
     /// Lifted victim (exe states 3/4): weight w grows by 0.1 per tick to 1, after
@@ -258,18 +278,31 @@ pub const Actor = struct {
         self.path.deinit(gpa);
         self.path_events.deinit(gpa);
         self.path_z.deinit(gpa);
-        for (&self.poses) |*p| p.deinit(gpa);
-        for (&self.extra_bodies) |*eb| if (eb.*) |*b| for (&b.poses) |*p| p.deinit(gpa);
     }
 
     /// Walk speed with animation `anim` (0x422f58): its logical name's slot —
     /// "walk_footbridge" without ActorSetWalkSpeed gets 1, not the "walk" speed.
     pub fn speedOf(self: Actor, anim: []const u8) f32 {
+        if (rules.og) {
+            for (&self.named_speeds) |*s| if (s.is(anim)) return s.v;
+            return 1;
+        }
         return self.speeds[slots.logicalIndex(anim)];
     }
 
     pub fn setSpeed(self: *Actor, anim: []const u8, v: f32) void {
-        self.speeds[slots.logicalIndex(anim)] = v;
+        if (!rules.og) {
+            self.speeds[slots.logicalIndex(anim)] = v;
+            return;
+        }
+        // shortcut: 16 names of up to 32 letters per actor (Gorky sets 3); a 17th is dropped.
+        if (anim.len > 32) return;
+        for (&self.named_speeds) |*s| if (s.len == 0 or s.is(anim)) {
+            @memcpy(s.name[0..anim.len], anim);
+            s.len = @intCast(anim.len);
+            s.v = v;
+            return;
+        };
     }
 
     /// Stop walking: the path is cleared; if a walk animation was playing, go idle.
@@ -438,15 +471,18 @@ pub const Actor = struct {
         }
         self.anim = anim;
         // 0x44f9dc: mid-transition (+0x19 == 2) the new one starts from the drawn pose.
-        self.pose_from = if (self.anim_hold > 0 and self.poses[self.pose_drawn].items.len > 0) self.pose_drawn else null;
+        self.plays +%= 1;
+        self.from_drawn = self.anim_hold > 0;
         // A moving extra body's player gets the same call (0x423409): its own start pose.
         for (&self.extra_bodies) |*eb| if (eb.*) |*b| if (!b.still) {
-            b.pose_from = if (self.anim_hold > 0 and b.poses[b.pose_drawn].items.len > 0) b.pose_drawn else null;
+            b.plays +%= 1;
+            b.from_drawn = self.anim_hold > 0;
             b.blend_from = b.last_frame;
         };
         self.anim_hold = if (same or self.instant) 0 else blend_ticks;
         self.instant = false;
         self.blend_from = self.last_frame;
+        self.draw_from = self.drawn;
         self.blend_shift = self.off_place;
         self.off_place = @splat(0);
         self.loop = loop;
@@ -481,10 +517,15 @@ pub const Actor = struct {
     /// Shock (state 2, 0x491c91): a "current" pass for `ticks` ticks.
     /// Shock shake, 30 ticks.
     pub fn shock(self: *Actor) void {
-        const ticks: u32 = @intCast(@max(0, adjust.getInt("attack_shocker_shocked_timeout", 30)));
+        self.shockWith(adjust.int("attack_shocker_shocked_timeout"), adjust.float("attack_shocker_light_range"), adjust.float("attack_shocker_light_level"));
+    }
+
+    /// `shock` for `ticks` with its light's range and height (a weapon's own values).
+    pub fn shockWith(self: *Actor, ticks: i32, range: f32, level: f32) void {
         if (self.fx == .appear or self.fx == .vanish) return;
         self.fx = .shock;
-        self.fx_ticks = ticks;
+        self.fx_ticks = @intCast(@max(0, ticks));
+        self.shock_light = .{ range, level };
     }
 
     /// Visibility during materialization (0x42a2e0): v = min(1, 0.06·ticks), vanishing
@@ -505,17 +546,17 @@ pub const Actor = struct {
 
     pub fn tickFx(self: *Actor) void {
         if (self.corpse) |*t| if (!self.one_shot) {
-            if (t.* < adjust.getInt("actor_fade_delay", 30)) t.* += 1 else {
+            if (t.* < adjust.int("actor_fade_delay")) t.* += 1 else {
                 // An invisible monster fades without materialization.
                 if (self.invisible) self.fx = .none;
-                const speed: u8 = @intCast(std.math.clamp(adjust.getInt("fighter_fade_speed", 3), 0, 255));
+                const speed: u8 = @intCast(std.math.clamp(adjust.int("fighter_fade_speed"), 0, 255));
                 if (self.alpha < speed) self.gone = true;
                 self.alpha -|= speed;
             }
         };
         if (self.morph_left > 0) {
             self.morph_left -= 1;
-            self.alpha -|= @intCast(std.math.clamp(adjust.getInt("morf_add", 14), 0, 255));
+            self.alpha -|= @intCast(std.math.clamp(adjust.int("morf_add"), 0, 255));
             if (self.morph_left == 0) {
                 self.alpha = 255;
                 self.morph_due = true;
@@ -559,8 +600,29 @@ pub const Actor = struct {
     /// later name isn't in the model; the actor's own logic still treats that one as ended).
     pub fn noteShown(self: *Actor, m: *const model_cache.Model) void {
         self.last_frame = self.frameIn(m);
+        self.drawn = if (rules.og) self.drawFrame(m) else self.last_frame;
         if (self.anim.len == 0 or m.anims.find(self.anim) == null) return;
         self.shown = .{ .anim = self.anim, .ticks = self.anim_ticks, .loop = self.loop, .reverse = self.reverse };
+    }
+
+    /// The frame drawn (viewer, editor): `frameIn`, but in OpenGorky a slot's animation
+    /// the model lacks shows `idleInstead`, looping from the animation's start. Display
+    /// only: what logic reads (link points of shots and balls, the lift bind,
+    /// justifyPosition, one-shot ends) keeps `frameIn`.
+    pub fn drawFrame(self: Actor, m: *const model_cache.Model) u32 {
+        const idle = self.idleInstead(m) orelse return self.frameIn(m);
+        return m.frameOf(idle, self.anim_ticks, true);
+    }
+
+    /// OpenGorky: the idle shown instead of an animation the model lacks (any name; the exe
+    /// holds the one shown before): the current state's first registered idle the model has
+    /// (not broken), else state 0's; null: none, hold. No `pickIdle`: its rand is the battle's.
+    pub fn idleInstead(self: Actor, m: *const model_cache.Model) ?[]const u8 {
+        if (!rules.og or self.anim.len == 0 or m.anims.find(self.anim) != null) return null;
+        for ([_]u8{ self.state, 0 }) |s| if (s < max_states) for (self.idle[s][0..self.idle_count[s]]) |e| {
+            if (!e.broken and m.anims.find(e.anim) != null) return e.anim;
+        };
+        return null;
     }
 
     /// Transition ticks (0x44f910 with length 8: +0x20 = 1/9, +0x1c from −1/9).
@@ -658,6 +720,22 @@ test "dropCommands leaves the one-shot playing but frees the actor" {
     try std.testing.expect(!a.detached);
 }
 
+test "OpenGorky: animations and walk speeds by name, no exe slots" {
+    const gpa = std.testing.allocator;
+    rules.og = true;
+    defer rules.og = false;
+    var a: Actor = .{};
+    defer a.mappings.deinit(gpa);
+    try a.registerMapping(gpa, 0, "stair_down", "stair_dwn");
+    try a.registerMapping(gpa, 0, "stair_up", "stair_up");
+    try std.testing.expectEqualStrings("stair_dwn", a.resolve("stair_down"));
+    a.setSpeed("walk", 5.2);
+    a.setSpeed("Odd_Walk", 2);
+    try std.testing.expectEqual(@as(f32, 5.2), a.speedOf("walk"));
+    try std.testing.expectEqual(@as(f32, 2), a.speedOf("odd_walk"));
+    try std.testing.expectEqual(@as(f32, 1.0), a.speedOf("other_walk"));
+}
+
 test "animation slots and walk speeds follow the exe logical-name table" {
     const gpa = std.testing.allocator;
     var a: Actor = .{};
@@ -699,13 +777,11 @@ test "play blends into another animation unless instant; the same looping one ru
     a.play("hit", false, true); // mid-blend into the same one: restart without it
     try std.testing.expectEqual(@as(u32, 0), a.anim_hold);
     // Interrupted transition: the next starts from the pose drawn (0x44f9e2), else a frame.
-    defer a.deinit(std.testing.allocator);
-    try a.poses[1].append(std.testing.allocator, @splat(1));
-    a.pose_drawn = 1;
     a.play("walk", true, false);
-    try std.testing.expectEqual(@as(?u1, null), a.pose_from);
+    try std.testing.expect(!a.from_drawn);
+    const plays = a.plays;
     a.play("idle", false, false);
-    try std.testing.expectEqual(@as(?u1, 1), a.pose_from);
+    try std.testing.expect(a.from_drawn and a.plays == plays +% 1);
     // An off-place end's shift goes to the next transition only (0x423439, cleared 0x4235cb).
     a.off_place = .{ 3, 0, 4, 1 };
     a.play("look", false, true);
@@ -715,9 +791,9 @@ test "play blends into another animation unless instant; the same looping one ru
 }
 
 test "an animation the model lacks leaves the one shown running (0x44f910)" {
-    var items = [_]@import("formats.zig").anim.Animation{.{ .name = "g_idle", .first = 10, .last = 19, .speed = 1, .sounds = &.{} }};
+    var items = [_]@import("core.zig").model.Animation{.{ .name = "g_idle", .first = 10, .last = 19, .speed = 1, .sounds = &.{} }};
     var m: model_cache.Model = undefined;
-    m.anims = .{ .arena = undefined, .items = &items };
+    m.anims = .{ .items = &items };
     var a: Actor = .{};
     a.play("g_idle", false, false);
     a.anim_ticks = 4;
@@ -739,7 +815,51 @@ test "an animation the model lacks leaves the one shown running (0x44f910)" {
     try std.testing.expectEqual(@as(u32, 19), a.frameIn(&m));
 }
 
+test "OpenGorky draws an idle for any missing animation, Classic holds; no rand" {
+    var items = [_]@import("core.zig").model.Animation{
+        .{ .name = "g_idle", .first = 10, .last = 19, .speed = 1, .sounds = &.{} },
+        .{ .name = "oddech", .first = 30, .last = 33, .speed = 1, .sounds = &.{} },
+    };
+    var m: model_cache.Model = undefined;
+    m.anims = .{ .items = &items };
+    const gpa = std.testing.allocator;
+    var a: Actor = .{};
+    defer a.mappings.deinit(gpa);
+    a.registerIdle(0, "oddychanieszybkie", 1); // broken (16+ letters)
+    a.registerIdle(0, "nima", 1); // not in the model
+    a.registerIdle(0, "oddech", 1);
+    a.registerIdle(7, "g_idle", 1);
+    try a.registerMapping(gpa, 0, "walk", "chodzenie");
+    a.play("g_idle", false, false);
+    a.anim_ticks = 4;
+    a.noteShown(&m);
+    a.play(a.resolve("walk"), true, false); // bound to an animation the model lacks
+    a.anim_ticks = 5;
+    defer rules.og = false;
+    rules.og = false;
+    try std.testing.expectEqual(@as(?[]const u8, null), a.idleInstead(&m));
+    try std.testing.expectEqual(a.frameIn(&m), a.drawFrame(&m));
+    rules.og = true;
+    try std.testing.expectEqualStrings("oddech", a.idleInstead(&m).?);
+    try std.testing.expectEqual(@as(u32, 31), a.drawFrame(&m)); // 30 + 5 % 4
+    try std.testing.expectEqual(@as(u32, 19), a.frameIn(&m)); // logic: still the one shown
+    a.state = 7; // the current state's idles first
+    try std.testing.expectEqualStrings("g_idle", a.idleInstead(&m).?);
+    a.state = 0;
+    a.play("hit", false, true); // a slot without a binding: its name as is
+    try std.testing.expectEqualStrings("oddech", a.idleInstead(&m).?);
+    a.play("ude_radio", false, true); // any name the model lacks (the exe holds a raw one)
+    try std.testing.expectEqualStrings("oddech", a.idleInstead(&m).?);
+    // The transition into the next one starts from the pose drawn.
+    a.play("chodzenie", true, false);
+    a.noteShown(&m);
+    a.play("g_idle", false, false);
+    try std.testing.expectEqual(@as(u32, 30), a.draw_from);
+    try std.testing.expectEqual(@as(u32, 14), a.blend_from);
+}
+
 test {
     _ = camera;
-    _ = gltf;
+    _ = model_cache;
+    _ = skin;
 }

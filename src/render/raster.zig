@@ -7,7 +7,7 @@
 const std = @import("std");
 const num = @import("../num.zig");
 const Allocator = std.mem.Allocator;
-const Image = @import("../formats.zig").image.Image;
+const Image = @import("../image.zig").Image;
 
 pub const Canvas = struct {
     img: Image,
@@ -30,6 +30,9 @@ pub const Canvas = struct {
     /// only these rectangles, not their joint bounds.
     regions: [max_regions]Rect = undefined,
     n_regions: usize = 0,
+    /// Rectangle the additive passes drew into their images (`Shade.add`) since it was
+    /// last reset: those images are empty outside it.
+    add_dirty: Rect = .empty,
     /// Additive pass buffer (ice, shock, glow), same size as the canvas.
     /// In the exe the pass lies in the frame, and a model drawn later closer to the
     /// camera covers it (D3D z-test). Ours is separate, so a pixel covered by a closer
@@ -58,11 +61,6 @@ pub const Canvas = struct {
             return .{ .x0 = @min(a.x0, b.x0), .y0 = @min(a.y0, b.y0), .x1 = @max(a.x1, b.x1), .y1 = @max(a.y1, b.y1) };
         }
     };
-
-    /// Mark [x0, x1] × [y0, y1] as drawn (inclusive, canvas pixels).
-    fn markDirty(self: *Canvas, x0: f32, y0: f32, x1: f32, y1: f32) void {
-        self.addDirty(.{ .x0 = @intFromFloat(x0), .y0 = @intFromFloat(y0), .x1 = @as(u32, @intFromFloat(x1)) + 1, .y1 = @as(u32, @intFromFloat(y1)) + 1 });
-    }
 
     pub fn addDirty(self: *Canvas, r: Rect) void {
         self.dirty = self.dirty.join(r);
@@ -138,7 +136,19 @@ pub const Canvas = struct {
         /// (ground items over the background fit); the true depth is written, so
         /// models drawn later sort against it.
         test_bias: f32 = 0,
+        /// A material's CPU program and its strength (effects/batch.zig `Program`;
+        /// the transparent and additive passes): none in the exe's draws.
+        program: Program = .none,
+        k: f32 = 0,
     };
+
+    pub const Program = @import("../effects.zig").batch.Program;
+
+    /// The dissolve's noise at pixel (x, y): 0…1, fixed per pixel.
+    fn noise(x: usize, y: usize) f32 {
+        const h = std.hash.Murmur2_32.hashUint64(@as(u64, x) << 32 | y);
+        return num.toF32(h % 1024) / 1024;
+    }
 
     /// Start recording triangles (`gpa` for the list; memory is reused).
     pub fn record(self: *Canvas, gpa: Allocator) void {
@@ -169,9 +179,10 @@ pub const Canvas = struct {
             p.workers = @intCast(std.math.clamp(threads, 1, max_threads) - 1);
         }
 
-        fn run(p: *Pool, job: *Job) void {
+        /// `job.run()` on every thread (the job hands out its own work).
+        pub fn run(p: *Pool, job: anytype) void {
             var g: std.Io.Group = .init;
-            for (0..p.workers) |_| g.async(p.io, Job.run, .{job});
+            for (0..p.workers) |_| g.async(p.io, @TypeOf(job.*).run, .{job});
             job.run();
             g.await(p.io) catch {};
         }
@@ -224,11 +235,18 @@ pub const Canvas = struct {
         if (tex_l) |t| {
             var u = (w0 * uv[0][0] + w1 * uv[1][0] + w2 * uv[2][0]) * sh.uv_scale + sh.uv_offset[0];
             var v = (w0 * uv[0][1] + w1 * uv[1][1] + w2 * uv[2][1]) * sh.uv_scale + sh.uv_offset[1];
+            // Heat: the texture rippled across, k its phase.
+            if (sh.program == .heat) u += @sin(v * 25 + sh.k) * 0.03;
             if (sh.wrap) {
                 u -= @floor(u);
                 v -= @floor(v);
             }
             color = sampleBilinear(t, std.math.clamp(u, 0, 1), std.math.clamp(v, 0, 1));
+            // Tint: the texel toward its luminance by k (the vertex colour then tints it).
+            if (sh.program == .tint) {
+                const l = 0.299 * num.toF32(color[0]) + 0.587 * num.toF32(color[1]) + 0.114 * num.toF32(color[2]);
+                for (color[0..3]) |*ch| ch.* = @intFromFloat(std.math.clamp(num.toF32(ch.*) + (l - num.toF32(ch.*)) * sh.k, 0, 255));
+            }
         }
         const light = @as(V3, @splat(w0)) * c0 + @as(V3, @splat(w1)) * c1 + @as(V3, @splat(w2)) * c2;
         const cf: V3 = @floatFromInt(@as(@Vector(3, u8), color[0..3].*));
@@ -305,7 +323,8 @@ pub const Canvas = struct {
         const area = edge(p[0], p[1], p[2]);
         if (@abs(area) < 1e-6) return;
         // Additive writes into its own image and leaves the canvas alone.
-        if (sh.add == null) self.markDirty(min_x, min_y, max_x, max_y);
+        const r: Rect = .{ .x0 = @intFromFloat(min_x), .y0 = @intFromFloat(min_y), .x1 = @as(u32, @intFromFloat(max_x)) + 1, .y1 = @as(u32, @intFromFloat(max_y)) + 1 };
+        if (sh.add == null) self.addDirty(r) else self.add_dirty = self.add_dirty.join(r);
         const tex_l = if (tex) |t| mipFor(t, sh.mips, uv, area * sh.uv_scale * sh.uv_scale) else null;
         if (self.rec_gpa) |gpa| {
             var s2 = sh;
@@ -391,6 +410,7 @@ pub const Canvas = struct {
                 } else if (zt >= dz) continue;
                 var color: [4]u8 = undefined;
                 if (pass != .depth) color = shade(pass == .add, tex_l, uv, c0, c1, c2, sh, w0, w1, w2);
+                if ((pass == .add or pass == .blend) and sh.program == .dissolve and noise(ux, uy) < sh.k) continue;
                 var pa = a;
                 if (pass == .blend and sh.tex_alpha) {
                     pa = a * num.toF32(color[3]) / 255;
@@ -563,4 +583,46 @@ test "texel-alpha billboard is hidden behind nearer depth" {
     c.triangleShaded(front, uv, tex, gray(1), .{ .depth_write = false, .tex_alpha = true });
     try std.testing.expect(c.img.pixels[0] > before[0]);
     try std.testing.expectEqual(2, c.depth[0]);
+}
+
+test "a dissolve drops the pixels below k; none and k 0 draw all" {
+    const a = std.testing.allocator;
+    var c = try Canvas.init(a, 32, 32, .{ 0, 0, 0, 0 });
+    defer c.deinit(a);
+    var glow = try Image.init(a, 32, 32);
+    defer glow.deinit(a);
+    @memset(glow.pixels, 0);
+    const tri = [3][3]f32{ .{ 0, 0, 0 }, .{ 64, 0, 0 }, .{ 0, 64, 0 } };
+    const col = [3][3]f32{ @splat(1), @splat(1), @splat(1) };
+    const count = struct {
+        fn f(img: Image) usize {
+            var n: usize = 0;
+            for (0..img.width * img.height) |i| n += @intFromBool(img.pixels[i * 4] != 0);
+            return n;
+        }
+    }.f;
+    c.triangleShaded(tri, @splat(.{ 0, 0 }), null, col, .{ .add = &glow, .depth_write = false, .program = .dissolve, .k = 0 });
+    const all = count(glow);
+    try std.testing.expect(all > 0);
+    @memset(glow.pixels, 0);
+    c.triangleShaded(tri, @splat(.{ 0, 0 }), null, col, .{ .add = &glow, .depth_write = false, .program = .dissolve, .k = 0.5 });
+    const half = count(glow);
+    try std.testing.expect(half > all / 4 and half < all * 3 / 4);
+}
+
+test "a tint greys the texel by k" {
+    const a = std.testing.allocator;
+    var c = try Canvas.init(a, 4, 4, .{ 0, 0, 0, 0 });
+    defer c.deinit(a);
+    var glow = try Image.init(a, 4, 4);
+    defer glow.deinit(a);
+    var tex = try Image.init(a, 1, 1);
+    defer tex.deinit(a);
+    tex.pixels[0..4].* = .{ 200, 100, 0, 255 };
+    const tri = [3][3]f32{ .{ 0, 0, 0 }, .{ 8, 0, 0 }, .{ 0, 8, 0 } };
+    for ([_]f32{ 0, 1 }) |k| {
+        @memset(glow.pixels, 0);
+        c.triangleShaded(tri, @splat(.{ 0, 0 }), tex, gray(1), .{ .add = &glow, .depth_write = false, .program = .tint, .k = k });
+        if (k == 0) try std.testing.expectEqual(@as(u8, 200), glow.pixels[0]) else try std.testing.expectEqual(glow.pixels[1], glow.pixels[0]);
+    }
 }

@@ -11,18 +11,23 @@ const c = @import("sdl");
 const gfx = @import("media/gfx.zig");
 const lang_mod = og.formats.lang;
 const archive = og.formats.archive;
-const Image = og.formats.image.Image;
+const Image = og.image.Image;
 const Font = og.formats.font.Font;
 const model_cache = og.actor.model_cache;
 
 const menu_items = @import("menu/items.zig");
 
+/// The menu scene's assets and spacing (core module "interface", core/ui.zig `Menu`).
+pub fn scene() *const og.core.ui.Menu {
+    return &og.core.modules.ui().menu;
+}
+
 // adjust.kdt constants (defaults).
 fn startY() f32 {
-    return @floatFromInt(og.formats.adjust.getInt("MENU_START_Y", 220));
+    return @floatFromInt(og.rules.adjust.getInt(scene().start_y.name, scene().start_y.d));
 }
 fn hSpace() f32 {
-    return @floatFromInt(og.formats.adjust.getInt("MENU_H_SPACE", 47));
+    return @floatFromInt(og.rules.adjust.getInt(scene().h_space.name, scene().h_space.d));
 }
 
 /// Credits line: a heading (a line with ":") or a name. A `#N` line in `credits.inf`
@@ -80,7 +85,7 @@ pub const Menu = struct {
     models: ?*model_cache.Cache = null,
     part_tex: [8]?*c.SDL_Texture = @splat(null),
     part_tex_loaded: bool = false,
-    other: ?archive.Archive = null,
+    assets: ?og.loaders.assets.Stack = null,
     start_ms: u64 = 0,
     /// Selected item per screen (+0x1c) and the last frame's mouse: the selection
     /// changes only when the mouse moves (0x415b42).
@@ -147,44 +152,56 @@ pub const Menu = struct {
     cursor_tex: ?*c.SDL_Texture = null,
     /// Edition language (string.tab line 950): font letter sets.
     language: u8 = 0,
+    /// An OpenGorky project's title (its manifest), under the logo of the main menu.
+    mod_title: []const u8 = "",
 
     pub fn load(io: Io, gpa: Allocator, r: *c.SDL_Renderer, dat: Io.Dir) !Menu {
         var m: Menu = .{ .gpa = gpa, .io = io, .renderer = r, .text = try Image.init(gpa, 640, 480), .modes = .init() };
         errdefer m.deinit();
-        var sprites = try archive.Archive.open(io, gpa, dat, "common/sprite.dat");
-        defer sprites.close(io, gpa);
-        m.other = try archive.Archive.open(io, gpa, dat, "common/other.dat");
-        const other = &m.other.?;
+        m.assets = try .classic(io, gpa, dat);
+        const other = &m.assets.?;
+        _ = try other.archiveOf("common/sprite.dat");
+        _ = try other.archiveOf("common/other.dat");
         // 0x47ad40: language ≤ 1 — the menu's second page `3d_menu_1_1` (the glow the
         // same), else the language set `<name>_N<suffix>`.
-        m.language = lang_mod.language(io, gpa, dat);
-        var nb: [2][48]u8 = undefined;
-        m.font = menu_font.loadFont(io, gpa, r, other, "3d_menu_1", lang_mod.setName(&nb[0], "3d_menu", m.language) orelse "3d_menu_1_1");
-        m.glow = menu_font.loadFont(io, gpa, r, other, "3d_menug_1", lang_mod.setName(&nb[1], "3d_menug", m.language) orelse "3d_menug_1");
-        m.logo = menu_font.loadTex(io, gpa, r, other, "gorky.3df");
-        m.logo_light = menu_font.loadTex(io, gpa, r, other, "gorky-light.3df");
-        m.circle = menu_font.loadTex(io, gpa, r, other, "white_circle.3df");
-        m.flare = menu_font.loadTex(io, gpa, r, other, "menuflare.3df");
-        m.lens = menu_font.loadTex(io, gpa, r, other, "lens.3df");
-        m.lens2 = menu_font.loadTex(io, gpa, r, other, "lens2.3df");
+        m.language = og.core.entity.texts.language; // loaders.loadCore read string.tab
+        var nb: [5][48]u8 = undefined;
+        const sc = scene();
+        const font1 = std.fmt.bufPrint(&nb[2], "{s}_1", .{sc.font}) catch sc.font;
+        const glow1 = std.fmt.bufPrint(&nb[3], "{s}_1", .{sc.glow}) catch sc.glow;
+        const font11 = std.fmt.bufPrint(&nb[4], "{s}_1_1", .{sc.font}) catch sc.font;
+        m.font = menu_font.loadFont(gpa, r, other, font1, lang_mod.setName(&nb[0], sc.font, m.language) orelse font11);
+        m.glow = menu_font.loadFont(gpa, r, other, glow1, lang_mod.setName(&nb[1], sc.glow, m.language) orelse glow1);
+        m.logo = menu_font.loadTex(gpa, r, other, og.rules.campaign().menu_logo);
+        m.logo_light = menu_font.loadTex(gpa, r, other, sc.light);
+        m.circle = menu_font.loadTex(gpa, r, other, sc.circle);
+        m.flare = menu_font.loadTex(gpa, r, other, sc.flare);
+        m.lens = menu_font.loadTex(gpa, r, other, sc.lens);
+        m.lens2 = menu_font.loadTex(gpa, r, other, sc.lens2);
         // Slider arrows: strzalka.3df ([0x51d8b8], 0x414e6a); slot name cursor:
         // kursor.3df ([0x51d8a4], 0x4153f7). The exe loads strzalka_glow.3df
         // ([0x51d8bc]) but never draws it.
-        m.arrow = menu_font.loadTex(io, gpa, r, other, "strzalka.3df");
-        m.cursor_tex = menu_font.loadTex(io, gpa, r, other, "kursor.3df");
-        if (other.find("01_credits_1.fnt")) |e| {
-            const b = try other.readAlloc(io, gpa, e);
+        m.arrow = menu_font.loadTex(gpa, r, other, sc.arrow);
+        m.cursor_tex = menu_font.loadTex(gpa, r, other, sc.cursor);
+        const ua = og.core.modules.ui().assets;
+        var cfb: [80]u8 = undefined;
+        const credits_1 = std.fmt.bufPrint(&cfb, "fonts/{s}_1.fnt", .{ua.credits_font}) catch "";
+        if (other.read(gpa, credits_1)) |b| {
             try m.credits_font_bytes.append(gpa, b);
             m.credits_font = og.formats.font.parse(b) catch null;
-        }
-        // Language letter sets `01_credits_N_xx.fnt` (0x47b2a0): the main font with
+        } else |err| if (err != error.NotFound) return err;
+        // Language letter sets `<credits_font>_N_xx.fnt` (0x47b2a0): the main font with
         // set N's letters overlaid; a `#N` line picks the set.
         if (m.credits_font) |cf| {
             for (&m.credits_sets) |*s| s.* = cf;
-            for (other.entries) |*e| {
-                if (!std.ascii.startsWithIgnoreCase(e.name, "01_credits_") or std.ascii.eqlIgnoreCase(e.name, "01_credits_1.fnt")) continue;
-                const k = std.fmt.charToDigit(e.name["01_credits_".len], 10) catch continue;
-                const b = try other.readAlloc(io, gpa, e);
+            // The sets listed: the archive (assets have no listing yet).
+            for ((try other.archiveOf("common/other.dat")).entries) |*e| {
+                var px: [80]u8 = undefined;
+                const pre = std.fmt.bufPrint(&px, "{s}_", .{ua.credits_font}) catch continue;
+                if (e.name.len <= pre.len or !std.ascii.startsWithIgnoreCase(e.name, pre) or std.ascii.eqlIgnoreCase(e.name, std.fs.path.basename(credits_1))) continue;
+                const k = std.fmt.charToDigit(e.name[pre.len], 10) catch continue;
+                var pb: [og.loaders.assets.max_path]u8 = undefined;
+                const b = try other.read(gpa, og.loaders.assets.fromEntry(&pb, "common/other.dat", e.name) orelse continue);
                 try m.credits_font_bytes.append(gpa, b);
                 const extra = og.formats.font.parse(b) catch continue;
                 for (&m.credits_sets[k].glyphs, extra.glyphs) |*g, x| if (x != null) {
@@ -192,19 +209,17 @@ pub const Menu = struct {
                 };
             }
         }
-        if (sprites.find("save.spr")) |e| {
-            const data = try sprites.readAlloc(io, gpa, e);
+        if (other.read(gpa, ua.save)) |data| {
             defer gpa.free(data);
-            m.save_frame = gfx.loadSmooth(gpa, r, "save.spr", data) catch .{};
-        }
-        if (sprites.find("credits.spr")) |e| {
-            const data = try sprites.readAlloc(io, gpa, e);
+            m.save_frame = gfx.loadSmooth(gpa, r, ua.save, data) catch .{};
+        } else |err| if (err != error.NotFound) return err;
+        if (other.read(gpa, ua.credits)) |data| {
             defer gpa.free(data);
-            m.credits_bg = try gfx.loadFrames(gpa, r, "credits.spr", data);
-        }
+            m.credits_bg = try gfx.loadFrames(gpa, r, ua.credits, data);
+        } else |err| if (err != error.NotFound) return err;
         var lang = try archive.Archive.open(io, gpa, dat, "common/lang.dat");
         defer lang.close(io, gpa);
-        if (lang.find("credits.inf")) |e| {
+        if (lang.find(og.rules.campaign().credits)) |e| {
             m.credits_text = try lang.readAlloc(io, gpa, e);
             try m.layoutCredits();
         }
@@ -238,7 +253,7 @@ pub const Menu = struct {
         self.glow.deinit();
         for ([_]?*c.SDL_Texture{ self.logo, self.logo_light, self.circle, self.flare, self.lens, self.lens2, self.arrow, self.cursor_tex }) |t| if (t) |x| c.SDL_DestroyTexture(x);
         for (self.part_tex) |t| if (t) |x| c.SDL_DestroyTexture(x);
-        if (self.other) |*o| o.close(self.io, self.gpa);
+        if (self.assets) |*o| o.deinit();
         if (self.text_tex) |t| c.SDL_DestroyTexture(t);
         for (self.slots) |s| if (s) |b| self.gpa.free(b);
         for (self.thumbs) |t| if (t) |x| c.SDL_DestroyTexture(x);
@@ -312,12 +327,12 @@ pub const Menu = struct {
             // creation (0x51dbb4), leaving room for the left arrow between name and number.
             .gain, .gamma => if (sliderValue(self, it)) |v| std.fmt.bufPrint(buf, "{s}    {d}", .{ name, @as(i32, @intFromFloat(@round(v))) }) catch name else name,
             // Shadows: list "disabled" / "enabled" (326/327), label "%s: %s" (0x414c40).
-            .shadows => std.fmt.bufPrint(buf, "{s}: {s}", .{ name, if (self.shadows) |sh| (if (sh.*) self.str(327, "enabled") else self.str(326, "disabled")) else "" }) catch name,
+            .shadows => std.fmt.bufPrint(buf, "{s}: {s}", .{ name, if (self.shadows) |sh| (if (sh.*) self.str(og.core.ui_text.id(.menu_enabled), "enabled") else self.str(og.core.ui_text.id(.menu_disabled), "disabled")) else "" }) catch name,
             // Slot: the save name or "empty N" (311); a name being typed as is.
             .slot => |k| blk: {
                 if (self.editing == k) break :blk self.edit_buf[0..self.edit_len];
                 if (self.slots[k]) |n| break :blk n;
-                break :blk std.fmt.bufPrint(buf, "{s} {d}", .{ self.str(311, "empty"), k + 1 }) catch "empty";
+                break :blk std.fmt.bufPrint(buf, "{s} {d}", .{ self.str(og.core.ui_text.id(.menu_empty), "empty"), k + 1 }) catch "empty";
             },
             else => name,
         };
@@ -527,7 +542,7 @@ pub const Menu = struct {
     /// credits leave only on Esc (`escape`).
     pub fn back(self: *Menu) void {
         if (self.editing != null or self.screen == .credits) return;
-        self.sound = "click";
+        self.sound = og.core.modules.ui().sounds.click;
         self.screen = switch (self.screen) {
             .sound, .graphics => .options,
             .main, .ingame => return,
@@ -540,7 +555,7 @@ pub const Menu = struct {
     pub fn escape(self: *Menu) void {
         if (self.editing != null) {
             self.editing = null;
-            self.sound = "click";
+            self.sound = og.core.modules.ui().sounds.click;
             return;
         }
         if (self.screen == .credits) {
@@ -572,11 +587,11 @@ pub const Menu = struct {
         switch (it.kind) {
             // Action item (0x414aa0): "click", then the action.
             .action => |a| {
-                self.sound = "click";
+                self.sound = og.core.modules.ui().sounds.click;
                 return a;
             },
             .open => |scr| {
-                self.sound = "click";
+                self.sound = og.core.modules.ui().sounds.click;
                 if (scr == .credits) {
                     self.show(.credits);
                     return .none;
@@ -594,19 +609,19 @@ pub const Menu = struct {
             .shadows => if (self.shadows) |sh| {
                 sh.* = !sh.*;
                 self.options_changed = true;
-                self.sound = "click";
+                self.sound = og.core.modules.ui().sounds.click;
             },
             // Slot (0x415660): load — "keyaccept", then the file if present; save —
             // name entry ("click"; "empty N" is cleared), a second click or Enter saves
             // (0x4157fc).
             .slot => |k| if (self.screen == .load) {
-                self.sound = "keyaccept";
+                self.sound = og.core.modules.ui().sounds.key_accept;
                 if (self.slots[k] != null) return .{ .load = k };
             } else if (self.editing == k) {
                 return .{ .save = k };
             } else {
                 self.editing = k;
-                self.sound = "click";
+                self.sound = og.core.modules.ui().sounds.click;
                 const n = self.slots[k] orelse "";
                 self.edit_len = @min(n.len, self.edit_buf.len);
                 @memcpy(self.edit_buf[0..self.edit_len], n[0..self.edit_len]);

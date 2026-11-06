@@ -1,20 +1,19 @@
 //! Location world data: script objects, grids, scene/battle state and host requests,
 //! plus small helpers without subsystem logic.
 //!
-//! Data layer: imports only data and leaf modules (formats, script objects, fields,
+//! Data layer: imports only data and leaf modules (the map, script objects, fields,
 //! actor). Creation and ticks live in game/life.zig; behaviour is free functions in
 //! `src/world/*.zig` and the subsystems taking `self: *World` (`walk.partyWalk(w, …)`).
 
 const std = @import("std");
 const fields = @import("../fields.zig");
-const mouse_mod = @import("mouse.zig");
 const scene_state = @import("scene.zig");
 const object = @import("object.zig");
 const groups = @import("groups.zig");
 const outbox = @import("../outbox.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const level_files = @import("../formats.zig").level_files;
+const core_map = @import("../core.zig").map;
 const camera = @import("../actor.zig").camera;
 const actor_mod = @import("../actor.zig");
 const model_cache = @import("../actor.zig").model_cache;
@@ -55,12 +54,10 @@ pub const World = struct {
     actor_objs: std.ArrayList(*Object) = .empty,
     actor_scanned: usize = 0,
     ambient_class: ?*@import("../script.zig").object.Class = null,
-    /// Ground-floor walk grid `.wm`.
-    walk_map: ?level_files.WalkMap = null,
-    /// Second floor `.wm2` (roofs, platforms); an actor's floor is `Actor.map`.
-    walk_map2: ?level_files.WalkMap = null,
-    /// `.ap` paths (ladders, planks, steps) and their `<path>.pth` script objects.
-    paths: []level_files.Path = &.{},
+    /// The level's map: walk and battle grids, areas, paths (composition fills it at
+    /// level entry: loaders/map.zig).
+    map: core_map.Map = .{},
+    /// `<path>.pth` script objects of `map.paths`.
     path_scripts: []?*Object = &.{},
     /// Actor running NodeResponse (implicit argument of Actor* builtins).
     node_actor: ?*Object = null,
@@ -84,11 +81,11 @@ pub const World = struct {
     flow: groups.Flow = .{},
     act: groups.Act = .{},
     debug: groups.Debug = .{},
-    selected_hero: []const u8 = "Sullivan",
+    /// The selected hero's object name (game/life.zig create: the campaign's leader first).
+    selected_hero: []const u8 = "",
     /// Location camera, chosen after the level's initCamera().
     cam: camera.Camera = .ortho,
     /// string.tab, set by the host.
-    strings: ?*const @import("../formats.zig").strtab.Table = null,
     /// Name counter for TimeBombLarge<N>, TimeBomb<N>, TimeBombExplode<N>, Distractor<N>.
     bombs_placed: u32 = 0,
     /// Fighter shadows (`__shadows__`, 0x411f35…0x411f74): hero positions here when
@@ -100,21 +97,25 @@ pub const World = struct {
     nav_cells: []?u32 = &.{},
     /// Battle music drawn at load (`life.battleMusic`); null: none or the level's own.
     battle_music: ?[]const u8 = null,
+    /// An OpenGorky location's maker of Weapon_New/Item_New objects and battle devices from
+    /// an archetype block (world/start.zig `newBlockItem`: `"items::food"`)
+    /// with native state `nat`; null: Classic, from the class file (inventory/create.zig objectOf).
+    block_item: ?*const fn (w: *World, name: []const u8, class: []const u8, nat: object.Native) anyerror!?*Object = null,
     /// Examine menu (0x457340) instead of an immediate action; enabled by a host with a GUI.
     examine_menus: bool = false,
     /// Another GUI mode is above battle (level-up window, 0x4af7c2): battle pauses.
     gui_hold: bool = false,
-    /// Mouse mode: use/give item, push, aim (state/mouse.zig).
-    mouse: mouse_mod.Mouse = .{},
     /// Lookup of other loaded locations for GO_RunFun("01_port", …); set by the host.
     resolver: ?Resolver = null,
-    /// Battle grid `.cm` (PlaceActor by cell).
-    combat_map: ?level_files.CombatMap = null,
-    /// Location areas (`.ar`, PlaceActor).
-    areas: []level_files.Area = &.{},
+    /// OpenGorky hooks (`rules\hooks.ss`, state/hooks.zig): the game object (outside the
+    /// location's list) with the file's game components; null in Classic and without the file.
+    hooks: ?*Object = null,
     ticks: u64 = 0,
     /// Running battle (`NN__*` locations), created after scripts start.
     battle: ?battle_mod.Battle = null,
+    /// No battle, effects alone (the editor's preview): a part aimed at each fighter on
+    /// the hit tiles (`each_hit`) aims at the target instead of at none.
+    fx_alone: bool = false,
     /// Discovered immunities: the game's (`Options.immunity`, game.Game), else own.
     immunity: *immunity_mod.Known,
     own_immunity: immunity_mod.Known = .{},
@@ -126,19 +127,25 @@ pub const World = struct {
         if (self.rt.findObject(name)) |o| self.selected_hero = o.name;
     }
 
-    /// The player may pick this hero: Medusa only on a battle level (portrait 0x4b2761,
-    /// field click 0x451467; selection 0x45acb0 itself has no such check).
+    /// The player may pick this hero: one whose CanSelect says no (native BattleOnly:
+    /// Medusa) only on a battle level (portrait 0x4b2761, field click 0x451467; selection
+    /// 0x45acb0 itself has no such check).
     pub fn playerCanSelect(self: *World, o: *Object) bool {
-        return self.isCombat() or !fields.isMedusa(o);
+        return self.isCombat() or self.canSelect(o);
+    }
+
+    /// Hero `o`'s CanSelect (native BattleOnly: no); the engine's: may. Out of memory
+    /// reads as may (no error path here).
+    pub fn canSelect(self: *World, o: *Object) bool {
+        const script = @import("../script.zig");
+        const v = (script.dispatch.call(&self.rt, o, script.traits.method("Hero.CanSelect"), &.{}) catch return true) orelse return true;
+        return v.truth();
     }
 
     pub fn destroy(self: *World) void {
         const gpa = self.gpa;
         self.deinitScripts();
-        self.res.lang.close(self.io, self.gpa);
-        self.res.common.close(self.io, self.gpa);
-        self.res.sprites.close(self.io, self.gpa);
-        self.res.other.close(self.io, self.gpa);
+        self.res.source.deinit();
         gpa.destroy(self);
     }
 
@@ -179,7 +186,24 @@ pub const World = struct {
         n.* = init;
         const o = try self.rt.createObject(name, cls);
         o.host = n;
+        o.kind = @import("../script.zig").traits.ofHost(hostKind(o, n.*));
         return o;
+    }
+
+    /// The OGS host kind of world object `o` (`Object.kind`: `x is Fighter`, `param item`):
+    /// a combat level is a battle, an actor with `walk_range` a fighter (as the roster takes
+    /// it), an ambient sound or a hooks object only an object.
+    fn hostKind(o: *Object, n: object.Native) []const u8 {
+        return switch (n.kind) {
+            .level => if (o.class.isA("combatlevel")) "battle" else "level",
+            .animation => "anim",
+            .active_animation => "active_anim",
+            .area => "area",
+            .item => "item",
+            .weapon => "weapon",
+            .actor => if (n.obstacle) "obstacle" else if (fields.isFighter(o)) "fighter" else "actor",
+            .ambient, .other => "object",
+        };
     }
 
     /// Location object from script file `file` (name = file without extension); the level
@@ -189,7 +213,7 @@ pub const World = struct {
         const ext = std.fs.path.extension(file);
         if (object.kindOf(ext) == .other) return null;
         const cls = self.rt.loadClass(file) catch |err| {
-            std.log.warn("{s}: {s}:{d}: {s} ({t})", .{ file, self.rt.diag_file, self.rt.diag.line, self.rt.diag.message, err });
+            std.log.warn("{s}: {f} ({t})", .{ file, self.rt.diag, err });
             return null;
         };
         var nat = object.nativeFor(ext);
@@ -202,7 +226,7 @@ pub const World = struct {
     /// Level actorScale, default 0.15 (0x51e24c, 0x421907).
     pub fn actorScale(self: *World) f32 {
         var s = model_cache.default_actor_scale;
-        if (self.level) |l| if (l.getVar("actorScale")) |v| {
+        if (self.level) |l| if (l.getVar("actor_scale")) |v| {
             if (v.value.toFloat() > 0) s = v.value.toFloat();
         };
         return s;
@@ -212,7 +236,7 @@ pub const World = struct {
     pub const AreaAction = struct { action: u8, name: []const u8 };
 
     pub const ExamineEntry = union(enum) {
-        /// Action k (`funcID`, `funcID1`…): string.tab operation id.
+        /// Action k (`action`, `action1`…): string.tab operation id.
         action: struct { k: u8, id: i32 },
         /// "Use <item>" (`use_item_N`, held by the party, counter > 0).
         use: *Object,
@@ -233,29 +257,38 @@ pub const World = struct {
         return null;
     }
 
-    pub const max_party = 6;
+    /// Party buffers' size; the party is at most rules Value(party_max) (the exe's 6).
+    pub const party_cap = 12;
+    /// The fewest rules Value(party_max) may say (the editor refuses others; a hand-written one is clamped).
+    pub const party_min = 3;
 
     /// The party in panel order (see `party`); `slice()` on a local copy.
     pub const Party = struct {
-        buf: [max_party]*Object = undefined,
+        buf: [party_cap]*Object = undefined,
         len: usize = 0,
         pub fn slice(self: *const Party) []const *Object {
             return self.buf[0..self.len];
         }
     };
 
-    /// The party in panel order: the three `gamestart` heroes, then those who joined.
+    /// The party in panel order: rules Campaign.panel_first (the three `gamestart`
+    /// heroes), then those who joined.
     pub fn party(self: *World) Party {
         var p: Party = .{};
-        for ([_][]const u8{ "Sullivan", "Ovitz", "Trantigne" }) |name| {
+        const rules = @import("../rules.zig");
+        const max: usize = @intCast(std.math.clamp(rules.value(.party_max), party_min, party_cap));
+        var names = std.mem.tokenizeAny(u8, rules.campaign().panel_first, " ,");
+        while (names.next()) |name| {
+            if (p.len == max) break;
             const o = self.actorObject(name) orelse continue;
             if (!nativeOf(o).hero or nativeOf(o).deleted) continue;
+            if (std.mem.indexOfScalar(*Object, p.buf[0..p.len], o) != null) continue;
             p.buf[p.len] = o;
             p.len += 1;
         }
         for (self.rt.objects.items) |o| {
             const nat = nativeOf(o);
-            if (p.len == max_party) break;
+            if (p.len == max) break;
             if (!nat.hero or nat.kind != .actor or nat.deleted) continue;
             if (std.mem.indexOfScalar(*Object, p.buf[0..p.len], o) != null) continue;
             p.buf[p.len] = o;
@@ -277,13 +310,13 @@ pub const World = struct {
 
     pub fn speedScale(self: *World) f32 {
         const l = self.level orelse return 1;
-        const v = l.getVar("speedScale") orelse return 1;
+        const v = l.getVar("speed_scale") orelse return 1;
         return if (v.value.toFloat() > 0) v.value.toFloat() else 1;
     }
 
     pub fn stringOr(self: *World, id: i32, fallback: []const u8) []const u8 {
-        if (self.strings) |t| if (t.get(id)) |s| return s;
-        return fallback;
+        _ = self;
+        return @import("../core.zig").entity.texts.get(id) orelse fallback;
     }
 
     /// Scene moving to another location (LOADLEVEL, PREVLEVEL): name, next command and

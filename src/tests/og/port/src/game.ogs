@@ -1,0 +1,22 @@
+game port {
+    party = [characters::Sullivan];
+    start = ~l"01_port";
+    leader = @Sullivan;
+    intro = ["introkon.avi"];
+    startup = ["logo1.avi", "monolith.avi", "topware.avi", "logo.avi", "presents.avi", "intro.avi"];
+    menu_logo = "gorky.3df";
+    credits = "credits.inf";
+    music = Music(menu = "menu", credits = "credits");
+    anims = Anims(
+        fight_look = "fightlook",
+        fight_look_two_handed = "g_fightlook",
+        hide_back = "hide_back",
+    );
+    holds = Holds(one_hand = "one_hand", two_hands = "two_hands", back = "back");
+}
+component Hooks for game {
+    var int started = 0;
+    fn OnStart() {
+        started = helper();
+    }
+}

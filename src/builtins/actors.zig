@@ -7,7 +7,7 @@ const areas = @import("../world.zig").areas;
 const queue = @import("../world.zig").queue;
 const walk = @import("../world.zig").walk;
 const bitmap_anim = @import("../world.zig").bitmap_anim;
-const level_files = @import("../formats.zig").level_files;
+const level_files = @import("../core.zig").map;
 const actor_mod = @import("../actor.zig");
 const runtime = @import("../script.zig").runtime;
 const world_mod = @import("../state.zig").world;
@@ -16,6 +16,7 @@ const Object = @import("../script.zig").object.Object;
 const Runtime = runtime.Runtime;
 const Value = @import("../script.zig").value.Value;
 const args_mod = @import("args.zig");
+const flagArg = args_mod.flagArg;
 const inventory = @import("../inventory.zig");
 
 /// ABA_Impulse("object") (0x4c03b0 → 0x4b4400(0)): the script passes no lock.
@@ -42,25 +43,8 @@ pub fn biPlaceActor(ctx: *anyopaque, rt: *Runtime, _: *Object, args: []const Val
     if (!o.enabled or World.nativeOf(o).kind != .actor or args.len < 3) return .zero;
     if (args[1] == .int) {
         if (args[2] != .int) return .zero;
-        // Battle grid tile: tile corner at (centerX, centerY), tiles of xSize×ySize
-        // along world X and Y, floor at centerZ. The queue is not reset.
-        const cm = w.combat_map orelse return .{ .int = 1 };
-        const cx = args[1].toFloat();
-        const cy = args[2].toFloat();
-        // Shift to the block centre by charSize (0x499ce0): 1 → 0.5, 4 → 1, 9 → 1.5.
-        const off: f32 = switch (fields.charSize(o)) {
-            1 => 0.5,
-            4 => 1.0,
-            9 => 1.5,
-            else => 0,
-        };
-        const wp = cm.toWorld(cx + off, cy + off);
-        fields.setPos(o, .{ wp[0], wp[1], cm.center[2] });
-        // Direction in eighths of a turn: dir·π/4 (0x48e90a); without a fourth argument
-        // it is 0 (0x4bf1dd).
-        const dir: f32 = if (args.len > 3 and args[3] == .int) args[3].toFloat() else 0;
-        fields.setAngle(o, dir * std.math.pi / 4.0);
-        world_mod.actorOf(o).placed = true;
+        // Without a fourth argument the direction is 0 (0x4bf1dd).
+        queue.placeOnTile(w, o, args[1].toFloat(), args[2].toFloat(), if (args.len > 3 and args[3] == .int) args[3].toFloat() else 0);
         return .{ .int = 1 };
     }
     if (args[1] != .string or args[2] != .int) return .zero;
@@ -89,12 +73,14 @@ pub fn biRegisterAnimation(ctx: *anyopaque, _: *Runtime, self: *Object, args: []
 }
 
 /// Actor_TextEffect(actor, string) (0x4c0700): a string.tab popup over the actor,
-/// like "No ammo" in battle: colour cfcNoammo, sound `battle_noammo`.
+/// like "No ammo" in battle: colour cfcNoammo, sound `battle_noammo`. The text: its number,
+/// or an interface text's key (core/ui_text.zig: `actor::TextEffect(h, "no_ammo")`).
 pub fn biActorTextEffect(ctx: *anyopaque, _: *Runtime, _: *Object, args: []const Value) anyerror!Value {
     const w = args_mod.worldOf(ctx);
     const o = w.actorObject(args_mod.argString(args, 0)) orelse return .zero;
     if (!world_mod.actorOf(o).placed or args.len < 2) return .zero;
-    try textEffect(w, o, w.stringOr(args[1].toInt(), "No ammo"));
+    const id = if (args[1] == .string) @import("../core.zig").ui_text.idNamed(args[1].string) orelse return .zero else args[1].toInt();
+    try textEffect(w, o, w.stringOr(id, "No ammo"));
     return .zero;
 }
 
@@ -129,7 +115,7 @@ pub fn biActorActivateLink(ctx: *anyopaque, rt: *Runtime, _: *Object, args: []co
     const o = args_mod.targetObject(ctx, rt, args) orelse return .zero;
     const item = rt.findObject(args_mod.argString(args, 1)) orelse return .zero;
     if (!world_mod.isActor(o)) return .zero;
-    try args_mod.setLink(w, world_mod.actorOf(o), if (item.getInt("two_handed") == 1) "two_hands" else "one_hand", fields.meshFile(item));
+    try args_mod.setLink(w, world_mod.actorOf(o), if (item.getInt("two_handed") == 1) @import("../core.zig").modules.ui().holds.two_hands else @import("../core.zig").modules.ui().holds.one_hand, fields.meshFile(item));
     return .zero;
 }
 
@@ -160,7 +146,6 @@ pub fn biRegisterExtraBody(ctx: *anyopaque, _: *Runtime, self: *Object, args: []
     const w = args_mod.worldOf(ctx);
     const mesh = try w.arena_state.allocator().dupe(u8, args[2].string);
     const slot = &world_mod.actorOf(self).extra_bodies[@intCast(args[0].int)];
-    if (slot.*) |*old| for (&old.poses) |*p| p.deinit(w.gpa);
     slot.* = .{ .mesh = mesh, .still = args[1].int != 0 };
     return .zero;
 }
@@ -193,17 +178,18 @@ fn putItem(w: *World, args: []const Value, front: bool) !Value {
     const item = inventory.equipment.equipped(w, o, .hand) orelse return .zero;
     if (item.getInt("two_handed") != 1) return .zero;
     const mesh = try w.arena_state.allocator().dupe(u8, fields.meshFile(item));
+    const ui = @import("../core.zig").modules.ui();
     const cmds: []const actor_mod.command.Command = if (front) &.{
         .wait_blend,
         .unlink,
         .{ .state = 1 },
-        .{ .async_anim = .{ .name = "hide_back", .reverse = true } },
+        .{ .async_anim = .{ .name = ui.anims.hide_back, .reverse = true } },
         .{ .delay = 30 },
-        .{ .link = .{ .link = "two_hands", .mesh = mesh } },
+        .{ .link = .{ .link = ui.holds.two_hands, .mesh = mesh } },
     } else &.{
-        .{ .anim = "hide_back" },
+        .{ .anim = ui.anims.hide_back },
         .unlink,
-        .{ .link = .{ .link = "back", .mesh = mesh } },
+        .{ .link = .{ .link = ui.holds.back, .mesh = mesh } },
         .{ .state = 0 },
     };
     try world_mod.actorOf(o).queue.appendSlice(w.gpa, cmds);
@@ -426,14 +412,9 @@ pub fn biActorAnimation(ctx: *anyopaque, _: *Runtime, _: *Object, args: []const 
     if (flagArg(args, 1)) a.instant = true;
     a.play(a.resolve(args_mod.argString(args, 0)), false, true);
     if (flagArg(args, 2)) a.instant = true;
-    a.reverse = args_mod.reverseFlag(args);
+    a.reverse = flagArg(args, 3);
     a.hold_move = true;
     return .zero;
-}
-
-/// Int argument `i` equal to 1 (0x4c6510 == 1 after the type check).
-fn flagArg(args: []const Value, i: usize) bool {
-    return args.len > i and args[i] == .int and args[i].int == 1;
 }
 
 /// ActorAsyncAnimation("anim", a, b, reverse) (0x4bfb20 → command 0x14, 0x428980):
@@ -443,7 +424,7 @@ pub fn biActorAsyncAnimation(ctx: *anyopaque, _: *Runtime, _: *Object, args: []c
     if (flagArg(args, 1)) a.instant = true;
     a.play(a.resolve(args_mod.argString(args, 0)), false, true);
     if (flagArg(args, 2)) a.instant = true;
-    a.reverse = args_mod.reverseFlag(args);
+    a.reverse = flagArg(args, 3);
     a.hold_move = false;
     return .zero;
 }
@@ -455,7 +436,7 @@ pub fn biActorQueueWalkAnimation(ctx: *anyopaque, _: *Runtime, _: *Object, args:
     const a = args_mod.nodeActor(ctx) orelse return .zero;
     a.queued_anim = args_mod.argString(args, 0);
     a.queued_instant = flagArg(args, 1);
-    a.queued_reverse = args_mod.reverseFlag(args);
+    a.queued_reverse = flagArg(args, 3);
     return .zero;
 }
 
@@ -466,8 +447,8 @@ pub fn biActorAdjustAngle(ctx: *anyopaque, _: *Runtime, _: *Object, _: []const V
     const w = args_mod.worldOf(ctx);
     const o = w.node_actor orelse return .zero;
     const ev = w.node_cur orelse return .zero;
-    if (ev.path >= w.paths.len) return .zero;
-    const pts = w.paths[ev.path].points;
+    if (ev.path >= w.map.paths.len) return .zero;
+    const pts = w.map.paths[ev.path].points;
     if (pts.len == 0) return .zero;
     fields.setAngle(o, pts[@min(ev.no, pts.len - 1)][2]);
     return .zero;
@@ -596,5 +577,5 @@ pub fn biAdjustAngle(_: *anyopaque, _: *Runtime, self: *Object, args: []const Va
 /// Popup over an actor (TextEffect 0x4c8830): cfcNoammo, scale 0.6, sound `battle_noammo`.
 fn textEffect(w: *World, o: *Object, text: []const u8) !void {
     try w.popups.append(w.gpa, popup_mod.Popup.make(fields.pos(o), text, .notice));
-    w.out.sound(w.gpa, "battle_noammo", null);
+    w.out.sound(w.gpa, @import("../core.zig").modules.ui().sounds.no_ammo, null);
 }

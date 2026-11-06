@@ -1,0 +1,435 @@
+// foundation/hosts.ogs: the fields of every data block kind, as the language declares them
+// (read-only in a project). A block takes its kind's host's fields and its parents'; each
+// field's text in English and, after `ru`, Russian. The engine's schema (src/core/schema.zig)
+// must agree with it: a test checks every field's name and type both ways.
+
+host gameobject {
+    int classic_id = 0
+        "The object's number in Classic: keys its texts (string.tab) and its rules rows. Unset: the converter assigns a free one when the object has its own text.";
+    string name = ""
+        "The object's name shown in the game (a hint over it, an inventory name).";
+    string examine = ""
+        "What examining the object says.";
+    bool pickable = false
+        "false: the pointer ignores the object (decor, a used cover, an exit not yet open). Default true.";
+}
+
+// Blocks: actor
+host actor : gameobject {
+    float x = 0.0
+        "Position on the level, world units.";
+    float y = 0.0
+        "Position on the level, world units.";
+    float z = 0.0
+        "Height on the level, world units.";
+    float angle = 0.0
+        "The direction the actor faces, radians.";
+    float scale = 0.0
+        "Model scale; 0 or less means 1. Read only for items lying on the ground.";
+    float turn_speed = 0.0
+        "How far the actor turns per tick, radians; 0 or less means 0.1.";
+    string portrait = ""
+        "The actor's portrait picture (the hero panel).";
+    string mesh = ""
+        "The actor's model file.";
+    Gender gender = 0
+        "male or female: women do not push objects, only men groan when healed.";
+    look look = ""
+        "The look block (looks::name) giving the model, portrait and animations; this block's own fields override it. Unset: the nearest archetype's.";
+    any tile = nil
+        "Battle grid tile the actor starts on: [x, y] or [x, y, direction].";
+    any at = nil
+        "Where a prop stands on the battle grid: [x, y, angle] (grid units, whole numbers at a tile corner; degrees).";
+    any report_icon = nil
+        "Rules row KillIcon: its icon in the battle report when it is killed (report_icon = \"nato_capitan_rap\"); a fighter's or hero's own wins over this one.";
+}
+
+// Blocks: fighter hero
+host fighter : actor {
+    any battle_class = nil
+        "The fighter class by name (battle_class = smokerider; generic is 100): picks the class's abilities, AI profile and other rules rows keyed by class. Every block of one class shares the class rows (class_ai).";
+    any report_icon = nil
+        "Rules row KillIcon: the kill icon of the after-battle report (report_icon = \"icon\"). Empty: the fighter shows no icon there.";
+    any immunity = nil
+        "Rules row Resist: the monster's resistances and armour class (immunity = Resist(resist = [fire, gas], armor = -1)), the one place they are set.";
+    any ai = nil
+        "Two forms. A record is this fighter's AiProfile rules row over its class's (ai = AiProfile(attack_weight = 10, mode = ...)); a string is the generic fighter's strategy: standard (default), focused (damage only, ignores decoys), sleep_hunter (melee on sleepers, the other weapon on the awake) or stationary (never walks).";
+    any class_ai = nil
+        "Rules row AiProfile keyed by battle_class: the AI profile of the whole class (class_ai = AiProfile(lock = ..., ...)). Blocks of one class must write the same row; the later one wins.";
+    any ai_profile = nil
+        "A shared AI profile block (ai_profile = ai::garcia): its AiProfile row is applied first, this fighter's own ai row over it.";
+    any abilities = nil
+        "Rules row Abilities: special battle abilities over the ordinary fighter (abilities = Abilities(double_turn = true, immobile = true, ...)). Unset parts stay ordinary.";
+    any glow = nil
+        "Rules row Glow: the actor glows (glow = Glow(); effect, links, size, rgb as the record sets them; the Incubus's).";
+    any class_abilities = nil
+        "Rules row Abilities keyed by battle_class: the special abilities of the whole class (class_abilities = Abilities(monitor = true, kill_credit = false)). Blocks of one class must write the same row; the later one wins.";
+    any device = nil
+        "Rules row Device: the battle places this block as a device (device = Device(kind = time_bomb, prefix = \"TimeBomb\", timer = 2)): object <prefix><N>, a bomb explodes after timer enemy turns.";
+    any strikes = nil
+        "Rules rows MonsterAttack: the fighter's strike per weapon (strikes = [MonsterAttack(weapon = ..., anim = ..., hit_delay = ...)]; weapon 0 is any other). A fighter with any such row uses them instead of the HeroAttack table.";
+    any strike_fx = nil
+        "Rules rows FighterFx: the fighter's own strike effects per weapon (strike_fx = [FighterFx(weapon = 0, pre = ..., hit = ..., second = ...)]): pre replaces the weapon's, second is the second hit of a series.";
+    any chatter = nil
+        "Rules row IdleChatter: after some time without input the selected hero plays anim, then says dialog (chatter = IdleChatter(dialog = ..., anim = ...)).";
+    any hidden_weapons = nil
+        "Rules row HiddenWeapons: weapons the fighter cannot use or draw in hand (hidden_weapons = [weapons::x, ...]).";
+    any spins = nil
+        "Rules row FighterStrike: saws spun on the model's link points at a strike tick (spins = [Spin(link = \"point\", at = tick, anim = \"obrot\")]; Headnail).";
+    any extra_wait = nil
+        "Rules row WdelayHero as a flag: true makes the hero's HeroAttack waits take their extra ticks (McFadden, Hutchens). Default false.";
+    any bonus = nil
+        "Rules row HealBonus: character bonuses (bonus = HealBonus(pct = 15, hit = 0, damage = 0, walk = 0)): pct more healing, hit chance points, percent more damage, extra walk tiles.";
+    int hp = 0
+        "Current health points. The fighter dies at 0; healing is capped by max_hp.";
+    int max_hp = 0
+        "Maximum health: caps healing, sets the kill experience reward, and the AI switches weapons below half of it.";
+    int walk_range = 0
+        "Tiles the fighter may walk per battle turn (spent tiles are subtracted). A script's WalkRange can change it for the turn.";
+    float accuracy = 0.0
+        "Hit chance skill: with the target's footprint_tiles and rage it gives the chance to hit.";
+    float luck = 0.0
+        "A hero's critical hit chance in percent (two rolls under luck); monsters never crit.";
+    float counter_attack = 0.0
+        "A hero's counter-attack chance: scaled by the counter step, rolled against 1000 when an enemy hits it with a weapon in hand. 0: never.";
+    int rage = 0
+        "Hits taken so far toward rage; counts only if max_rage is above 0, resets when the fighter goes berserk.";
+    int max_rage = 0
+        "Hits after which the fighter goes berserk (more damage). 0: no rage.";
+    int experience = 0
+        "A hero's experience points; battle gains add to it and raise level past each threshold.";
+    int level = 0
+        "A hero's level: rises as experience passes the level thresholds, each step giving stat points.";
+    int calmness = 0
+        "Kept from the original; the port does not read it.";
+    int footprint_tiles = 0
+        "The fighter's size; a bigger one is easier to hit.";
+    bool movable = false
+        "An obstacle a hero can push (a box or barrel). 0: fixed.";
+    bool explosive = false
+        "A barrel: fire, bullets, energy or explosions blow it up with blast_weapon. 0: not explosive.";
+    weapon blast_weapon = ""
+        "The weapon whose blast an exploding barrel deals.";
+    AiMode ai_mode = 0
+        "Who the AI strikes and whether it moves: free (default), target (only its locked target), passive (skips its turn), guard (keeps near its guard point). An AiProfile mode overrides it.";
+    bool move_locked = false
+        "The fighter cannot walk (wall bosses). A script may clear it.";
+    bool attack_locked = false
+        "The fighter cannot attack or counter-attack.";
+    bool outside_party = false
+        "A hero fighting on the heroes' side who is not in the party.";
+    int ai_threat_weight = 0
+        "AI tile scoring: weight of the threat foes pose to a tile. AiProfile threat_weight overrides it; all weights 0: defaults.";
+    int ai_attack_weight = 0
+        "AI tile scoring: weight of the damage it can deal from a tile. AiProfile attack_weight overrides it.";
+    int ai_guard_distance_weight = 0
+        "AI tile scoring: weight of the distance to its guard point (guard mode). AiProfile guard_distance_weight overrides it.";
+    int ai_opponent_distance_weight = 0
+        "AI tile scoring: weight of the distance to its foes. AiProfile opponent_distance_weight overrides it.";
+    ArmorClass armor = 0
+        "A monster's armour class: light, medium, heavy (the weapon's percent of each cuts its damage) or none; the larger of it and its immunity row's. A hero's: points taken off each hit (a number; the larger of it and its worn armour's).";
+    int explodable = 0
+        "An obstacle's own explosion switch: 1 a barrel whatever its class, its blast always shown; 0 never explodes. Unset: as explosive decides.";
+}
+
+// Blocks: item
+host item : gameobject {
+    float x = 0.0
+        "Position of the item on the level, X in world units (used while it lies on the ground).";
+    float y = 0.0
+        "Position of the item on the level, Y in world units.";
+    float z = 0.0
+        "Height of the item on the level in world units.";
+    float angle = 0.0
+        "Rotation of the item's model on the ground, in radians.";
+    float scale = 0.0
+        "Size multiplier of the item's model; 0 or 1 is the model's own size.";
+    any medicine = nil
+        "Rules row Medicine keyed by this item: what using it does, medicine = Medicine(kind = rage) (heal rage calm ungas wake, or random = list(~i\"items::x\", ...)). None: a medicine just heals by hp.";
+    int walk_block_radius = 0
+        "Radius in background pixels around the item whose walk cells Item_DisableWalkCircle / Item_EnableWalkCircle block or open; below 2 they do nothing.";
+    string owner = ""
+        "Name of the actor carrying the item; empty: nobody's (lies on the level or in the party pool).";
+    string icon = ""
+        "Sprite of the item in the inventory and on the ground.";
+    string mesh = ""
+        "Model shown in the hand when equipped; empty: none (model-less monster weapons).";
+    string use_anim = ""
+        "Animation a scene's USEANIMATION plays for an actor using this item.";
+    int approach_x = 0
+        "Point a hero walks to before taking the item, X in background pixels; 0 with approach_y 0: the item's own position.";
+    int approach_y = 0
+        "Walk-to point, Y in background pixels (see approach_x).";
+    float approach_angle = 0.0
+        "Direction the hero faces at the walk-to point, in radians.";
+    ItemPlace place = 0
+        "Where the item is: gone, ground, backpack, hand, armor (worn) or party. Default ground.";
+    int two_handed = 0
+        "Held with both hands: 1 picks two-handed battle poses and pushing; 2 appears on monsters' weapons only. 0: one hand.";
+    ItemKind kind = 0
+        "Item kind: other, ammo, medicine or armor; decides how the inventory uses it.";
+    int armor = 0
+        "Worn armour's points taken off each hit its wearer takes; a hero uses the larger of his own armor and the worn item's.";
+    bool resist_fire = false
+        "Worn armour protects its wearer from fire damage.";
+    bool resist_electricity = false
+        "Worn armour protects its wearer from electricity.";
+    bool resist_decoy = false
+        "Worn armour protects its wearer from decoys (attraction).";
+    bool resist_energy = false
+        "Worn armour protects its wearer from energy weapons (ion rifle, blaster).";
+    bool resist_freeze = false
+        "Worn armour protects its wearer from freezing.";
+    bool resist_sleep = false
+        "Worn armour protects its wearer from sleep.";
+    bool resist_gas = false
+        "Worn armour protects its wearer from gas.";
+    bool resist_flammable = false
+        "Worn armour protects its wearer from flammable soaking.";
+    int hp = 0
+        "Health a medicine restores (capped at the target's max_hp).";
+    int count = 0
+        "Number in the stack: rounds in an ammo pack or uses of a stackable item.";
+    int effect_power = 0
+        "Kept from the original; the port does not read it.";
+    bool visible = false
+        "Drawn on the level (0: hidden); Item_SetVisible sets it.";
+    any action = nil
+        "Action row run on a click: an action's name (Take), none (a click just walks there) or walk.";
+}
+
+// Blocks: weapon
+host weapon : item {
+    any class = nil
+        "Weapon class by name (class = pistol): the key of its WeaponClass and Pattern rows, i.e. its battle behaviour, reach and hit tiles.";
+    bool secondary = false
+        "The backup weapon: the AI uses it only while its fighter is below half health (and the main one above).";
+    int max_damage = 0
+        "Damage of a full hit; a tile of the reach takes its percent of it before armour and defence.";
+    int min_damage = 0
+        "Kept from the original; the port does not read it.";
+    int range = 0
+        "Kept from the original; the port does not read it (reach comes from the class's Pattern row).";
+    int max_range = 0
+        "Kept from the original; the port does not read it.";
+    int blast_radius = 0
+        "Kept from the original; the port does not read it (hit tiles come from the Pattern row).";
+    float move_penalty = 0.0
+        "Kept from the original; the port does not read it.";
+    int accuracy_bonus = 0
+        "Kept from the original; the port does not read it.";
+    bool long_attack = false
+        "A generic fighter strikes with its long_attack animation instead of short_attack.";
+    int bonus_experience = 0
+        "Experience a hero gets on top for a hit with this weapon.";
+    int light_armor_pct = 0
+        "Percent of the damage that passes light armour (class 0).";
+    int medium_armor_pct = 0
+        "Percent of the damage that passes medium armour (class 1).";
+    int heavy_armor_pct = 0
+        "Percent of the damage that passes heavy armour (class 2).";
+    any attack_zone = nil
+        "Another weapon class whose reach and hit tiles this weapon uses (attack_zone = shotgun); none: its own class's.";
+    any effects_from = nil
+        "Game weapon whose strike effects (flash, projectile, hit, sound) it shows: ~w\"weapons::rocket_launcher\" or a classic_id; 0: its own.";
+    int explodable = 0
+        "As a barrel's blast weapon: 1 shows its blast whatever the weapon, 0 never; unset: as the original (only weapon 1002).";
+    any skill_icon = nil
+        "Rules row SkillIcon: its icon in the weapon skills window, skill_icon = \"pistol\"; none: not listed there.";
+    any weapon_sound = nil
+        "Rules row WeaponSound: the sound at the hit, weapon_sound = \"shot\".";
+    any flags = nil
+        "Rules row WeaponFlags: flags = WeaponFlags(no_counter = true, shock, sparks, silent_frames); none: all off.";
+    any fx = nil
+        "Rules row WeaponFx: what its strike shows by stage, fx = WeaponFx(flash = [...], hit = [...], launch = ...).";
+    any hero_attack = nil
+        "Rules row HeroAttack: a hero's strike with it, hero_attack = HeroAttack(anim = \"shoot\", wait = 10); none: the default row.";
+    any class_rules = nil
+        "Rules row WeaponClass of its class: class_rules = WeaponClass(rolls_to_hit = true, effect = burn, recharge = 1, kind = napalm).";
+    any flame = nil
+        "Its own flame look (Flame(add, color, color_new, range, scale)): the flames it makes take these over the game's flame.";
+    any rocket_trail = nil
+        "Its rockets' own trail (RocketTrail(length, period, size, size_fade, fade, spread, back)) over the game's.";
+    any ball = nil
+        "Its energy ball's own countdown and scale (Ball(countdown, scale)) over the game's.";
+    any grenade = nil
+        "Its throw's own angle (Grenade(angle)) over the game's.";
+    any shock = nil
+        "Its shock's own time and light (Shock(time, light_range, light_level)) over the game's.";
+    any device = nil
+        "Rules row Device: the battle places this block as a device (device = Device(kind = blast, prefix = \"TimeBombExplode\")): a bomb's blast weapon.";
+    any class_zone = nil
+        "Rules row Pattern of its class: reach and hit tiles, class_zone = Pattern(rays = \"...\", effects = \"...\").";
+    any flash_from = nil
+        "Weapon whose flash stage (muzzle flash, beam) it shows instead; -1: none; 0: from effects_from.";
+    any launch_from = nil
+        "Weapon whose projectile stage it shows instead; -1: none; 0: from effects_from.";
+    any hit_from = nil
+        "Weapon whose hit effects it shows instead; -1: none; 0: from effects_from.";
+    string hit_sound = ""
+        "Sound at the hit instead of WeaponSound's; empty: WeaponSound's.";
+    WeaponKind damage_kind = 0
+        "Damage kind (fire, freeze, electricity, gas, bullet, melee...) checked against the target's resistances.";
+    item ammo = ""
+        "Item it fires: ammo = ~i\"items::riffleammo\"; each shot takes one from the hero's packs. None: needs no ammo.";
+    bool thrown = false
+        "true: the weapon is itself thrown and used up (grenades, knives) instead of taking ammo.";
+}
+
+// Blocks: obstacle
+host obstacle : gameobject {
+    any tile = nil
+        "Battle grid tile the obstacle stands on: [x, y] or [x, y, direction].";
+    any at = nil
+        "Where the obstacle stands on the battle grid: [x, y, angle] (grid units, whole numbers at a tile corner; degrees).";
+}
+
+// Blocks: area
+host activearea : gameobject {
+    string areaName = ""
+        "Name of the level area (.are polygon) this object is; clicks inside it reach the object.";
+    int isLevelSwitch = 0
+        "Above 0: the area is an exit; using it calls LevelSwitch and Area.OnExit. 0: an ordinary area.";
+    any action = nil
+        "The area's first action (Take, walk, none...); the action menu starts with it.";
+    bool hint_hidden = false
+        "true hides the area's hint text and marker; default false.";
+    bool examine_hidden = false
+        "true: examining the area says nothing; default false.";
+    any action1 = nil
+        "The area's second action in the menu (lift buttons); none by default.";
+    any action2 = nil
+        "The area's third action in the menu; none by default.";
+    any action3 = nil
+        "The area's fourth action in the menu; none by default.";
+}
+
+// Blocks: anim
+host bitmapanimation : gameobject {
+    int pos_x = 0
+        "Screen X of the animation on the background, pixels.";
+    int pos_y = 0
+        "Screen Y of the animation on the background, pixels.";
+    int frames_per_second = 0
+        "Playback speed, frames per second; 0 means 15.";
+    int frame = 0
+        "Current frame, from 0; reset to 0 at start, advanced by the engine and looped.";
+    string sprite = ""
+        "Sprite file with the animation frames.";
+    string depth_sprite = ""
+        "Depth (z-buffer) sprite of the frames, so actors can pass behind; empty: none.";
+    int prev_frame = 0
+        "Previous frame from the original script. No reader in OpenGorky.";
+}
+
+// Blocks: active_anim
+host activebitmapanimation : bitmapanimation {
+    int state = 0
+        "Door-like state: 0 closed, 1 opening, 2 open, 3 closing; an impulse reverses it. Default 0.";
+    bool one_shot = false
+        "true: play once while opening, then return to state 0 (explosion, dust); default false.";
+}
+
+// Blocks: level
+host level : gameobject {
+    bool perspective = false
+        "Camera kind: true is a perspective camera from eye/target/fov, false (default) the orthographic view.";
+    float near_plane = 0.0
+        "Scene depth of the near plane; near_plane minus far_plane is the depth span the viewer fits walk depth with.";
+    float far_plane = 0.0
+        "Scene depth of the far plane; see near_plane.";
+    float ortho_rotation_radians = 0.0
+        "Rotation of the isometric view, radians. Written by the converter; no reader in OpenGorky yet.";
+    float eye_x = 0.0
+        "Perspective camera eye position, X (world units).";
+    float eye_y = 0.0
+        "Perspective camera eye position, Y (world units).";
+    float eye_z = 0.0
+        "Perspective camera eye position, Z (world units).";
+    float target_x = 0.0
+        "Point the perspective camera looks at, X.";
+    float target_y = 0.0
+        "Point the perspective camera looks at, Y.";
+    float target_z = 0.0
+        "Point the perspective camera looks at, Z.";
+    float fov = 0.0
+        "Field of view of the perspective camera.";
+    float actor_scale = 0.0
+        "Scale of actor models on this level; 0 uses the engine default, battles derive it from the grid cell size.";
+    float speed_scale = 0.0
+        "Flight speed of rockets launched by scenes outside battle; 0 or less means 1.";
+    float floor_z = 0.0
+        "Floor height the perspective camera projects onto.";
+    float camera_scale = 0.0
+        "Scale of the perspective projection to the background picture.";
+    float aspect_ratio = 0.0
+        "Aspect ratio applied to the perspective camera.";
+    float camera_bank = 0.0
+        "Roll (bank) of the perspective camera.";
+    int progress = 0
+        "Level progress counter scripts raise, lower, set and read (level builtins); starts at 0.";
+    int mode = 0
+        "Level mode number (levelMode): battle rules Transform and MidDialog and fighters' goes-first pick their rows by it.";
+    bool shadows = false
+        "true draws simple shadows under actors on a location (never in battle); default false.";
+    bool boss = false
+        "true plays the boss battle music on this level; default false.";
+    Camera camera = nil
+        "The level camera as one Camera record (its fields above); only the fields given are set.";
+    list<Place> placement = nil
+        "List of Place records: where actors stand when the level is restored (the old PlaceActor calls).";
+    string entry = ""
+        "Area point where the selected hero stands on entering the level (\"capt_start\"); empty: no placement.";
+    dialog dialog = ""
+        "The level's own dialog (~d\"01__port_barge\"): what its code plays as scene::Dialog(host.dialog), a battle's before the fight; empty: none.";
+    any grid_floor = nil
+        "Rules row GridFloor: floor height z of the battle grid on this level (a battle, or a location that becomes one).";
+    any music = nil
+        "Rules row DistrictMusic: the music track this level plays when it has no <level>.mp3 of its own (music = \"03_museum\").";
+}
+
+// Blocks: battle
+host combatlevel : level {
+    any transform = nil
+        "Rules rows Transform: a fighter's transformation in this battle, keyed by level mode.";
+    int grid_columns = 0
+        "Grid columns from the original script. No reader: the grid comes from the .cm map.";
+    int grid_rows = 0
+        "Grid rows from the original script. No reader: the grid comes from the .cm map.";
+    float grid_origin_x = 0.0
+        "Grid center X. No reader: the grid comes from the .cm map.";
+    float grid_origin_y = 0.0
+        "Grid center Y. No reader: the grid comes from the .cm map.";
+    float grid_origin_z = 0.0
+        "Grid center Z. No reader: the grid comes from the .cm map.";
+    float grid_rotation_radians = 0.0
+        "Grid rotation, radians. No reader: the grid comes from the .cm map.";
+    float grid_width = 0.0
+        "Grid width. No reader: the grid comes from the .cm map.";
+    float grid_height = 0.0
+        "Grid height. No reader: the grid comes from the .cm map.";
+    int turn = 0
+        "Current battle turn number, set by the engine; MidDialog rules fire on it.";
+    int enemies_killed = 0
+        "Enemies killed in this battle so far; the engine counts it, starts at 0.";
+}
+
+// Blocks: look
+host look {
+    string mesh = ""
+        "The model file; the actor's own mesh overrides it.";
+    string portrait = ""
+        "The portrait picture; the actor's own portrait overrides it.";
+    float turn_speed = 0.0
+        "Turn speed, radians per tick; the actor's own value overrides it.";
+    list<Speed> walk = nil
+        "Walk speeds per animation: [Speed(anim, speed)], world pixels per tick (ActorSetWalkSpeed).";
+    list<Idle> idles = nil
+        "Idle animations: [Idle(state, anim, weight)], picked at random by weight (RegisterIdleAnimation).";
+    list<Slot> slots = nil
+        "Named animation slots: [Slot(state, name, anim)] binds a logical name to a model animation (RegisterAnimation).";
+    list<string> not_in_place = nil
+        "Hero only: animations that move the hero (NotInPlaceAnimation).";
+    string reference = ""
+        "Hero only: the reference animation (ReferenceAnimation).";
+}

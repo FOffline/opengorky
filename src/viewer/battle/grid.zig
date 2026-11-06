@@ -3,7 +3,7 @@
 
 const level_view = @import("../level.zig");
 const LevelView = level_view.LevelView;
-const lf = og.formats.level_files;
+const core_map = og.core.map;
 const c = @import("sdl");
 const og = @import("opengorky");
 const gfx = @import("../media/gfx.zig");
@@ -12,7 +12,7 @@ const battle_view = @import("view.zig");
 /// Tab in battle (0x4b4aa0, key 0x12 = DIK_TAB): the grid appears as a wave; a
 /// second press fades it; a press while fading turns it on again.
 pub fn toggleGrid(self: *LevelView) void {
-    if (self.world.combat_map == null) return;
+    if (self.world.map.combat == null) return;
     level_view.grid_wave = 0;
     level_view.grid_mode = if (level_view.grid_mode == 1) 2 else 1;
 }
@@ -21,7 +21,7 @@ pub fn toggleGrid(self: *LevelView) void {
 /// appearing, each not-yet-full edge (in list order) spends 0.25 and gains 1
 /// brightness (up to 16); while fading, edges dim from the list end; all dark —
 /// grid off.
-fn gridStep(edges: []lf.CombatMap.GridEdge) void {
+fn gridStep(edges: []core_map.CombatMap.GridEdge) void {
     if (level_view.grid_mode == 0) return;
     if (level_view.grid_wave < 80) level_view.grid_wave += 4;
     var left: f64 = @floatFromInt(level_view.grid_wave);
@@ -55,7 +55,7 @@ fn gridStep(edges: []lf.CombatMap.GridEdge) void {
 /// (level.grid_mode 0 → mode 1). The exe depth-tests the strip (0x408930(1)) so it
 /// hides behind the foreground; ours draws under actors like the tile highlight.
 pub fn drawGrid(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void {
-    const cm = self.world.combat_map orelse return;
+    const cm = self.world.map.combat orelse return;
     if (self.grid_edges_of != cm.blocked.ptr) {
         if (self.grid_edges.len > 0) self.gpa.free(self.grid_edges);
         self.grid_edges = &.{};
@@ -70,11 +70,11 @@ pub fn drawGrid(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void {
     while (steps > 0) : (steps -= 1) gridStep(self.grid_edges);
     if (level_view.grid_mode == 0) return;
     const v = self.fx_view orelse return;
-    const tex = v.namedTexture("combatGrid.3df") orelse return;
+    const tex = v.namedTexture(og.core.modules.ui().effects.grid) orelse return;
     _ = c.SDL_SetTextureBlendMode(tex, v.modes[1]);
-    const wx = og.formats.adjust.getFloat("grid_width", 0.2);
+    const wx = og.rules.adjust.float("grid_width");
     const wy = wx * cm.cell_size[0] / cm.cell_size[1];
-    const gc = og.formats.adjust.getRgb("grid_color", .{ 32, 48, 32 });
+    const gc = og.rules.adjust.rgb("grid_color");
     const color = [3]f32{ @floatFromInt(gc[0]), @floatFromInt(gc[1]), @floatFromInt(gc[2]) };
     for (self.grid_edges) |e| {
         if (e.level <= 0) continue;
@@ -113,7 +113,7 @@ pub fn drawGrid(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void {
 /// Debug (`M` in battle): the whole `.cm` grid — free cells green, occupied red.
 pub fn drawCombatGrid(self: *LevelView, r: *c.SDL_Renderer, scroll: [2]f32) !void {
     if (!self.show_grid) return;
-    const cm = self.world.combat_map orelse return;
+    const cm = self.world.map.combat orelse return;
     for (0..cm.height) |y| for (0..cm.width) |x| {
         const blocked = cm.blocked[y * cm.width + x];
         const rgba: [4]f32 = if (blocked) .{ 1, 0.2, 0.2, 0.3 } else .{ 0.2, 1, 0.3, 0.25 };

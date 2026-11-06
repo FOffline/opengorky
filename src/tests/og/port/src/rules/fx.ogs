@@ -1,0 +1,731 @@
+WeaponSound(weapon = 1037, sound = "weapons\\energy_blaster");
+WeaponSound(weapon = 1028, sound = "weapons\\napalm_launcher");
+WeaponSound(weapon = 1027, sound = "weapons\\gas_grenade");
+WeaponSound(weapon = 86, sound = "weapons\\molotov_expl");
+WeaponSound(weapon = 41, sound = "weapons\\bottle");
+WeaponSound(weapon = 1030, sound = "weapons\\bottle");
+WeaponSound(weapon = 1032, sound = "weapons\\bottle");
+WeaponSound(weapon = 1025, sound = "weapons\\zamrazacz");
+WeaponSound(weapon = 1038, sound = "weapons\\satelite_laser");
+WeaponSound(weapon = 1039, sound = "weapons\\satelite_lighting");
+WeaponSound(weapon = 1040, sound = "weapons\\satelite_rocket");
+WeaponSound(weapon = 33, sound = "grenade_deaf");
+WeaponSound(weapon = 45, sound = "dartsgun");
+WeaponSound(weapon = 1070, sound = "kula_explo");
+WeaponSound(weapon = 1072, sound = "kula_explo");
+WeaponFx(
+    id = 49,
+    flash = list(
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+        attach(link = "one_hand", offset = list(-30, -40, 50), rot = xyz(list(-0.3, -0.6, -2.1))),
+        bitmap(
+            b = Bitmap(effect = "smoke2", pos = list(0, 0, 0), size = 0, step = 1, delay = 5),
+            at = "muzzle",
+            size = 200,
+        ),
+    ),
+);
+WeaponFx(
+    id = 50,
+    flash = list(
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+        attach(link = "one_hand", offset = list(-45, -40, 50), rot = xyz(list(-0.3, -0.6, -2.1))),
+        bitmap(
+            b = Bitmap(effect = "smoke2", pos = list(0, 0, 0), size = 0, step = 1, delay = 5),
+            at = "muzzle",
+            size = 200,
+        ),
+    ),
+);
+WeaponFx(
+    id = 98,
+    flash = list(
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+        attach(link = "two_hands", offset = list(150, 10, -40), rot = zy(list(0, -0.2))),
+        bitmap(
+            b = Bitmap(effect = "smoke2", pos = list(0, 0, 0), size = 0, step = 1, delay = 5),
+            at = "muzzle",
+            size = 200,
+        ),
+    ),
+);
+WeaponFx(
+    id = 1023,
+    flash = list(
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+        attach(link = "two_hands", offset = list(140, 17, -20), rot = zy(list(0, -0.1))),
+        bitmap(
+            b = Bitmap(effect = "smoke2", pos = list(0, 0, 0), size = 0, step = 1, delay = 5),
+            at = "muzzle",
+            size = 200,
+        ),
+    ),
+);
+WeaponFx(
+    id = 1022,
+    who = 26,
+    flash = list(
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+        attach(
+            link = "two_hands",
+            offset = list(7, -21, -35),
+            rot = zy(list(-0.32, -0.2)),
+            ticks = 80,
+        ),
+    ),
+);
+WeaponFx(
+    id = 1022,
+    flash = list(
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+        attach(
+            link = "two_hands",
+            offset = list(-8, -40, 44),
+            rot = zy(list(-1.82, 0.3)),
+            ticks = 80,
+        ),
+    ),
+);
+WeaponFx(
+    id = 1025,
+    flash = list(
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+        attach(
+            effect = "nitro",
+            link = "two_hands",
+            offset = list(490, 20, -50),
+            rot = zy(list(0, 3.0415926)),
+            scale = 1,
+            ticks = 80,
+        ),
+    ),
+);
+WeaponFx(
+    id = 1076,
+    shot = list(
+        attach(link = "chaingun", ticks = 5),
+        bitmap(
+            b = Bitmap(effect = "smoke2", pos = list(0, 0, 0), size = 0, step = 1),
+            at = "muzzle",
+            size = 200,
+        ),
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+    ),
+);
+WeaponFx(
+    id = 1058,
+    shot = list(
+        attach(link = "chaingun", ticks = 5),
+        bitmap(
+            b = Bitmap(effect = "smoke2", pos = list(0, 0, 0), size = 0, step = 1),
+            at = "muzzle",
+            size = 200,
+        ),
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+    ),
+);
+WeaponFx(
+    id = 1065,
+    shot = list(
+        attach(link = "chaingun1"),
+        bitmap(
+            b = Bitmap(effect = "smoke2", pos = list(0, 0, 0), size = 0, step = 1),
+            at = "muzzle",
+            size = 200,
+        ),
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+    ),
+);
+WeaponFx(
+    id = 1068,
+    shot = list(
+        attach(link = "chaingun", ticks = 16),
+        bitmap(
+            b = Bitmap(effect = "smoke2", pos = list(0, 0, 0), size = 0, step = 1),
+            at = "muzzle",
+            size = 200,
+        ),
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+    ),
+);
+WeaponFx(
+    id = 1079,
+    shot = list(
+        attach(link = "chaingun", ticks = 35),
+        bitmap(
+            b = Bitmap(effect = "smoke2", pos = list(0, 0, 0), size = 0, step = 1),
+            at = "muzzle",
+            size = 200,
+        ),
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+    ),
+);
+WeaponFx(
+    id = 1029,
+    who = 26,
+    pre = list(beam(b = Beam(kind = "ion", effect = "ion", from = list(0, 0, 0), to = list(0, 0, 0), size = 0, left = 0, link = "two_hands", turn = 0.4), from = self(list(0, 0, 465)), to = target(250), chains = list(Chain(start = Val(d = -155, div = -1), step = 220, n = 25), Chain(start = Val(d = -155, div = -1, sum = list(5500, Val(d = 5922, div = -1))), step = -220, n = 25)), size = 30, ticks = 27, actor = 1)),
+);
+WeaponFx(
+    id = 1029,
+    pre = list(beam(b = Beam(kind = "ion", effect = "ion", from = list(0, 0, 0), to = list(0, 0, 0), size = 0, left = 0, link = "two_hands", turn = -0.09), from = self(list(0, 0, 465)), to = target(250), chains = list(Chain(start = Val(d = -155, div = -1), step = 220, n = 25), Chain(start = Val(d = -155, div = -1, sum = list(5500, Val(d = 5922, div = -1))), step = -220, n = 25)), size = 30, ticks = 27, actor = 1)),
+);
+WeaponFx(id = 1037, pre = list(ribbon(from = toward(r = 120, up = 450), to = each_hit(300))));
+WeaponFx(
+    id = 67,
+    pre = list(
+        attach(link = "chaingun", ticks = 30),
+        light(at = list(200, 100, 400), range = 1000, ticks = 30),
+    ),
+);
+WeaponFx(
+    id = 1078,
+    pre = list(attach(effect = "gas3", link = "dmuchawa", offset = list(460, 0, 0), rot = matrix(list(-1, 0, 0, 0, -1, 0, 0, 0, 1)), scale = 1.5, ticks = 128)),
+);
+WeaponFx(
+    id = 45,
+    hit = list(
+        bitmap(
+            b = Bitmap(effect = "smoke2", pos = list(0, 0, 0), size = 0, step = 1),
+            at = "muzzle",
+            size = 200,
+        ),
+        light(at = list(200, 0, 400), range = 350, ticks = 3),
+    ),
+);
+WeaponFx(
+    id = 46,
+    hit = list(bitmap(b = Bitmap(effect = "smoke2", pos = list(0, 0, 0), size = 0, step = 1), at = "muzzle", size = 200)),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            effect = "flare1",
+        ),
+        set = list(Set(f = "speed", v = 10), Set(f = "size", v = 300)),
+    ),
+);
+WeaponFx(
+    id = 1070,
+    hit = list(bitmap(b = Bitmap(effect = "KulaExpl", pos = list(0, 0, 0), size = 1000, step = 0.5), lift = 250)),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            light_range = 1100,
+            light_rgb = list(0.1, 0.1, 0.1),
+            effect = "kula",
+            size = 130,
+            charge = 1,
+        ),
+        set = list(
+            Set(f = "speed", v = Val(d = 70, div = 7)),
+            Set(f = "mesh_scale", v = 0.8),
+            Set(f = "hold", v = 88),
+        ),
+        start_at = self(list(0, 0, 0)),
+        hold = list("kula1", "kula2"),
+        grow = 0.08,
+        look = "ball",
+    ),
+);
+WeaponFx(
+    id = 1072,
+    hit = list(bitmap(b = Bitmap(effect = "KulaExpl", pos = list(0, 0, 0), size = 1000, step = 0.5), lift = 250)),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            light_range = 1100,
+            light_rgb = list(0.1, 0.1, 0.1),
+            effect = "kula",
+            size = 130,
+        ),
+        set = list(
+            Set(f = "speed", v = Val(d = 130, div = 7)),
+            Set(f = "mesh_scale", v = 1),
+            Set(f = "hold", v = 70),
+        ),
+        start_at = self(list(0, 0, 0)),
+        hold = list("kula1", "kula2"),
+        grow = 0.08,
+        look = "ball",
+    ),
+);
+WeaponFx(
+    id = 1051,
+    hit = list(explosion(250)),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            mesh = "brain",
+        ),
+        start = list(390, -30, 300),
+        set = list(
+            Set(f = "speed", v = Val(d = 80, div = 7)),
+            Set(f = "mesh_scale", v = 0.7),
+            Set(f = "spin", v = 0.5),
+        ),
+    ),
+);
+WeaponFx(
+    id = 35,
+    hit = list(explosion(250)),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            arc = 1,
+            mesh = "grenade",
+        ),
+        start = list(0, 0, 400),
+        set = list(Set(f = "mesh_scale", v = 1)),
+    ),
+);
+WeaponFx(
+    id = 57,
+    hit = list(explosion(300)),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            speed = 7,
+            max_speed = 15,
+            accel = 0.7,
+            accel_delay = 10,
+            effect = "Rocket1",
+            size = 160,
+            trail = "Trail1",
+            rocket = 1,
+        ),
+        start = list(100, 100, 670),
+        start2 = list(100, -144, 670),
+        rocket_trail = 1,
+    ),
+);
+WeaponFx(
+    id = 91,
+    hit = list(explosion(300)),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            speed = 7,
+            max_speed = 15,
+            accel = 0.7,
+            accel_delay = 10,
+            effect = "Rocket1",
+            size = 160,
+            trail = "Trail1",
+            rocket = 1,
+        ),
+        start = list(500, -150, 360),
+        rocket_trail = 1,
+        set = list(Set(f = "mesh_scale", v = 2)),
+    ),
+);
+WeaponFx(
+    id = 1003,
+    hit = list(explosion(300)),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            speed = 7,
+            max_speed = 15,
+            accel = 0.7,
+            accel_delay = 10,
+            effect = "Rocket1",
+            size = 160,
+            trail = "Trail1",
+            rocket = 1,
+        ),
+        start = list(700, 175, 400),
+        rocket_trail = 1,
+        set = list(Set(f = "mesh_scale", v = 2)),
+    ),
+);
+WeaponFx(
+    id = 1004,
+    hit = list(explosion(300)),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            speed = 7,
+            max_speed = 15,
+            accel = 0.7,
+            accel_delay = 10,
+            effect = "Rocket1",
+            size = 160,
+            trail = "Trail1",
+            rocket = 1,
+        ),
+        start = list(235, -100, 900),
+        rocket_trail = 1,
+        set = list(Set(f = "mesh_scale", v = 2)),
+    ),
+);
+WeaponFx(
+    id = 1024,
+    hit = list(explosion(300)),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            speed = 7,
+            max_speed = 15,
+            accel = 0.7,
+            accel_delay = 10,
+            effect = "Rocket1",
+            size = 120,
+            trail = "Trail1",
+            rocket = 1,
+        ),
+        start = list(300, 0, 270),
+        rocket_trail = 1,
+        set = list(Set(f = "mesh_scale", v = 2)),
+    ),
+);
+WeaponFx(
+    id = 33,
+    hit = list(
+        bitmap(
+            b = Bitmap(
+                effect = "stun",
+                pos = list(0, 0, 0),
+                size = 900,
+                step = 0,
+                alpha = 0,
+                flash_rate = 0.2,
+            ),
+            lift = 250,
+        ),
+        bitmap(
+            b = Bitmap(effect = "smoke1", pos = list(0, 0, 0), size = 600, step = 1, delay = 5),
+            lift = 250,
+        ),
+    ),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            arc = 1,
+            mesh = "bomb_stun",
+        ),
+        start = list(0, 0, 400),
+    ),
+);
+WeaponFx(
+    id = 1027,
+    hit = list(bitmap(b = Bitmap(effect = "smoke1", pos = list(0, 0, 0), size = 600, step = 1), lift = 250, rgb = Rgb(d = list(100, 255, 0)))),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            arc = 1,
+            mesh = "bomb_stun",
+        ),
+        start = list(0, 0, 400),
+    ),
+);
+WeaponFx(
+    id = 86,
+    hit = list(bitmap(b = Bitmap(effect = "molotov", pos = list(0, 0, 0), size = 0, step = 0.5, rgb = list(1, 0.9, 0.9)), lift = 800, size = 800)),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            arc = 1,
+            light_range = 800,
+            light_rgb = list(1, 0.3, 0.3),
+            mesh = "molotov",
+            spin = 0.2,
+            flame = 1,
+        ),
+        start = list(0, -100, 400),
+    ),
+);
+WeaponFx(
+    id = 1032,
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            arc = 1,
+            mesh = "vodka",
+            spin = 0.2,
+        ),
+        start = list(0, -100, 400),
+    ),
+);
+WeaponFx(
+    id = 1030,
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            arc = 1,
+            mesh = "butlagas",
+            spin = 0.2,
+        ),
+        start = list(0, -100, 400),
+    ),
+);
+WeaponFx(
+    id = 41,
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            arc = 1,
+            mesh = "stone",
+            spin = 0.2,
+        ),
+        start = list(0, -100, 400),
+    ),
+);
+WeaponFx(
+    id = 1028,
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            arc = 1,
+            mesh = "napalmcan",
+            spin = 0.2,
+        ),
+        start = list(70, 0, 300),
+        set = list(Set(f = "mesh_scale", v = 0.4)),
+    ),
+);
+WeaponFx(
+    id = 89,
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            effect = "arrows",
+            bullet = 1,
+        ),
+        start = list(400, -60, 500),
+        set = list(Set(f = "speed", v = 15), Set(f = "mesh_scale", v = 0.6)),
+    ),
+);
+WeaponFx(
+    id = 40,
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            mesh = "knife_throwing",
+        ),
+        start = list(200, -100, 500),
+        set = list(
+            Set(f = "speed", v = 15),
+            Set(f = "mesh_scale", v = 1.2),
+            Set(f = "spin", v = 0.6),
+        ),
+    ),
+);
+WeaponFx(
+    id = 1005,
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            effect = "trucizna",
+            trail = "Trail1",
+            bullet = 1,
+        ),
+        rocket_trail = 1,
+        set = list(Set(f = "speed", v = 12), Set(f = "mesh_scale", v = 1.3)),
+        trail_rgb = Rgb(d = list(80, 255, 80)),
+    ),
+);
+WeaponFx(
+    id = 1006,
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            effect = "trucizna",
+            trail = "Trail1",
+            bullet = 1,
+        ),
+        start = list(550, -55, 240),
+        rocket_trail = 1,
+        set = list(Set(f = "speed", v = 12), Set(f = "mesh_scale", v = 1.3)),
+        trail_rgb = Rgb(d = list(80, 255, 80)),
+    ),
+);
+WeaponFx(id = 1038, hit = list(mesh(at = target(0))));
+WeaponFx(
+    id = 1039,
+    hit = list(beam(b = Beam(kind = "lightning", effect = "LStrike", from = list(0, 0, 0), to = list(0, 0, 0), size = 130, left = 8, div = 1))),
+);
+WeaponFx(
+    id = 1040,
+    hit = list(explosion(300)),
+    launch = Launch(
+        pr = Projectile(
+            pos = list(0, 0, 0),
+            start = list(0, 0, 0),
+            target = list(0, 0, 0),
+            mesh = "pocisk",
+            trail = "Trail1",
+        ),
+        rocket_trail = 1,
+        set = list(
+            Set(f = "speed", v = 24),
+            Set(f = "trail_size", v = 200),
+            Set(f = "trail_fade", v = 0.8),
+            Set(f = "trail_back", v = 800),
+            Set(f = "trail_period", v = 1),
+        ),
+        start_at = sky(h = 1400, dist = 6000),
+    ),
+);
+WeaponFx(
+    id = 1026,
+    hit = list(emitter(at = self(list(0, 0, 360)), ahead = 250, speed = 35, timer = 90, max = 74, link = "two_hands", rot = -0.8, holds_attack = 1)),
+);
+FighterFx(
+    fighter = 119,
+    weapon = 1021,
+    hit = list(attach(effect = "gas", link = "paszcza", offset = list(700, 40, -10), rot = matrix(list(-1, 0, 0, 0, 0, 1, 0, 1, 0)), scale = 2, ticks = 72)),
+);
+FighterFx(
+    fighter = 119,
+    hit = list(
+        beam(
+            b = Beam(
+                kind = "current",
+                effect = "blaster",
+                from = list(0, 0, 0),
+                to = list(0, 0, 0),
+                size = 0,
+                left = 0,
+                link = "current1",
+                link2 = "current3",
+            ),
+            size = 300,
+            ticks = 45,
+            actor = 1,
+        ),
+        beam(
+            b = Beam(
+                kind = "current",
+                effect = "blaster",
+                from = list(0, 0, 0),
+                to = list(0, 0, 0),
+                size = 0,
+                left = 0,
+                link = "current2",
+                link2 = "current4",
+            ),
+            size = 300,
+            ticks = 45,
+            actor = 1,
+        ),
+    ),
+);
+FighterFx(
+    fighter = 131,
+    weapon = 1063,
+    pre = list(
+        beam(
+            b = Beam(
+                kind = "laser",
+                effect = "ray",
+                from = list(0, 0, 0),
+                to = list(0, 0, 0),
+                size = 0,
+                left = 0,
+                link = "oko1",
+            ),
+            lift = 120,
+            size = 50,
+            ticks = 54,
+            actor = 1,
+        ),
+        beam(
+            b = Beam(
+                kind = "laser",
+                effect = "ray",
+                from = list(0, 0, 0),
+                to = list(0, 0, 0),
+                size = 0,
+                left = 0,
+                link = "oko2",
+            ),
+            lift = 120,
+            size = 50,
+            ticks = 54,
+            actor = 1,
+        ),
+    ),
+    hit = list(bitmap(b = Bitmap(effect = "smoke2", pos = list(0, 0, 0), size = 200, step = 1), lift = 120)),
+);
+FighterFx(
+    fighter = 118,
+    hit = list(attach(effect = "sparks", link = "pila lewa", offset = list(549, 137, 0), rot = matrix(list(-1, 0, 0, 0, 0, 1, 0, 1, 0)), scale = 2, ticks = 5)),
+    second = list(attach(effect = "sparks", link = "pila prawa", offset = list(575, 112, 0), rot = matrix(list(-1, 0, 0, 0, 0, 1, 0, 1, 0)), scale = 2, ticks = 5)),
+);
+FighterFx(
+    fighter = 126,
+    pre = list(attach(effect = "nitro", link = "chaingun", offset = list(320, 0, 0), rot = zy(list(0, 3.1415927)), scale = 1, ticks = 84)),
+    hit = list(sound(name = "weapons\\zamrazacz", ticks = 20)),
+);
+FighterFx(fighter = 136, weapon = 1078, hit = list(cloud(at = target(130), rand_draws = 1)));
+FighterFx(
+    fighter = 121,
+    hit = list(
+        emitter(
+            at = self(list(0, 80, 600)),
+            aim = target(300),
+            ahead = 250,
+            speed = 35,
+            timer = 31,
+            max = 70,
+            life = 10,
+        ),
+        light(
+            at = list(0, 80, 600),
+            color = list(1, 0.3, 0.3),
+            toward = target(300),
+            ahead = 600,
+            range = 700,
+            range_as = 1,
+            ticks = 30,
+        ),
+    ),
+);
+FighterFx(
+    fighter = 127,
+    weapon = 1071,
+    hit = list(emitter(at = self(list(0, 0, 360)), ahead = 30, timer = Val(d = 90, sum = list(Val(d = -55, trunc = 1))), max = Val(d = 74, sum = list(Val(d = -55, trunc = 1))), link = "t1", link2 = "t2")),
+);
+FighterFx(fighter = 133, hit = list(shake(30)));
+PostChain();

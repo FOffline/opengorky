@@ -62,6 +62,7 @@ pub fn run(v: *Viewer, ctx: *input_ctx.Ctx, script: *?InputScript, audio_out: *?
         perf.add(.update, pt_update);
         const fps_cap: u32 = if (free_run) 0 else if (unseen) og.state.world.tick_hz else if (unfocused and v.cfg.fps_background > 0) v.cfg.fps_background else v.cfg.fps_limit;
         if (!paused) if (audio_out.*) |*a| a.pump(ctx.mixer, if (fps_cap > 0) 1000 / fps_cap else 0);
+        if (!paused) if (ctx.mix_out) |o| ctx.mixer.mix(try o.addManyAsSlice(v.gpa, 2 * @import("../media/audio.zig").rate / og.state.world.tick_hz));
         if (unseen) {
             limitFrame(frame_start, fps_cap);
             continue;

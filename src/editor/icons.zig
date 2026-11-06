@@ -6,7 +6,7 @@ const c = @import("sdl");
 const og = @import("opengorky");
 const clay = @import("clay.zig");
 
-pub const Icon = enum { save, check, play, settings, history, search, folder, chevron_right, chevron_down, map_pin, swords, user, package, clapperboard, volume_2, plus, file_text, mouse_pointer_2, hand, paintbrush, pipette, lightbulb, square_dashed, log_out, crosshair, camera, pencil, code, message_square, maximize, x, undo_2, redo_2, eye, eye_off, lock, lock_open, layers, trash_2, copy, image, grid_3x3, box, pause, skip_back, skip_forward };
+pub const Icon = enum { save, check, play, settings, history, search, folder, chevron_right, chevron_down, map_pin, swords, user, package, clapperboard, volume_2, plus, file_text, mouse_pointer_2, hand, paintbrush, pipette, lightbulb, square_dashed, log_out, crosshair, camera, pencil, code, message_square, maximize, x, undo_2, redo_2, eye, eye_off, lock, lock_open, layers, trash_2, copy, image, box, pause, skip_back, skip_forward };
 
 var textures: [std.enums.values(Icon).len]?*c.SDL_Texture = @splat(null);
 

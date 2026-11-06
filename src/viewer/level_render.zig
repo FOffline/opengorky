@@ -20,13 +20,13 @@ pub const Scene = struct {
 
     /// Level `name` as `ticks` game ticks after it starts (a battle: its first turn's
     /// screen with no cells).
-    pub fn init(io: Io, gpa: Allocator, r: *c.SDL_Renderer, dat: Io.Dir, models: *og.actor.model_cache.Cache, name: []const u8, ticks: u32) !*Scene {
-        const w = try og.game.life.create(io, gpa, dat, name, models, .{});
+    pub fn init(io: Io, gpa: Allocator, r: *c.SDL_Renderer, dat: Io.Dir, models: *og.actor.model_cache.Cache, textures: *og.render.textures.Textures, name: []const u8, ticks: u32) !*Scene {
+        const w = try og.loaders.world.create(io, gpa, dat, name, models, .{});
         errdefer w.destroy();
         for (0..ticks) |_| og.game.tick(w) catch break;
         const s = try gpa.create(Scene);
         errdefer gpa.destroy(s);
-        s.* = .{ .gpa = gpa, .world = w, .view = try compose.load(io, gpa, r, dat, w, null, models) };
+        s.* = .{ .gpa = gpa, .world = w, .view = try compose.load(io, gpa, r, dat, w, null, models, textures) };
         // No cursor, hover or battle cells: a window over the battle draws none (0x4b2fb0).
         s.view.window_top = true;
         if (s.view.size()[0] == 0) {
@@ -51,7 +51,7 @@ pub const Scene = struct {
     /// detail, the pictures scaled.
     pub fn draw(self: *Scene, r: *c.SDL_Renderer, x: u32, y: u32, w: u32, h: u32, k: u32) !*c.SDL_Texture {
         // One band of the actor layer spans the rectangle's width, 480 rows a band.
-        compose.setDetail(&self.view, k, w);
+        compose.setDetail(&self.view, k, w, 480);
         const band_h = 480;
         const whole = c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_TARGET, @intCast(w * k), @intCast(h * k)) orelse return error.Texture;
         errdefer c.SDL_DestroyTexture(whole);

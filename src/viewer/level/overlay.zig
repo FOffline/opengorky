@@ -7,7 +7,7 @@ const og = @import("opengorky");
 const c = @import("sdl");
 const gfx = @import("../media/gfx.zig");
 const LevelView = level.LevelView;
-const Image = og.formats.image.Image;
+const Image = og.image.Image;
 const scenes_mod = og.scene.scenes;
 
 /// Dialog box images from the host: speaker portrait and `dialog_box.spr`.
@@ -18,15 +18,16 @@ pub fn drawOverlay(l: *LevelView, r: *c.SDL_Renderer, art: DialogArt) !void {
     const w = l.world;
     // Bars and fade over the whole (wide) frame.
     gfx.wholeView(r);
-    const fw = 640 + 2 * gfx.wide;
+    const fw = gfx.frameW();
+    const fh = gfx.frameH();
     if (w.scene.panorama) {
         try gfx.check(c.SDL_SetRenderDrawColor(r, 0, 0, 0, 255));
         const h = @max(0, w.scene.panorama_h);
         try gfx.check(c.SDL_RenderFillRect(r, &.{ .x = 0, .y = 0, .w = fw, .h = h }));
-        try gfx.check(c.SDL_RenderFillRect(r, &.{ .x = 0, .y = 479 - h, .w = fw, .h = h + 1 }));
+        try gfx.check(c.SDL_RenderFillRect(r, &.{ .x = 0, .y = fh - 1 - h, .w = fw, .h = h + 1 }));
     }
     if (w.scene.fade > 0) {
-        try gfx.fillRect(r, .{ 0, 0, 0, @intFromFloat(w.scene.fade * 255) }, .{ .x = 0, .y = 0, .w = fw, .h = 480 });
+        try gfx.fillRect(r, .{ 0, 0, 0, @intFromFloat(w.scene.fade * 255) }, .{ .x = 0, .y = 0, .w = fw, .h = fh });
     }
     gfx.middleView(r);
     if (w.scene.subtitle) |st| {

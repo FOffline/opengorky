@@ -8,7 +8,6 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const archive = @import("archive.zig");
 const strtab = @import("strtab.zig");
-const font = @import("font.zig");
 
 /// Game language number in `dat`; 0 if unreadable. Not cached per process:
 /// tools and tests may use different game dirs.
@@ -30,21 +29,4 @@ fn read(io: Io, gpa: Allocator, dat: Io.Dir) !u8 {
 pub fn setName(buf: []u8, base: []const u8, n: u8) ?[]const u8 {
     const suf = strtab.langSuffix(n) orelse return null;
     return std.fmt.bufPrint(buf, "{s}_{d}{s}", .{ base, n, suf }) catch null;
-}
-
-/// Bitmap font `<base>_1.fnt` with the language set overlaid (`CZC1` bytes, owned
-/// by the caller). null if the base file is missing.
-pub fn readFont(io: Io, gpa: Allocator, other: *const archive.Archive, base: []const u8, n: u8) ?[]u8 {
-    var buf: [64]u8 = undefined;
-    const main_name = std.fmt.bufPrint(&buf, "{s}_1.fnt", .{base}) catch return null;
-    const main = other.readAlloc(io, gpa, other.find(main_name) orelse return null) catch return null;
-    var sbuf: [64]u8 = undefined;
-    const set = setName(&sbuf, base, n) orelse return main;
-    var fbuf: [72]u8 = undefined;
-    const set_file = std.fmt.bufPrint(&fbuf, "{s}.fnt", .{set}) catch return main;
-    const extra = other.readAlloc(io, gpa, other.find(set_file) orelse return main) catch return main;
-    defer gpa.free(extra);
-    const merged = font.merge(gpa, main, extra) catch return main;
-    gpa.free(main);
-    return merged;
 }

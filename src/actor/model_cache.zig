@@ -1,16 +1,15 @@
-//! Actor models by `meshFile` name: mesh, animations, bone frames, texture with
-//! mip levels (`common/other.dat: gfx_3d\\`), `.dsc` effects. Loaded on first
-//! use; the engine needs this cache, not the layer renderer (`actors.zig`).
+//! Actor models by `meshFile` name: mesh, animations, bone frames, `.dsc` effects; the engine
+//! needs this cache, not the layer renderer (`actors.zig`). Textures are the renderer's
+//! (render/textures.zig, by the names the mesh gives). The core reads no files: `Source`
+//! (composition, compose/models.zig) parses the model's files into core records (core/model.zig).
+//! A location's models are loaded at its entry (game/life.zig: every object's `meshFile`).
+//! shortcut: a model a script names later (a morph, a spawned actor) is loaded at its
+//! first use, then kept.
 
 const std = @import("std");
 const vec = @import("../vec.zig");
-const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const archive = @import("../formats.zig").archive;
-const mesh_fmt = @import("../formats.zig").mesh;
-const anim = @import("../formats.zig").anim;
-const tex3df = @import("../formats.zig").tex3df;
-const Image = @import("../formats.zig").image.Image;
+const rec = @import("../core.zig").model;
 const effects_mod = @import("../effects.zig");
 const camera = @import("camera.zig");
 const skin = @import("skin.zig");
@@ -19,23 +18,14 @@ const skin = @import("skin.zig");
 pub const default_actor_scale: f32 = 0.15;
 
 pub const Model = struct {
-    mesh: mesh_fmt.Mesh,
-    anims: anim.AnimList,
-    frames: anim.BoneFrames,
-    texture: ?Image,
-    /// Texture mip levels (`mips[0]` is `texture` itself): the exe picks a level with
-    /// MIPLINEAR filtering (0x406d90); without them fine detail shimmers.
-    mips: []Image = &.{},
-    /// Each part's own texture (mip levels): chunk 9 sets the texture of the part
-    /// being read (0x44cf3a → 0x44d7b0, part +0x6c), so a model can have several
-    /// (fang: `pasozyt` on the back with `fangtyl`, the body with
-    /// `fang_poprawiany`). Parts without one of their own share `mips`.
-    part_mips: []const []Image = &.{},
+    mesh: rec.Mesh,
+    anims: rec.Anims,
+    frames: rec.BoneFrames,
     /// Lowest and highest bind-pose points along the mesh Y axis (feet, top of head).
-    base_y: f32,
-    top_y: f32,
+    base_y: f32 = 0,
+    top_y: f32 = 0,
     /// Mesh rotation by the chunk 14 angles.
-    local: [9]f32,
+    local: [9]f32 = undefined,
     /// Vertex welding for normals (0x4c6e07): for each part vertex, the first vertex
     /// with the same bind-pose coordinates (smooth across UV seams).
     weld: []const []const u32 = &.{},
@@ -43,31 +33,10 @@ pub const Model = struct {
     /// (0x44d213 → 0x44bf30 → 0x4c6950), so no back face is skipped and none casts a shadow.
     two_sided: bool = false,
 
-    /// Mip levels of part `pi`'s texture (none: `mips`).
-    pub fn partMips(self: Model, pi: usize) []Image {
-        return if (pi < self.part_mips.len) self.part_mips[pi] else self.mips;
-    }
-
-    /// Texture of part `pi` (its top mip level).
-    pub fn partTexture(self: Model, pi: usize) ?Image {
-        const m = self.partMips(pi);
-        return if (m.len > 0) m[0] else self.texture;
-    }
-
     /// World units per mesh unit at actorScale = 1: the model's own scale from
     /// chunk 12 (mesh `+0x5c`, multiplied at 0x429311).
     pub fn unitScale(self: Model) f32 {
         return if (self.mesh.height > 0) self.mesh.height else 24;
-    }
-
-    fn deinit(self: *Model, gpa: Allocator) void {
-        if (self.mips.len > 0) {
-            for (self.mips) |*t| t.deinit(gpa);
-            gpa.free(self.mips);
-        } else if (self.texture) |*t| t.deinit(gpa);
-        self.frames.deinit(gpa);
-        self.anims.deinit();
-        self.mesh.deinit();
     }
 
     /// Global .bfr frame for an animation and the ticks since it started.
@@ -78,106 +47,9 @@ pub const Model = struct {
         const n: u32 = @intFromFloat(@max(0, ticks));
         return a.first + if (loop) n % len else @min(n, len - 1);
     }
-};
 
-pub const Overlay = struct {
-    ctx: *anyopaque,
-    get: *const fn (ctx: *anyopaque, name: []const u8) ?[]const u8,
-};
-
-/// Models by `meshFile` name (case-insensitive), loaded on first use.
-pub const Cache = struct {
-    gpa: Allocator,
-    io: Io,
-    common: archive.Archive,
-    /// File bytes: model strings point into them.
-    arena: std.heap.ArenaAllocator,
-    models: std.StringHashMapUnmanaged(?*Model) = .empty,
-    /// Files looked up before the archive (the editor's unsaved models and textures).
-    overlay: ?Overlay = null,
-    effects: std.StringHashMapUnmanaged(?*effects_mod.dsc.Dsc) = .empty,
-
-    pub fn open(io: Io, gpa: Allocator, dat: Io.Dir) !Cache {
-        return .{ .gpa = gpa, .io = io, .common = try archive.Archive.open(io, gpa, dat, "common/other.dat"), .arena = .init(gpa) };
-    }
-
-    pub fn deinit(self: *Cache) void {
-        var it = self.models.valueIterator();
-        while (it.next()) |m| if (m.*) |model| {
-            model.deinit(self.gpa);
-            self.gpa.destroy(model);
-        };
-        self.models.deinit(self.gpa);
-        self.effects.deinit(self.gpa);
-        self.arena.deinit();
-        self.common.close(self.io, self.gpa);
-    }
-
-    pub fn get(self: *Cache, name: []const u8) ?*Model {
-        var key_buf: [archive.name_size]u8 = undefined;
-        if (name.len == 0 or name.len > key_buf.len) return null;
-        const key = std.ascii.lowerString(&key_buf, name);
-        if (self.models.get(key)) |m| return m;
-        const m = self.load(name) catch |err| blk: {
-            std.log.warn("model {s}: {t}", .{ name, err });
-            break :blk null;
-        };
-        const a = self.arena.allocator();
-        self.models.put(self.gpa, a.dupe(u8, key) catch return m, m) catch {};
-        return m;
-    }
-
-    /// Effect `gfx_3d\Effects\<name>\<name>.dsc` (case-insensitive): frames and blending.
-    pub fn effect(self: *Cache, name: []const u8) ?*const effects_mod.dsc.Dsc {
-        var key_buf: [64]u8 = undefined;
-        if (name.len == 0 or name.len > key_buf.len) return null;
-        const key = std.ascii.lowerString(&key_buf, name);
-        if (self.effects.get(key)) |d| return d;
-        const d: ?*effects_mod.dsc.Dsc = blk: {
-            const text = self.read("gfx_3d\\Effects\\{s}\\{s}.dsc", .{ name, name }) catch break :blk null;
-            const dsc = self.arena.allocator().create(effects_mod.dsc.Dsc) catch break :blk null;
-            dsc.* = effects_mod.dsc.parseDsc(self.arena.allocator(), text) catch break :blk null;
-            break :blk dsc;
-        };
-        self.effects.put(self.gpa, self.arena.allocator().dupe(u8, key) catch return d, d) catch {};
-        return d;
-    }
-
-    /// A `common/other.dat` file (effect frame etc.), in the cache arena.
-    pub fn readFile(self: *Cache, name: []const u8) ![]u8 {
-        return self.read("{s}", .{name});
-    }
-
-    fn read(self: *Cache, comptime fmt: []const u8, args: anytype) ![]u8 {
-        var buf: [archive.name_size]u8 = undefined;
-        const name = try std.fmt.bufPrint(&buf, fmt, args);
-        if (self.overlay) |o| if (o.get(o.ctx, name)) |d| return self.arena.allocator().dupe(u8, d);
-        const e = self.common.find(name) orelse return error.NotFound;
-        return self.common.readAlloc(self.io, self.arena.allocator(), e);
-    }
-
-    fn load(self: *Cache, name: []const u8) !*Model {
-        const m = try self.gpa.create(Model);
-        errdefer self.gpa.destroy(m);
-        m.mesh = try mesh_fmt.parse(self.gpa, try self.read("gfx_3d\\{s}.msh", .{name}));
-        errdefer m.mesh.deinit();
-        m.anims = try anim.parseAni(self.gpa, try self.read("gfx_3d\\{s}.ani", .{name}));
-        errdefer m.anims.deinit();
-        m.frames = try anim.parseBfr(self.gpa, try self.read("gfx_3d\\{s}.bfr", .{name}), @intCast(m.mesh.boneCount()));
-        errdefer m.frames.deinit(self.gpa);
-        try anim.checkFrames(m.anims, m.frames);
-        m.mips = if (self.read("gfx_3d\\textures\\{s}", .{m.mesh.texture})) |d| tex3df.decodeMips(self.gpa, d) catch &.{} else |_| &.{};
-        m.texture = if (m.mips.len > 0) m.mips[0] else null;
-        // Other parts' textures, decoded once per name (the cache's arena owns them).
-        const pm = try self.arena.allocator().alloc([]Image, m.mesh.parts.len);
-        for (m.mesh.parts, pm, 0..) |p, *dst, i| {
-            dst.* = m.mips;
-            if (p.texture.len == 0 or std.ascii.eqlIgnoreCase(p.texture, m.mesh.texture)) continue;
-            dst.* = for (m.mesh.parts[0..i], pm[0..i]) |q, prev| {
-                if (std.ascii.eqlIgnoreCase(q.texture, p.texture)) break prev;
-            } else if (self.read("gfx_3d\\textures\\{s}", .{p.texture})) |d| tex3df.decodeMips(self.arena.allocator(), d) catch m.mips else |_| m.mips;
-        }
-        m.part_mips = pm;
+    /// What the exe works out at load: local axes, height bounds, welded vertices.
+    fn derive(m: *Model, a: Allocator) Allocator.Error!void {
         m.local = camera.rotationXYZ(m.mesh.rotation);
         m.base_y = std.math.inf(f32);
         m.top_y = -std.math.inf(f32);
@@ -185,7 +57,6 @@ pub const Cache = struct {
             m.base_y = @min(m.base_y, v.pos[1]);
             m.top_y = @max(m.top_y, v.pos[1]);
         };
-        const a = self.arena.allocator();
         const weld = try a.alloc([]u32, m.mesh.parts.len);
         for (m.mesh.parts, weld) |p, *wp| {
             wp.* = try a.alloc(u32, p.vertices.len);
@@ -198,9 +69,92 @@ pub const Cache = struct {
             }
         }
         m.weld = weld;
-        var nb: [archive.name_size]u8 = undefined;
-        const two = try std.fmt.bufPrint(&nb, "gfx_3d\\{s}.2s", .{name});
-        m.two_sided = self.common.find(two) != null or (if (self.overlay) |o| o.get(o.ctx, two) != null else false);
+    }
+};
+
+/// Where models come from (composition: compose/models.zig). Null functions: nothing there.
+pub const Source = struct {
+    ctx: ?*anyopaque = null,
+    /// Model `name` (`meshFile`) in `a`: mesh, animations, frames, `two_sided`
+    /// (the rest `Model.derive` works out); an error when its files are missing or broken.
+    model: ?*const fn (ctx: ?*anyopaque, a: Allocator, name: []const u8) anyerror!Model = null,
+    /// Effect `name` (`gfx_3d\Effects\<name>\<name>.dsc`) in `a`; error.NotFound: none.
+    effect: ?*const fn (ctx: ?*anyopaque, a: Allocator, name: []const u8) anyerror!effects_mod.dsc.Dsc = null,
+    /// Release what composition holds (the cache's deinit).
+    close: ?*const fn (ctx: ?*anyopaque) void = null,
+};
+
+/// Longest name asked (an archive entry name).
+const name_max = 112;
+
+/// Models by `meshFile` name (case-insensitive), loaded on first use.
+pub const Cache = struct {
+    gpa: Allocator,
+    source: Source,
+    /// The models and everything they hold.
+    arena: std.heap.ArenaAllocator,
+    models: std.StringHashMapUnmanaged(?*Model) = .empty,
+    effects: std.StringHashMapUnmanaged(?*effects_mod.dsc.Dsc) = .empty,
+
+    pub fn init(gpa: Allocator, source: Source) Cache {
+        return .{ .gpa = gpa, .source = source, .arena = .init(gpa) };
+    }
+
+    pub fn deinit(self: *Cache) void {
+        self.models.deinit(self.gpa);
+        self.effects.deinit(self.gpa);
+        self.arena.deinit();
+        if (self.source.close) |f| f(self.source.ctx);
+    }
+
+    pub fn get(self: *Cache, name: []const u8) ?*Model {
+        var key_buf: [name_max]u8 = undefined;
+        if (name.len == 0 or name.len > key_buf.len) return null;
+        const key = std.ascii.lowerString(&key_buf, name);
+        if (self.models.get(key)) |m| return m;
+        const m = self.load(name) catch |err| blk: {
+            std.log.warn("model {s}: {t}", .{ name, err });
+            break :blk null;
+        };
+        const a = self.arena.allocator();
+        self.models.put(self.gpa, a.dupe(u8, key) catch return m, m) catch {};
+        return m;
+    }
+
+    /// Loads model `name` ahead of its first use (level entry); one that fails is left for
+    /// `get` (which reports it, as at its first use).
+    pub fn preload(self: *Cache, name: []const u8) void {
+        var key_buf: [name_max]u8 = undefined;
+        if (name.len == 0 or name.len > key_buf.len) return;
+        const key = std.ascii.lowerString(&key_buf, name);
+        if (self.models.contains(key)) return;
+        const m = self.load(name) catch return;
+        const a = self.arena.allocator();
+        self.models.put(self.gpa, a.dupe(u8, key) catch return, m) catch {};
+    }
+
+    /// Effect `gfx_3d\Effects\<name>\<name>.dsc` (case-insensitive): frames and blending.
+    pub fn effect(self: *Cache, name: []const u8) ?*const effects_mod.dsc.Dsc {
+        var key_buf: [64]u8 = undefined;
+        if (name.len == 0 or name.len > key_buf.len) return null;
+        const key = std.ascii.lowerString(&key_buf, name);
+        if (self.effects.get(key)) |d| return d;
+        const d: ?*effects_mod.dsc.Dsc = blk: {
+            const f = self.source.effect orelse break :blk null;
+            const dsc = self.arena.allocator().create(effects_mod.dsc.Dsc) catch break :blk null;
+            dsc.* = f(self.source.ctx, self.arena.allocator(), name) catch break :blk null;
+            break :blk dsc;
+        };
+        self.effects.put(self.gpa, self.arena.allocator().dupe(u8, key) catch return d, d) catch {};
+        return d;
+    }
+
+    fn load(self: *Cache, name: []const u8) !*Model {
+        const a = self.arena.allocator();
+        const f = self.source.model orelse return error.NotFound;
+        const m = try a.create(Model);
+        m.* = try f(self.source.ctx, a, name);
+        try m.derive(a);
         return m;
     }
 };

@@ -18,8 +18,8 @@ pub const Place = enum(i32) {
     _,
 };
 
-/// Item kind (`type`); weapons hold a damage kind, so other values are valid.
-const ItemType = enum(i32) {
+/// Item kind (`kind`; a weapon's `damage_kind` is the exe's same `type`, so other values are valid).
+pub const ItemType = enum(i32) {
     other = 0,
     ammo = 10,
     medicine = 20,
@@ -36,7 +36,7 @@ pub fn setPlace(o: *Object, p: Place) void {
 }
 
 pub fn typeOf(o: *Object) ItemType {
-    return @fromBackingInt(@intCast(o.getInt("type")));
+    return @fromBackingInt(@intCast(fields.itemType(o)));
 }
 
 pub const place_hand = @backingInt(Place.hand);
@@ -53,7 +53,13 @@ pub fn consume(item: *Object) void {
     item.enabled = false;
 }
 
-/// A hero's ammo (type 10) merges into his first pack of the same `nameID` (0x457164 →
+/// An ammo item with no rounds (the exe's ready pack of a kind, a used one): shown nowhere
+/// (inventory/list.zig), the next merges into it; an OpenGorky project makes none.
+pub fn emptyPack(o: *Object) bool {
+    return world.isItem(o) and typeOf(o) == .ammo and fields.counter(o) <= 0;
+}
+
+/// A hero's ammo (type 10) merges into his first pack of the same `classic_id` (0x457164 →
 /// 0x47d880); heroes start with empty packs of every kind and use the first (0x4ce358).
 pub fn mergeAmmo(self: *World, item: *Object) void {
     if (typeOf(item) != .ammo or World.nativeOf(item).deleted) return;
@@ -63,7 +69,7 @@ pub fn mergeAmmo(self: *World, item: *Object) void {
     for (self.rt.objects.items) |o| {
         if (o == item) return; // it is the first pack itself
         if (!world.isItem(o)) continue;
-        if (typeOf(o) != .ammo or fields.nameId(o) != fields.nameId(item)) continue;
+        if (typeOf(o) != .ammo or fields.classicId(o) != fields.classicId(item)) continue;
         if (!fields.ownerIs(o, owner)) continue;
         fields.setCounter(o, fields.counter(o) + fields.counter(item));
         World.nativeOf(item).deleted = true;

@@ -30,7 +30,7 @@ pub fn run(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8, out: *s
         const hero = w.selectedHero() orelse return false;
         const hp: [2]f32 = if (std.mem.startsWith(u8, cmd, "cells:")) common.parseXY(cmd[6..]) catch .{ 0, 0 } else w.screenPos(hero);
         const hx, const hy = og.world.nav.cellOf(hp);
-        for ([_]?og.formats.level_files.WalkMap{ w.walk_map, w.walk_map2 }, 0..) |mm, k| if (mm) |m| {
+        for ([_]?og.core.map.WalkMap{ w.map.walk, w.map.walk2 }, 0..) |mm, k| if (mm) |m| {
             try out.print("  floor {d}:\n", .{k});
             var y = hy - 8;
             while (y <= hy + 8) : (y += 1) {
@@ -54,11 +54,11 @@ pub fn run(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8, out: *s
         const hp = w.screenPos(hero);
         {
             const cx, const cy = og.world.nav.cellOf(hp);
-            for ([_]?og.formats.level_files.WalkMap{ w.walk_map, w.walk_map2 }, 0..) |mm, k| if (mm) |m| if (og.world.nav.cellAt(m, .{ cx, cy })) |cell| {
+            for ([_]?og.core.map.WalkMap{ w.map.walk, w.map.walk2 }, 0..) |mm, k| if (mm) |m| if (og.world.nav.cellAt(m, .{ cx, cy })) |cell| {
                 try out.print("  floor {d}: tile {d},{d} kind {d} height {d}{s}\n", .{ k, cx, cy, cell.kind, cell.height, if (og.state.world.actorOf(hero).map == k) " (current)" else "" });
             };
         }
-        for (w.areas) |ar| {
+        for (w.map.areas) |ar| {
             try og.world.route.walkTo(w, hero, ar.control);
             const ok = a.path.items.len > 0 or std.math.hypot(hp[0] - ar.control[0], hp[1] - ar.control[1]) < 40;
             try out.print("  {s} {s} ({d:.0},{d:.0})\n", .{ if (ok) "+" else "-", ar.name, ar.control[0], ar.control[1] });
@@ -83,7 +83,7 @@ pub fn run(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8, out: *s
             if (std.ascii.findIgnoreCase(o.name, cmd[4..]) == null) continue;
             const n = og.state.world.World.nativeOf(o);
             const p = w.screenPos(o);
-            try out.print("  {s}: {t} en {} deleted {} hero {} hro {} Owner '{s}' place {d} at {d:.0},{d:.0}\n", .{ o.name, n.kind, o.enabled, n.deleted, n.hero, n.hro, if (o.getVar("Owner") != null) og.fields.owner(o) else "", o.getInt("place"), p[0], p[1] });
+            try out.print("  {s}: {t} en {} deleted {} hero {} hro {} owner '{s}' place {d} at {d:.0},{d:.0}\n", .{ o.name, n.kind, o.enabled, n.deleted, n.hero, n.hro, if (o.getVar("Owner") != null) og.fields.owner(o) else "", o.getInt("place"), p[0], p[1] });
         }
         return true;
     }
@@ -130,7 +130,7 @@ pub fn run(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8, out: *s
             const q = w.cam.project(.{ pp[0], pp[1], if (std.math.isNan(z)) 0 else z });
             const ev = if (k < a.path_events.items.len) a.path_events.items[k] else null;
             try out.print("  {d}{s} {d:.0},{d:.0} z {d:.1}", .{ k, if (k == a.path_index) "*" else "", q.x, q.y, z });
-            if (ev) |e| try out.print(" node {s} {d} dir {d}", .{ w.paths[e.path].name, e.no, e.dir });
+            if (ev) |e| try out.print(" node {s} {d} dir {d}", .{ w.map.paths[e.path].name, e.no, e.dir });
             try out.print("\n", .{});
         }
         return true;
@@ -161,6 +161,7 @@ pub fn run(g: *play.PlayGame, w: *og.state.world.World, cmd: []const u8, out: *s
                     .int => |v| h.update(std.mem.asBytes(&v)),
                     .float => |v| h.update(std.mem.asBytes(&v)),
                     .string => |v| h.update(v),
+                    else => h.update(@tagName(e.value_ptr.value)),
                 }
             }
         }

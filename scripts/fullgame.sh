@@ -3,7 +3,9 @@
 # $GORKY_TOOL — another gorky-tool (absolute path, e.g. a build in another mode).
 G=${1:?game dir}
 cd "$(dirname "$0")/.."
-${GORKY_TOOL:-./zig-out/bin/gorky-tool} play $G 01_port autorefill autolevel autoequip wait:300 scene loot goto:trupy scene \
+# Without $GORKY_TOOL: the optimized build, made here (scripts/release.sh).
+. scripts/release.sh
+$GORKY_TOOL play $G 01_port autorefill autolevel autoequip wait:300 scene loot goto:trupy scene \
   goto:fight2_place goto:garcia_place goto:cutscene_trabant scene goto:fight5_place \
   goto:fight6_place goto:fight8_place goto:drzwi_barak goto:drzwi_barak loot \
   goto:worker_exit use:Gloves:furtka scene goto:fight9_place loot \

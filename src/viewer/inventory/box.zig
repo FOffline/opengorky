@@ -56,19 +56,19 @@ pub fn clickBox(self: *InventoryView, w: *World, x: f32, y: f32, scroll: [2]f32)
         const ry = o[1] + 68 * og.num.toF32(i);
         if (x >= o[0] + 12 and x <= o[0] + 31 and y >= ry + 24 and y <= ry + 44) {
             self.box_selected ^= @as(u16, 1) << @intCast(sl.k);
-            w.out.sound(w.gpa, "invselect", null);
+            w.out.sound(w.gpa, og.core.modules.ui().sounds.item_select, null);
             return;
         }
     }
     const k = boxButton(o, slots.len, .{ x, y }) orelse return;
-    w.out.sound(w.gpa, "selecthero", null);
+    w.out.sound(w.gpa, og.core.modules.ui().sounds.select_hero, null);
     switch (k) {
         0, 1 => {
             if (k == 0) try og.inventory.box.takeAllFromBox(w, ex.box, ex.hero) else for (slots) |sl| {
                 if (self.box_selected & (@as(u16, 1) << @intCast(sl.k)) == 0) continue;
                 for (sl.objs[0..sl.n]) |it| try og.inventory.box.takeFromBox(w, ex.box, it, ex.hero);
             }
-            w.out.sound(w.gpa, "invgive", null);
+            w.out.sound(w.gpa, og.core.modules.ui().sounds.give, null);
             self.box_selected = 0;
             if (k == 0 or boxSlots(w, ex.box, &buf).len == 0) og.inventory.box.closeBox(w);
         },
@@ -98,7 +98,7 @@ pub fn drawBox(self: *InventoryView, r: *c.SDL_Renderer, w: *World, scroll: [2]f
             try self.ebox.draw(r, 3, o[0] + 12 + (19 - og.num.toF32(sz[0])) / 2, ry + 24 + (20 - og.num.toF32(sz[1])) / 2);
         }
         const first = sl.objs[0];
-        if (self.icon(first.getString("spriteFile"))) |f| if (f.len() > 1) {
+        if (self.icon(first.getString("icon"))) |f| if (f.len() > 1) {
             const sz = f.sizes.items[1];
             try f.drawShadowed(r, 1, gfx.Frames.center(o[0] + 47, 93, sz[0]), gfx.Frames.center(ry + 8, 52, sz[1]));
         };
@@ -112,7 +112,7 @@ pub fn drawBox(self: *InventoryView, r: *c.SDL_Renderer, w: *World, scroll: [2]f
         const q = std.fmt.bufPrint(&qb, "{d}", .{sl.qty}) catch "";
         gui_mod.textShadow(self.sys, self.text, @intFromFloat(o[0] + 135), @intFromFloat(ry + 11), q, col);
     }
-    const labels = [3][]const u8{ self.strings.get(8) orelse "Take All", self.strings.get(9) orelse "Take Selected", self.strings.get(5) orelse "Cancel" };
+    const labels = [3][]const u8{ self.strings.get(og.core.ui_text.id(.take_all)) orelse "Take All", self.strings.get(og.core.ui_text.id(.take_selected)) orelse "Take Selected", self.strings.get(og.core.ui_text.id(.cancel)) orelse "Cancel" };
     for (labels, 0..) |lb, k| {
         const by = o[1] + 68 * og.num.toF32(slots.len) + 30 * og.num.toF32(k);
         try self.ebox.draw(r, 1, o[0], by);
@@ -128,11 +128,11 @@ pub fn drawBox(self: *InventoryView, r: *c.SDL_Renderer, w: *World, scroll: [2]f
 // ---------------------------------------------------------------- examine menu
 
 /// Object description: `items.inf` for items, `activeareas.inf` for areas.
-fn examineText(self: *InventoryView, o: *Object) []const u8 {
-    const id = og.fields.nameId(o);
+fn examineText(o: *Object) []const u8 {
+    const id = og.fields.classicId(o);
     const k = World.nativeOf(o).kind;
-    if (k == .item or k == .weapon) return self.examine.get(id) orelse "";
-    return self.area_examine.get(id) orelse "";
+    if (k == .item or k == .weapon) return og.core.entity.texts.examine.get(id) orelse "";
+    return og.core.entity.texts.areas.get(id) orelse "";
 }
 
 /// Geometry (0x457340): text height < 30 → 30, else th − th % 10 + 10 (always
@@ -140,7 +140,7 @@ fn examineText(self: *InventoryView, o: *Object) []const u8 {
 /// (+0x64/+0x6c): left of 320 → +60, else −218; computed once at open, no clamp,
 /// doesn't follow scrolling. Y = (400 − 30·rows − H) / 2.
 fn examGeom(self: *InventoryView, w: *World, o: *Object, rows: usize, scroll: [2]f32) Exam {
-    const lines = wrapCount(self, examineText(self, o), 140);
+    const lines = wrapCount(self, examineText(o), 140);
     const th: i32 = @intCast(lines * (self.font.height + 1));
     const h: i32 = (if (th < 30) 30 else th - @rem(th, 10) + 10) + 22;
     const anchor = if (self.exam_anchor) |a| (if (a.obj == o) a.x else null) else null;
@@ -167,9 +167,9 @@ fn wrapCount(self: *InventoryView, text: []const u8, max_w: u32) usize {
 
 fn entryLabel(self: *InventoryView, e: World.ExamineEntry, only: bool, buf: []u8) []const u8 {
     return switch (e) {
-        .action => |a| self.strings.get(a.id) orelse (og.state.groups.operationName(a.id) orelse "?"),
-        .use => |it| std.fmt.bufPrint(buf, "{s} {s}", .{ self.strings.get(4) orelse "Use", self.itemName(it) }) catch "Use",
-        .cancel => if (only) self.strings.get(6) orelse "Ok" else self.strings.get(5) orelse "Cancel",
+        .action => |a| self.strings.get(og.core.ui_text.idNamed(og.rules.actionLabel(a.id)) orelse og.rules.actionText(a.id)) orelse (og.state.groups.operationName(a.id) orelse "?"),
+        .use => |it| std.fmt.bufPrint(buf, "{s} {s}", .{ self.strings.get(og.core.ui_text.id(.use)) orelse "Use", self.itemName(it) }) catch "Use",
+        .cancel => if (only) self.strings.get(og.core.ui_text.id(.ok)) orelse "Ok" else self.strings.get(og.core.ui_text.id(.cancel)) orelse "Cancel",
     };
 }
 
@@ -190,7 +190,7 @@ pub fn clickExamine(self: *InventoryView, w: *World, x: f32, y: f32, scroll: [2]
     const entries = actions_mod.examineEntries(w, ex.obj, &buf);
     const g = examGeom(self, w, ex.obj, entries.len, scroll);
     if (examRow(g, entries.len, .{ x, y })) |i| {
-        w.out.sound(w.gpa, "selecthero", null);
+        w.out.sound(w.gpa, og.core.modules.ui().sounds.select_hero, null);
         return actions_mod.examineChoose(w, entries[i]);
     }
     actions_mod.closeExamine(w);
@@ -218,7 +218,7 @@ pub fn drawExamine(self: *InventoryView, r: *c.SDL_Renderer, w: *World, scroll: 
     }
     @memset(self.text.pixels, 0);
     // Description in font 2 with shadow at (X+9, Y+14) (0x457aa7).
-    _ = inventory_draw.textWrappedShadow(self, self.font, @intFromFloat(g.x + 9), @intFromFloat(g.y + 14), examineText(self, ex.obj), gui_mod.text_light, 140, @intFromFloat(g.y + g.h));
+    _ = inventory_draw.textWrappedShadow(self, self.font, @intFromFloat(g.x + 9), @intFromFloat(g.y + 14), examineText(ex.obj), gui_mod.text_light, 140, @intFromFloat(g.y + g.h));
     for (entries, 0..) |e, i| {
         var lb: [96]u8 = undefined;
         const t = entryLabel(self, e, entries.len == 1, &lb);

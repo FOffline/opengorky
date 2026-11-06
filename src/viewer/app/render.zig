@@ -4,6 +4,7 @@
 const std = @import("std");
 const level_compose = @import("../level/compose.zig");
 const viewer = @import("viewer.zig");
+const frame = @import("frame.zig");
 const og = @import("opengorky");
 const c = @import("sdl");
 const Viewer = viewer.Viewer;
@@ -28,7 +29,7 @@ const screen_h = viewer.screen_h;
 fn prepLevel(v: *Viewer, l: *LevelView) void {
     l.fx_view = v.fx;
     l.shadows = v.shadows;
-    level_compose.setDetail(l, worldDetail(v), @intFromFloat(640 + 2 * gfx.wide));
+    level_compose.setDetail(l, worldDetail(v), @intFromFloat(gfx.frameW()), @intFromFloat(gfx.frameH()));
     l.debug_hud = v.show_debug;
     l.debug = v.debug;
     l.gui = v.gui;
@@ -49,7 +50,7 @@ pub fn render(v: *Viewer) !void {
     const r = v.renderer;
     try viewer.check(c.SDL_SetRenderDrawColor(r, 0, 0, 0, 255));
     try viewer.check(c.SDL_RenderClear(r));
-    const strings = if (v.inventory) |inv| &inv.strings else null;
+    const strings = if (v.inventory) |inv| inv.strings else null;
 
     var buf: [256]u8 = undefined;
     var line2: [:0]const u8 = undefined;
@@ -57,9 +58,10 @@ pub fn render(v: *Viewer) !void {
         // The frame shrinks to the centre over 8 ticks, then black with the saw (its frame
         // counter runs from the 9th tick, 0x41f401).
         const k: f32 = @floatFromInt(tr.ticks);
-        const h = @max(0, 480 - 60 * k);
+        const fh = gfx.frameH();
+        const h = @max(0, fh - 60 * k);
         gfx.wholeView(r);
-        if (h > 0) try viewer.check(c.SDL_RenderTexture(r, snap, null, &.{ .x = 0, .y = (480 - h) / 2, .w = 640 + 2 * gfx.wide, .h = h }));
+        if (h > 0) try viewer.check(c.SDL_RenderTexture(r, snap, null, &.{ .x = 0, .y = (fh - h) / 2, .w = gfx.frameW(), .h = h }));
         gfx.middleView(r);
         if (v.gui) |g| if (g.spinner.len() > 0) {
             const fr = (tr.ticks -| 8) % @as(u32, @intCast(g.spinner.len()));
@@ -114,7 +116,7 @@ pub fn render(v: *Viewer) !void {
     if (v.level != null and v.inventory != null and v.inventory.?.open) {
         const inv = v.inventory.?;
         try inventory_draw.draw(inv, r, v.level.?.world, v.gui, v.mouse);
-        if (v.gui) |g| try gui_stats.drawSkills(g, r, v.level.?.world, &inv.strings);
+        if (v.gui) |g| try gui_stats.drawSkills(g, r, v.level.?.world, inv.strings);
         if (v.gui) |g| if (!inv.hidesCursor()) try gui_panel.drawCursor(g, r, v.mouse[0], v.mouse[1]);
         return;
     }
@@ -123,24 +125,24 @@ pub fn render(v: *Viewer) !void {
         prepLevel(v, l);
         l.window_top = if (v.inventory) |inv| inv.give != null else false;
         // Give, use and push modes in battle: the cell cross at the hero.
-        l.cross_mode = l.world.mouse.cross();
+        l.cross_mode = l.mode.cross();
         // Zoom (0x41fe80): the world is drawn into a texture and stretched about the
         // screen centre; the UI goes on top unzoomed.
         const zoomed = @abs(camera_view.viewZoom(v) - 1) > 0.001;
         const z = camera_view.viewZoom(v);
         const zk = worldDetail(v);
         if (zoomed) {
-            const zw: f32 = (640 + 2 * gfx.wide) * og.num.toF32(zk);
+            const zw: f32 = gfx.frameW() * og.num.toF32(zk);
             if (v.zoom_tex) |t| {
                 var tw: f32 = 0;
                 var th: f32 = 0;
                 _ = c.SDL_GetTextureSize(t, &tw, &th);
-                if (tw != zw) {
+                if (tw != zw or th != gfx.frameH() * og.num.toF32(zk)) {
                     c.SDL_DestroyTexture(t);
                     v.zoom_tex = null;
                 }
             }
-            if (v.zoom_tex == null) v.zoom_tex = c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_TARGET, @intFromFloat(zw), @intCast(480 * zk));
+            if (v.zoom_tex == null) v.zoom_tex = c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_TARGET, @intFromFloat(zw), @intFromFloat(gfx.frameH() * og.num.toF32(zk)));
             if (v.zoom_tex) |t| {
                 try viewer.check(c.SDL_SetRenderTarget(r, t));
                 const f: f32 = @floatFromInt(zk);
@@ -152,6 +154,9 @@ pub fn render(v: *Viewer) !void {
         // The world over the whole (maybe wide) frame, the UI in its middle 640.
         gfx.wholeView(r);
         try level_compose.draw(l, r, wideScroll(scroll), wideMouse(camera_view.worldMouse(v)));
+        // A project's post-processing over the world (OpenGorky rules; none in Classic).
+        const steps = og.core.modules.postSteps(l.world.level_name);
+        if (steps.len > 0) frame.applyPost(v, steps);
         try battle_hud.drawBattleHud(l, r, wideScroll(scroll), v.gui);
         // Selected hero frame outside battle and scenes (0x45b920).
         // The level-up points window is the top GUI mode (0x4af7c2): only it draws
@@ -162,8 +167,9 @@ pub fn render(v: *Viewer) !void {
             try viewer.check(c.SDL_SetRenderTarget(r, v.frame_tex));
             gfx.wholeView(r);
             const hw = 320 + gfx.wide;
+            const hh = 240 + gfx.tall;
             const f: f32 = @floatFromInt(zk);
-            const src: c.SDL_FRect = .{ .x = (hw - hw / z) * f, .y = (240 - 240 / z) * f, .w = 2 * hw / z * f, .h = 480 / z * f };
+            const src: c.SDL_FRect = .{ .x = (hw - hw / z) * f, .y = (hh - hh / z) * f, .w = 2 * hw / z * f, .h = 2 * hh / z * f };
             try viewer.check(c.SDL_RenderTexture(r, t, &src, null));
         };
         gfx.middleView(r);
@@ -171,7 +177,7 @@ pub fn render(v: *Viewer) !void {
         // not by "Use … on …" (0x453f80), which shows only its two lines at the cursor.
         // Push (0x452bf0) and give (0x4539e0) don't draw fighter info either.
         // The count window over battle (0x4b2fb0): the battle mode below is not drawn.
-        if (v.gui) |g| if (!stats_modal and !l.window_top and l.world.mouse.use == null and l.world.mouse.give == null and !(l.world.mouse.push and l.world.battle != null)) try battle_hud.drawFighterInfo(l, r, g, camera_view.bgMouse(v, v.mouse), v.mouse);
+        if (v.gui) |g| if (!stats_modal and !l.window_top and l.mode.use == null and l.mode.give == null and !(l.mode.push and l.world.battle != null)) try battle_hud.drawFighterInfo(l, r, g, camera_view.bgMouse(v, v.mouse), v.mouse);
         try overlay.drawOverlay(l, r, if (v.gui) |g| gui_panel.dialogArt(g, l.world) else .{});
         if (v.gui) |g| try gui_panel.drawSignature(g, r, l.world);
         if (v.gui) |g| try gui_battle.drawBattleBanner(g, r, l.world, strings);
@@ -194,7 +200,7 @@ pub fn render(v: *Viewer) !void {
         // Give mode count window (0x4b2fb0) over the field.
         if (v.inventory) |inv| if (inv.give != null) try inventory_give.drawGive(inv, r, v.mouse);
         line2 = try printZ(&buf, "level {s}: tick {d}{s}{s}  scroll {d},{d}  model scale {d}%  hero {s}", .{
-            l.level.name,                                       l.world.ticks,
+            l.world.level_name,                                 l.world.ticks,
             if (l.paused) " (paused)" else "",                  if (l.speed > 1) " >>" else "",
             @as(i32, @intFromFloat(v.scroll[0])),               @as(i32, @intFromFloat(v.scroll[1])),
             @as(i32, @intFromFloat(v.debug.scale_tweak * 100)), l.world.selected_hero,
@@ -256,12 +262,12 @@ pub fn render(v: *Viewer) !void {
 
 /// Scroll of the whole frame's left edge (the middle 640 starts at `scroll`).
 fn wideScroll(s: [2]f32) [2]f32 {
-    return .{ s[0] - gfx.wide, s[1] };
+    return .{ s[0] - gfx.wide, s[1] - gfx.tall };
 }
 
-/// A middle-640 point in whole-frame coordinates.
+/// A middle-640×480 point (the world's: camera.worldMouse) in whole-frame coordinates.
 fn wideMouse(m: [2]f32) [2]f32 {
-    return .{ m[0] + gfx.wide, m[1] };
+    return .{ m[0] + gfx.wide, m[1] + gfx.tall };
 }
 
 /// Screen frame into a texture (frozen battle under the defeat text).

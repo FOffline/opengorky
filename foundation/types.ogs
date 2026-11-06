@@ -1,0 +1,163 @@
+// The engine's types: the data the OG reader reads (core/schema.zig), the battle's sides.
+
+// Where an item is (an item's `place`).
+enum ItemPlace {
+    gone = -1 "Gone",
+    ground = 0 "On the ground",
+    backpack = 1 "In the backpack",
+    hand = 11 "In hand",
+    armor = 13 "Worn",
+    party = 200 "The party's",
+}
+
+// What an item is (an item's `type`).
+enum ItemKind {
+    other = 0 "Other",
+    ammo = 10 "Ammunition",
+    medicine = 20 "Medicine",
+    armor = 30 "Armour",
+}
+
+// What a weapon hits with (a weapon's `type`): its damage kind, which the targets'
+// resistances answer (battle/immunity.zig DamageType); bullets, melee, tear gas and
+// explosions no resistance answers: they hit everyone.
+enum WeaponKind {
+    none = 0 "None",
+    fire = 1 "Fire",
+    freeze = 2 "Cold",
+    electricity = 3 "Electricity",
+    teargas = 4 "Tear gas",
+    gas = 5 "Gas",
+    bullet = 6 "Bullets",
+    melee = 7 "Melee",
+    tranq = 9 "Tranquilizer",
+    energy = 11 "Energy",
+    attract = 12 "Decoy",
+    explosion = 13 "Explosion",
+    flammable = 14 "Fuel",
+}
+
+// A resistance (a fighter's `resist = [fire, gas]`, a Resist row's `resist`): the damage
+// kinds it shrugs off (battle/immunity.zig Resist).
+enum Resistance {
+    fire = 1 "Fire",
+    electricity = 2 "Electricity",
+    attract = 3 "Decoy",
+    energy = 4 "Energy",
+    freeze = 5 "Cold",
+    tranq = 6 "Tranquilizer",
+    gas = 7 "Gas",
+    flammable = 8 "Fuel",
+}
+
+// A state a hit applies (a WeaponClass row's `effects = [sleep]`; rules/rows.zig Effect).
+enum Effect {
+    burn = 1 "Sets on fire",
+    freeze = 2 "Freezes",
+    gas = 3 "Gasses",
+    soak = 4 "Soaks with fuel",
+    defend = 5 "Defence stance",
+    sleep = 6 "Puts to sleep",
+    bite = 8 "Poison bite",
+}
+
+// A monster's armour class (a fighter's `armor`; battle/rules.zig afterArmor): the weapon's
+// light_armor_pct, medium_armor_pct or heavy_armor_pct cuts its damage; none: no cut. A
+// hero's `armor` is points taken off the damage instead: a number.
+enum ArmorClass {
+    light = 0 "Light",
+    medium = 1 "Medium",
+    heavy = 2 "Heavy",
+    none = 3 "None",
+}
+
+// An actor's `gender`: women do not push, only men groan as they are healed.
+enum Gender {
+    male = 0 "Male",
+    female = 1 "Female",
+}
+
+// A fighter's `ai_mode` (combat/ai.zig): who it strikes, whether it moves.
+enum AiMode {
+    free = 0 "Free",
+    target = 1 "Only its target",
+    passive = 2 "Skips its turn",
+    guard = 3 "Guards its tile",
+}
+
+// A battle's side (OnTurnStart's `side`, host.side: "hero", "enemy").
+enum Side {
+    hero "Heroes",
+    enemy "Enemies",
+    civilian "Civilians",
+}
+
+// Where an actor stands as the level starts (restore()'s PlaceActor): on a battle tile
+// ([x, y] or [x, y, direction in eighths of a turn]) or at an area's point.
+struct Place {
+    object who "Who";
+    list<int> tile = nil "Tile";
+    string at = "" "Area";
+    int point = 0 "Point of the area";
+    int floor = 0 "Floor";
+}
+
+// The level's camera (initCamera()'s fields): those given are set.
+struct Camera {
+    bool perspective = false "Perspective";
+    float near_plane = 0.0 "Near plane";
+    float far_plane = 0.0 "Far plane";
+    float ortho_rotation_radians = 0.0 "Isometric rotation, rad";
+    float eye_x = 0.0 "Eye X";
+    float eye_y = 0.0 "Eye Y";
+    float eye_z = 0.0 "Eye Z";
+    float target_x = 0.0 "Target X";
+    float target_y = 0.0 "Target Y";
+    float target_z = 0.0 "Target Z";
+    float fov = 0.0 "Field of view";
+    float floor_z = 0.0 "Floor level";
+    float camera_scale = 0.0 "Scale";
+    float aspect_ratio = 0.0 "Aspect ratio";
+    float camera_bank = 0.0 "Bank";
+}
+
+// An enemy's AI this plan (Enemy.AiProfile's answer): the fields given go over its
+// profile (rules AiProfile) and its scoring (rules AiScoring); nil: as they are.
+struct AiProfile {
+    any scoring = nil "Scoring";
+    any attack_weight = nil "Attack weight";
+    any threat_weight = nil "Threat weight";
+    any opponent_distance_weight = nil "Distance weight";
+    any guard_distance_weight = nil "Guard point weight";
+    any mode = nil "Mode";
+    any damage_bonus = nil "Damage bonus";
+    any ally_penalty = nil "Ally penalty";
+    any lock = nil "Locked target x%";
+    any monitor = nil "Monitor x";
+    any decoy_pull = nil "Decoy pull";
+    any decoys = nil "Follows decoys";
+    any step_away = nil "Steps away after a strike";
+    any threat = nil "Weighs threat";
+    any keep = nil "Weapons it plans with";
+    any occupant = nil "Worth on a hit tile";
+    any tile = nil "What of a hit tile";
+    any wakeful = nil "Plans asleep";
+    any near = nil "Stays near";
+}
+
+// A look's animations (an act_*.ss): ActorSetWalkSpeed, RegisterIdleAnimation, RegisterAnimation.
+struct Speed {
+    string anim "Animation";
+    float speed "Speed";
+}
+struct Idle {
+    int state = 0 "State";
+    string anim "Animation";
+    int weight "Weight";
+}
+struct Slot {
+    int state = 0 "State";
+    string name "Slot";
+    string anim "Animation";
+}
+

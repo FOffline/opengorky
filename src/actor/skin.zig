@@ -7,8 +7,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const mesh_fmt = @import("../formats.zig").mesh;
-const anim = @import("../formats.zig").anim;
+const model = @import("../core.zig").model;
 
 pub const Convention = enum {
     /// v' = R·v + t, R by rows.
@@ -34,7 +33,7 @@ pub fn transform(m: *const [12]f32, v: [3]f32, conv: Convention) [3]f32 {
 
 /// Vertex positions of all parts at `frame` (global .bfr number).
 /// One array per part, in `arena`.
-pub fn pose(arena: Allocator, mesh: mesh_fmt.Mesh, frames: anim.BoneFrames, frame: u32, conv: Convention) Allocator.Error![][][3]f32 {
+pub fn pose(arena: Allocator, mesh: model.Mesh, frames: model.BoneFrames, frame: u32, conv: Convention) Allocator.Error![][][3]f32 {
     const out = try arena.alloc([][3]f32, mesh.parts.len);
     for (mesh.parts, out) |part, *dst| {
         dst.* = try arena.alloc([3]f32, part.vertices.len);
@@ -61,12 +60,12 @@ pub fn pose(arena: Allocator, mesh: mesh_fmt.Mesh, frames: anim.BoneFrames, fram
 
 test "pose: weight the bones leave stays on the bind pose" {
     // One bone moving +10 x with 60% weight: 40% of the vertex stays put.
-    var infl = [_]mesh_fmt.Influence{.{ .bone = 0, .weight = 0.6 }};
-    var verts = [_]mesh_fmt.Vertex{.{ .pos = .{ 1, 2, 3 }, .uv = .{ 0, 0 } }};
-    var ranges = [_][2]u32{.{ 0, 1 }};
-    var parts = [_]mesh_fmt.Part{.{ .name = "", .vertices = &verts, .ranges = &ranges, .influences = &infl, .triangles = &.{} }};
-    const m: mesh_fmt.Mesh = .{ .arena = undefined, .parts = &parts };
-    var mats = [_][12]f32{.{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 0, 0 }};
+    const infl = [_]model.Influence{.{ .bone = 0, .weight = 0.6 }};
+    const verts = [_]model.Vertex{.{ .pos = .{ 1, 2, 3 }, .uv = .{ 0, 0 } }};
+    const ranges = [_][2]u32{.{ 0, 1 }};
+    const parts = [_]model.Part{.{ .name = "", .vertices = &verts, .ranges = &ranges, .influences = &infl, .triangles = &.{} }};
+    const m: model.Mesh = .{ .parts = &parts };
+    const mats = [_][12]f32{.{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 0, 0 }};
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const out = try pose(arena.allocator(), m, .{ .frames = 1, .bones = 1, .matrices = &mats, .extra = &.{} }, 0, .column);

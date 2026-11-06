@@ -12,7 +12,7 @@ const archive = og.formats.archive;
 /// resolve, and collects calls to functions not defined in scripts
 /// (engine builtins).
 pub fn checkScripts(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, print_api: bool) !void {
-    var dat = try common_mod.openDat(io, game_dir, .{ .iterate = true });
+    var dat = try common_mod.openDat(io, game_dir);
     defer dat.close(io);
     const archives = try og.formats.archive.listArchives(io, gpa, dat);
     defer og.formats.archive.freeList(gpa, archives);
@@ -62,7 +62,7 @@ pub fn checkScripts(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u
                 .var_decl => {},
             };
             for (refs.items) |name| {
-                if (resolveScript(arc, common, name) == null) {
+                if (og.loaders.world.findScript(arc, common, name) == null) {
                     unresolved += 1;
                     try out.print("{s}: {s}: cannot resolve '{s}'\n", .{ path, e.name, name });
                 }
@@ -92,14 +92,6 @@ pub fn checkScripts(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u
     try out.print("scripts {d}, failed {d}, functions {d}, unresolved includes {d}\n", .{ files, failed, functions, unresolved });
 }
 
-/// Finds an included script: first in the level archive, then in `common/other.dat: classes\`.
-fn resolveScript(local: archive.Archive, common: archive.Archive, name: []const u8) ?*const archive.Entry {
-    if (local.find(name)) |e| return e;
-    var buf: [archive.name_size]u8 = undefined;
-    const in_classes = std.fmt.bufPrint(&buf, "classes\\{s}", .{name}) catch return null;
-    return common.find(in_classes);
-}
-
 fn collectStmt(
     arena: Allocator,
     st: *const og.script.ast.Stmt,
@@ -115,7 +107,7 @@ fn collectStmt(
             try collectStmt(arena, i.then, calls, refs);
             if (i.@"else") |e| try collectStmt(arena, e, calls, refs);
         },
-        .@"return" => |v| if (v) |e| try collectExpr(arena, e, calls),
+        .@"return" => |v| if (v.value) |e| try collectExpr(arena, e, calls),
         .var_decl, .empty => {},
     }
 }

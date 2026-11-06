@@ -3,23 +3,23 @@
 
 const std = @import("std");
 const num = @import("num.zig");
-const adjust = @import("formats.zig").adjust;
+const adjust = @import("rules.zig").adjust;
 
 /// TextEffect adjust.kdt values (registered 0x4c8660…0x4c87f0, tick 0x4c8c20): fade-in
 /// teff_m1_step, flash teff_m2_step, hold teff_m2_timelen ticks, fade-out teff_m3_step,
 /// height teff_height·aS (0x4c8bbd). teff_linedist is registered but never read;
 /// teff_wait_a_little = 1 means it rises only while holding and fading (0x4c8d01).
 fn teffM1() f32 {
-    return adjust.getFloat("teff_m1_step", 0.15);
+    return adjust.float("teff_m1_step");
 }
 fn teffM2() f32 {
-    return adjust.getFloat("teff_m2_step", 0.1);
+    return adjust.float("teff_m2_step");
 }
 fn teffM3() f32 {
-    return adjust.getFloat("teff_m3_step", 0.05);
+    return adjust.float("teff_m3_step");
 }
 pub fn teffHeight() f32 {
-    return @floatFromInt(adjust.getInt("teff_height", 650));
+    return @floatFromInt(adjust.int("teff_height"));
 }
 
 /// Floating text (TextEffect 0x4c8830, tick 0x4c8c20, draw 0x4c8d50): centred 3d_msg
@@ -51,61 +51,61 @@ pub const Popup = struct {
         p.len = @intCast(n);
         switch (style) {
             .damage => {
-                p.rgb = adjust.getRgb("cfcHpLoss", .{ 247, 83, 16 });
+                p.rgb = adjust.rgb("cfcHpLoss");
                 p.scale = 0.8;
             },
             .heal => {
-                p.rgb = adjust.getRgb("cfcHpGain", .{ 50, 160, 175 });
+                p.rgb = adjust.rgb("cfcHpGain");
                 p.scale = 0.8;
             },
             .miss => {
-                p.rgb = adjust.getRgb("cfcMiss", .{ 95, 208, 179 });
+                p.rgb = adjust.rgb("cfcMiss");
                 p.scale = 0.75;
             },
             .exp => {
-                p.rgb = adjust.getRgb("cfcExpGain", .{ 207, 254, 251 });
+                p.rgb = adjust.rgb("cfcExpGain");
                 p.scale = 0.6;
                 p.delay = 40;
             },
             .level => {
-                p.rgb = adjust.getRgb("cfcLevelGain", .{ 255, 255, 255 });
+                p.rgb = adjust.rgb("cfcLevelGain");
                 p.scale = 0.8;
                 p.delay = 75;
             },
             .info => {
-                p.rgb = adjust.getRgb("cfcProt", .{ 202, 230, 240 });
+                p.rgb = adjust.rgb("cfcProt");
                 p.scale = 0.5;
                 // Delay object 0x4cd7b0(30): after the damage number.
                 p.delay = 30;
             },
             .skill => {
-                p.rgb = adjust.getRgb("cfcSkillGain", .{ 155, 212, 255 });
+                p.rgb = adjust.rgb("cfcSkillGain");
                 p.scale = 0.6;
             },
             .crit => {
-                p.rgb = adjust.getRgb("cfcCriticalhit", .{ 235, 252, 255 });
+                p.rgb = adjust.rgb("cfcCriticalhit");
                 p.scale = 0.75;
             },
             .range => {
-                p.rgb = adjust.getRgb("cfcOutofrange", .{ 202, 230, 240 });
+                p.rgb = adjust.rgb("cfcOutofrange");
                 p.scale = 0.6;
             },
             .notice => {
-                p.rgb = adjust.getRgb("cfcNoammo", .{ 202, 230, 240 });
+                p.rgb = adjust.rgb("cfcNoammo");
                 p.scale = 0.6;
             },
             // "Counterattack" (516) over the hero, cfcCounter, scale 1 (0x45be3d).
             .counter => {
-                p.rgb = adjust.getRgb("cfcCounter", .{ 184, 205, 247 });
+                p.rgb = adjust.rgb("cfcCounter");
                 p.scale = 1;
             },
             // Turn banners (0x45b1b0, 0x45b150): cfcPlayerTurn / cfcMonsterTurn, 1.5.
             .player_turn => {
-                p.rgb = adjust.getRgb("cfcPlayerTurn", .{ 80, 164, 160 });
+                p.rgb = adjust.rgb("cfcPlayerTurn");
                 p.scale = 1.5;
             },
             .enemy_turn => {
-                p.rgb = adjust.getRgb("cfcMonsterTurn", .{ 200, 90, 50 });
+                p.rgb = adjust.rgb("cfcMonsterTurn");
                 p.scale = 1.5;
             },
         }
@@ -152,7 +152,7 @@ pub const Popup = struct {
             2 => {
                 self.dy += 1;
                 self.hold += 1;
-                if (self.hold >= @as(u32, @intCast(@max(0, adjust.getInt("teff_m2_timelen", 30))))) {
+                if (self.hold >= @as(u32, @intCast(@max(0, adjust.int("teff_m2_timelen"))))) {
                     self.state = 3;
                     self.v = 1;
                 }

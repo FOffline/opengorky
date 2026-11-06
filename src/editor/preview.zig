@@ -6,17 +6,16 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const og = @import("opengorky");
 const c = @import("sdl");
+const lay = @import("layout.zig");
 const Cache = og.actor.model_cache.Cache;
 const fx = @import("preview_fx.zig");
-
-pub const size = 512;
 
 /// A weapon in the actor's hand: its model and the actor model's hold point
 /// (`two_hands` for a two-handed item, else `one_hand`; actors.zig in the viewer).
 pub const Held = struct {
     mesh: []const u8,
     link: []const u8,
-    /// The strike's effects (flash, projectile, hit), the game's by weapon nameID.
+    /// The strike's effects (flash, projectile, hit), the game's by weapon classic_id.
     strike: ?fx.Strike = null,
 };
 
@@ -29,15 +28,25 @@ const RiderShown = struct { mesh: []const u8 = "", anim: []const u8 = "", key: u
 
 pub const Preview = struct {
     cache: ?Cache = null,
+    /// The models' textures (renderer side, over the cache's files).
+    textures: ?og.render.textures.Textures = null,
     tex: ?*c.SDL_Texture = null,
     /// What is shown: model and animation file name (for the fixed framing).
     key_buf: [128]u8 = undefined,
     key_len: usize = 0,
-    /// Vertical centre and scale for the whole animation (no jumping between frames).
+    /// Vertical centre and height for the whole animation (no jumping between frames).
     frame_y: f32 = 0,
-    frame_k: f32 = 1,
+    frame_h: f32 = 1,
+    /// The wheel's zoom over the framing and the picture moved by a drag (pixels).
+    zoom: f32 = 1,
+    shift: [2]f32 = .{ 0, 0 },
+    /// The texture's size in pixels.
+    tex_w: u32 = 0,
+    tex_h: u32 = 0,
     start_ms: u64 = 0,
     yaw: f32 = 210,
+    /// Tilt (degrees): positive looks from above.
+    pitch: f32 = 0,
     /// Effect frames by name; the strike's effects and the sounds they asked for.
     fx_frames: fx.Frames = .{},
     sim: ?*fx.Sim = null,
@@ -54,10 +63,13 @@ pub const Preview = struct {
     prev: ?u32 = null,
     drawn_ms: u64 = 0,
     /// Stopped on this frame of the animation (from its first); null — playing.
-    paused: ?u32 = null,
+    paused: ?u32 = 0,
     /// The shown animation's frame count and the shown frame's place in it.
     frames: u32 = 1,
     at: u32 = 0,
+    /// The model's attach points as drawn last (the Model page's handles).
+    points_buf: [32]Point = undefined,
+    points: []const Point = &.{},
 
     /// Playing ↔ stopped on the frame shown.
     pub fn togglePause(self: *Preview) void {
@@ -87,23 +99,31 @@ pub const Preview = struct {
         if (self.cache) |*cc| {
             self.fx_frames.deinit(cc.gpa);
             self.fx_frames = .{};
+            if (self.textures) |*t| t.deinit();
+            self.textures = null;
             cc.deinit();
         }
         self.cache = null;
         self.key_len = 0;
     }
 
+    /// Model `mesh` of the preview's cache (the core's model records over the game's files,
+    /// `overlay`'s unsaved ones first); null — no such model.
+    pub fn modelOf(self: *Preview, gpa: Allocator, io: std.Io, dat: std.Io.Dir, overlay: og.compose.models.Overlay, mesh: []const u8) ?*og.actor.model_cache.Model {
+        if (self.cache == null) {
+            self.cache = og.compose.models.open(io, gpa, dat, overlay) catch return null;
+            self.textures = og.compose.models.textures(gpa, &self.cache.?);
+        }
+        return self.cache.?.get(mesh);
+    }
+
     /// Model `mesh` in animation `anim` (a file animation name) at the current time;
     /// null — no such model.
-    /// `overlay` gives unsaved model files (new looks).
-    pub fn draw(self: *Preview, gpa: Allocator, io: std.Io, dat: std.Io.Dir, r: *c.SDL_Renderer, overlay: og.actor.model_cache.Overlay, mesh: []const u8, anim: []const u8, held: ?Held, riders: []const Rider) ?*c.SDL_Texture {
-        if (self.cache == null) {
-            self.cache = Cache.open(io, gpa, dat) catch return null;
-            self.cache.?.overlay = overlay;
-        }
-        const model = self.cache.?.get(mesh) orelse return null;
+    /// `overlay` gives unsaved model files (new looks); `px`: the picture's size.
+    pub fn draw(self: *Preview, gpa: Allocator, io: std.Io, dat: std.Io.Dir, r: *c.SDL_Renderer, overlay: og.compose.models.Overlay, mesh: []const u8, anim: []const u8, held: ?Held, riders: []const Rider, px: [2]u32) ?*c.SDL_Texture {
+        const model = self.modelOf(gpa, io, dat, overlay, mesh) orelse return null;
         // A model without animations (a prop: chaingun, a crate) in its one pose.
-        const rest: og.formats.anim.Animation = .{ .name = "", .first = 0, .last = 0, .speed = 0, .sounds = &.{} };
+        const rest: og.core.model.Animation = .{ .name = "", .first = 0, .last = 0, .speed = 0, .sounds = &.{} };
         const a = model.anims.find(anim) orelse if (model.anims.items.len > 0) &model.anims.items[0] else &rest;
         var arena_state: std.heap.ArenaAllocator = .init(gpa);
         defer arena_state.deinit();
@@ -129,7 +149,7 @@ pub const Preview = struct {
                 };
             }
             self.frame_y = (lo + hi) / 2;
-            self.frame_k = @as(f32, size) * 0.8 / @max(hi - lo, 1);
+            self.frame_h = @max(hi - lo, 1);
         }
         // The strike's effects (preview_fx.zig), made again for another model, animation or strike.
         const want: ?fx.Strike = if (held) |h| h.strike else null;
@@ -194,46 +214,74 @@ pub const Preview = struct {
         const yaw = self.yaw * std.math.pi / 180.0;
         const cy = @cos(yaw);
         const sy = @sin(yaw);
+        const pitch = self.pitch * std.math.pi / 180.0;
+        const cp = @cos(pitch);
+        const sp_ = @sin(pitch);
         // Framing: with effects, the box they reach too (in the model's axes: world
         // (x, y, z)/(aS·unit) is (x, z, y)).
-        var k = self.frame_k;
-        var cx: f32 = size / 2;
+        const w: f32 = @floatFromInt(px[0]);
+        const h: f32 = @floatFromInt(px[1]);
+        var k = @min(w, h) * 0.8 / self.frame_h;
+        var cx: f32 = w / 2;
         var ym = self.frame_y;
-        const height = @as(f32, size) * 0.8 / self.frame_k;
+        const height = self.frame_h;
         if (self.sim) |sm| if (sm.box[0][0] <= sm.box[1][0]) {
             const u = og.actor.model_cache.default_actor_scale * model.unitScale();
             var lo = [2]f32{ -height * 0.3, self.frame_y - height / 2 };
             var hi = [2]f32{ height * 0.3, self.frame_y + height / 2 };
             for (0..8) |i| {
-                const w = [3]f32{ sm.box[i & 1][0], sm.box[(i >> 1) & 1][1], sm.box[i >> 2][2] };
-                const sx = (w[0] * cy + w[1] * sy) / u;
-                lo = .{ @min(lo[0], sx), @min(lo[1], w[2] / u) };
-                hi = .{ @max(hi[0], sx), @max(hi[1], w[2] / u) };
+                const q = [3]f32{ sm.box[i & 1][0], sm.box[(i >> 1) & 1][1], sm.box[i >> 2][2] };
+                const sx = (q[0] * cy + q[1] * sy) / u;
+                lo = .{ @min(lo[0], sx), @min(lo[1], q[2] / u) };
+                hi = .{ @max(hi[0], sx), @max(hi[1], q[2] / u) };
             }
-            k = @min(k, @as(f32, size) * 0.9 / @max(hi[0] - lo[0], hi[1] - lo[1]));
-            cx = size / 2 - (lo[0] + hi[0]) / 2 * k;
+            k = @min(k, 0.9 * @min(w / @max(hi[0] - lo[0], 1e-3), h / @max(hi[1] - lo[1], 1e-3)));
+            cx = w / 2 - (lo[0] + hi[0]) / 2 * k;
             ym = (lo[1] + hi[1]) / 2;
         };
+        // Zoomed about the picture's centre.
+        cx = w / 2 + (cx - w / 2) * self.zoom + self.shift[0];
+        const cyp = h / 2 + self.shift[1];
+        k *= self.zoom;
         // The engine's camera for the effects, the preview's view: orthographic but for
         // an eye `far` away; scale 1/(aS·unit) takes world points to the model's axes.
         const far = 1e4 * @max(height, 1);
         const cam: og.actor.camera.Camera = .{ .persp = .{
-            .eye = .{ sy * far, ym, -cy * far },
-            .fwd = .{ -sy, 0, cy },
+            .eye = .{ sy * cp * far, ym - sp_ * far, -cy * cp * far },
+            .fwd = .{ -sy * cp, sp_, cy * cp },
             .right = .{ cy, 0, sy },
-            .up = .{ 0, 1, 0 },
+            .up = .{ sy * sp_, cp, -cy * sp_ },
             .focal = k * far,
             .focal_y = k * far,
             .cx = cx,
-            .cy = size / 2,
+            .cy = cyp,
             .scale = 1 / (og.actor.model_cache.default_actor_scale * model.unitScale()),
             .zlevel = 0,
         } };
-        var layer = og.render.layer.Layer.initScaled(gpa, size, size, 1) catch return null;
+        const view: View = .{ .cx = cx, .cy = cyp, .k = k, .ym = ym, .yaw = .{ cy, sy }, .pitch = .{ cp, sp_ }, .far = far };
+        // The attach points where drawn, and how a unit of offset moves each.
+        var np: usize = 0;
+        for (model.mesh.hold_modes, 0..) |hm, hi| {
+            if (np == self.points_buf.len) break;
+            const at = holdPoint(model, frame, hm, .{ 0, 0, 0 }) orelse continue;
+            const p0 = view.project(og.actor.model_cache.localPoint(model, at));
+            var pt: Point = .{ .i = hi, .at = .{ p0[0], p0[1] }, .d = undefined };
+            for (0..3) |ax| {
+                var off: [3]f32 = @splat(0);
+                off[ax] = 1;
+                const p1 = view.project(og.actor.model_cache.localPoint(model, holdPoint(model, frame, hm, off).?));
+                pt.d[ax] = .{ p1[0] - p0[0], p1[1] - p0[1] };
+            }
+            self.points_buf[np] = pt;
+            np += 1;
+        }
+        self.points = self.points_buf[0..np];
+        var layer = og.render.layer.Layer.initScaled(gpa, px[0], px[1], 1) catch return null;
         defer layer.deinit(gpa);
+        layer.textures = &self.textures.?;
         const canvas = &layer.canvas;
-        var px: usize = 0;
-        while (px < canvas.img.pixels.len) : (px += 4) canvas.img.pixels[px..][0..4].* = .{ 17, 18, 20, 255 };
+        var o: usize = 0;
+        while (o < canvas.img.pixels.len) : (o += 4) canvas.img.pixels[o..][0..4].* = lay.canvas.preview_bg;
         const light = [3]f32{ 0.4, 0.7, -0.6 };
         for (drawn.items) |dd| if (dd) |d| for (d.m.mesh.parts, d.pts, 0..) |part, ppts, pi| {
             // Points in the actor model's axes (the weapon's are in its units already).
@@ -242,16 +290,13 @@ pub const Preview = struct {
                 var sp: [3][3]f32 = undefined;
                 var uv: [3][2]f32 = undefined;
                 for (0..3) |i| {
-                    const p = ppts[t[i]];
-                    const x = p[0] * cy + p[2] * sy;
-                    const z = -p[0] * sy + p[2] * cy;
-                    sp[i] = .{ cx + x * k, size / 2 - (p[1] - ym) * k, far + z };
+                    sp[i] = view.project(ppts[t[i]]);
                     uv[i] = part.vertices[t[i]].uv;
                 }
                 const nrm = og.vec.cross(og.vec.sub(ppts[t[1]], ppts[t[0]]), og.vec.sub(ppts[t[2]], ppts[t[0]]));
                 const len = og.vec.len(nrm);
                 const shade = if (len > 0) 0.45 + 0.55 * @abs((nrm[0] * light[0] + nrm[1] * light[1] + nrm[2] * light[2]) / len) else 1;
-                if (self.wire) wireTriangle(&canvas.img, sp, shade) else canvas.triangle(sp, uv, d.m.partTexture(pi), og.render.raster.gray(shade));
+                if (self.wire) wireTriangle(&canvas.img, sp, shade) else canvas.triangle(sp, uv, self.textures.?.partTexture(d.m, pi), og.render.raster.gray(shade));
             }
         };
         if (self.sim) |sm| if (!self.wire) {
@@ -262,15 +307,98 @@ pub const Preview = struct {
                 p.* = @intCast(@as(u16, sc) + v * (255 - @as(u16, sc)) / 255);
             };
         };
-        if (self.tex == null) self.tex = c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_STREAMING, size, size);
+        if (self.tex != null and (self.tex_w != px[0] or self.tex_h != px[1])) {
+            c.SDL_DestroyTexture(self.tex);
+            self.tex = null;
+        }
+        if (self.tex == null) {
+            self.tex = c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_STREAMING, @intCast(px[0]), @intCast(px[1]));
+            self.tex_w = px[0];
+            self.tex_h = px[1];
+        }
         const t = self.tex orelse return null;
-        _ = c.SDL_UpdateTexture(t, null, layer.canvas.img.pixels.ptr, size * 4);
+        _ = c.SDL_UpdateTexture(t, null, layer.canvas.img.pixels.ptr, @intCast(px[0] * 4));
         return t;
     }
 };
 
+/// Attach point `i` of the model on the picture (pixels) and how far a unit of its offset
+/// x, y, z moves it there (`d`).
+pub const Point = struct { i: usize, at: [2]f32, d: [3][2]f32 };
+
+/// The preview's view: the picture's centre `cx, cy`, pixels per model unit `k` about
+/// height `ym`, the turn and tilt (cos, sin) and the eye's distance.
+pub const View = struct {
+    cx: f32,
+    cy: f32,
+    k: f32,
+    ym: f32,
+    yaw: [2]f32,
+    pitch: [2]f32,
+    far: f32,
+
+    /// A point in the model's axes on the picture: x, y and depth.
+    pub fn project(v: View, p: [3]f32) [3]f32 {
+        const x = p[0] * v.yaw[0] + p[2] * v.yaw[1];
+        const z = -p[0] * v.yaw[1] + p[2] * v.yaw[0];
+        // The tilt about the screen's horizontal axis through the framing centre.
+        const y = (p[1] - v.ym) * v.pitch[0] - z * v.pitch[1];
+        return .{ v.cx + x * v.k, v.cy - y * v.k, v.far + (p[1] - v.ym) * v.pitch[1] + z * v.pitch[0] };
+    }
+};
+
+/// Attach point `h` of the model at `frame` with `off` added to its offset (mesh units,
+/// before the local axes): on its bone (model_cache.linkPointOff), or `no_bone`'s in the
+/// model's own space.
+fn holdPoint(model: *const og.actor.model_cache.Model, frame: u32, h: og.core.model.HoldMode, off: [3]f32) ?[3]f32 {
+    const p: [3]f32 = .{ h.params[0] + off[0], h.params[1] + off[1], h.params[2] + off[2] };
+    if (h.bone == og.formats.mesh.no_bone) return p;
+    if (model.frames.bones == 0 or h.bone >= model.frames.bones or h.bone >= model.mesh.joints.len) return null;
+    const j = model.mesh.joints[h.bone];
+    return og.actor.skin.transform(model.frames.matrix(@min(frame, model.frames.frames -| 1), h.bone), .{ j[0] + p[0], j[1] + p[1], j[2] + p[2] }, .row);
+}
+
+/// The offset change moving a point `d` pixels on the picture, `j[k]` being how far a unit
+/// of offset k moves it there: the smallest one doing it (Jᵀ(J·Jᵀ)⁻¹·d; none when the
+/// three move it along one line).
+pub fn offsetFor(j: [3][2]f32, d: [2]f32) [3]f32 {
+    var m: [3]f32 = @splat(0);
+    for (j) |r| m = .{ m[0] + r[0] * r[0], m[1] + r[0] * r[1], m[2] + r[1] * r[1] };
+    const det = m[0] * m[2] - m[1] * m[1];
+    if (@abs(det) < 1e-9) return @splat(0);
+    const l = [2]f32{ (m[2] * d[0] - m[1] * d[1]) / det, (m[0] * d[1] - m[1] * d[0]) / det };
+    var out: [3]f32 = undefined;
+    for (j, &out) |r, *o| o.* = r[0] * l[0] + r[1] * l[1];
+    return out;
+}
+
+test offsetFor {
+    // Turned and tilted: the change found moves the point by the drag, in the picture's plane.
+    const v: View = .{ .cx = 100, .cy = 80, .k = 3, .ym = 2, .yaw = .{ @cos(0.7), @sin(0.7) }, .pitch = .{ @cos(0.3), @sin(0.3) }, .far = 1e4 };
+    const p = [3]f32{ 1, 5, -2 };
+    const p0 = v.project(p);
+    var j: [3][2]f32 = undefined;
+    for (0..3) |ax| {
+        var q = p;
+        q[ax] += 1;
+        const p1 = v.project(q);
+        j[ax] = .{ p1[0] - p0[0], p1[1] - p0[1] };
+    }
+    const d = offsetFor(j, .{ 12, -7 });
+    const moved = v.project(.{ p[0] + d[0], p[1] + d[1], p[2] + d[2] });
+    try std.testing.expectApproxEqAbs(@as(f32, 12), moved[0] - p0[0], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, -7), moved[1] - p0[1], 1e-3);
+    try std.testing.expectApproxEqAbs(p0[2], moved[2], 1e-3);
+    // Straight on, unturned: pixels over k along x and up y.
+    const s = offsetFor(.{ .{ 2, 0 }, .{ 0, -2 }, .{ 0, 0 } }, .{ 4, 6 });
+    try std.testing.expectApproxEqAbs(@as(f32, 2), s[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -3), s[1], 1e-6);
+    try std.testing.expectEqual(@as(f32, 0), s[2]);
+    try std.testing.expectEqual([3]f32{ 0, 0, 0 }, offsetFor(.{ .{ 1, 1 }, .{ 2, 2 }, .{ 0, 0 } }, .{ 1, 0 }));
+}
+
 /// A triangle's edges on `img` (lit by `shade`; no depth test: every edge shows).
-fn wireTriangle(img: *og.formats.image.Image, p: [3][3]f32, shade: f32) void {
+fn wireTriangle(img: *og.image.Image, p: [3][3]f32, shade: f32) void {
     const v: u8 = @intFromFloat(std.math.clamp(90 + 165 * shade, 0, 255));
     const col = [4]u8{ v / 2, @intCast(@min(255, @as(u32, v) * 3 / 4)), v, 255 };
     for (0..3) |k| {
@@ -293,11 +421,44 @@ fn wireTriangle(img: *og.formats.image.Image, p: [3][3]f32, shade: f32) void {
 /// a weapon in both hands: `attack_flame`) get theirs as `name/stance`.
 pub const Anim = struct { slot: []const u8, file: []const u8 };
 
+/// `name = "x"` of a line's call (OG Script), its string.
+fn namedStr(l: []const u8, name: []const u8) ?[]const u8 {
+    var buf: [40]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{s} = \"", .{name}) catch return null;
+    const at = std.mem.indexOf(u8, l, key) orelse return null;
+    const from = at + key.len;
+    const to = std.mem.indexOfScalarPos(u8, l, from, '"') orelse return null;
+    return l[from..to];
+}
+
+/// `name = 3` of a line's call, its number.
+fn namedInt(l: []const u8, name: []const u8) ?i32 {
+    var buf: [40]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{s} = ", .{name}) catch return null;
+    const at = std.mem.indexOf(u8, l, key) orelse return null;
+    var e = at + key.len;
+    while (e < l.len and (std.ascii.isDigit(l[e]) or l[e] == '-')) e += 1;
+    return std.fmt.parseInt(i32, l[at + key.len .. e], 10) catch null;
+}
+
 pub fn anims(a: Allocator, act: []const u8) []const Anim {
     var list: std.ArrayList(Anim) = .empty;
     var lines = std.mem.splitScalar(u8, act, '\n');
     while (lines.next()) |raw| {
         const l = std.mem.trim(u8, raw, " \t\r");
+        // An OpenGorky look block's `Slot(state = 0, name = "walk", anim = "walk")`,
+        // `Idle(state = 0, anim = "ryk", …)` (one a line, as the writer puts them).
+        if (std.mem.indexOf(u8, l, "Slot(") != null or std.mem.indexOf(u8, l, "Idle(") != null) {
+            const is_idle = std.mem.indexOf(u8, l, "Idle(") != null;
+            const st = namedInt(l, "state") orelse 0;
+            const file = namedStr(l, "anim") orelse continue;
+            const name = if (is_idle) file else namedStr(l, "name") orelse continue;
+            const slot = if (st == 0) name else std.fmt.allocPrint(a, "{s}/{d}", .{ name, st }) catch continue;
+            for (list.items) |x| {
+                if (std.mem.eql(u8, x.slot, slot)) break;
+            } else list.append(a, .{ .slot = slot, .file = file }) catch {};
+            continue;
+        }
         const idle = std.mem.startsWith(u8, l, "RegisterIdleAnimation(");
         if (!idle and !std.mem.startsWith(u8, l, "RegisterAnimation(")) continue;
         const open = std.mem.indexOfScalar(u8, l, '(').? + 1;

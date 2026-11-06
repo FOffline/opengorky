@@ -1,0 +1,36 @@
+Abilities(class_name = "hero", kill_credit = 0);
+Abilities(class_name = "hero3", kill_credit = 0);
+Abilities(class_name = "hero4", kill_credit = 0);
+Abilities(class_name = "monitor", monitor = 1, kill_credit = 0);
+Abilities(class_name = "grandma", first_in_mode = 2);
+Abilities(class_name = "grandma_child", avenger = "grandma");
+Abilities(class_name = "incubus", double_turn = 1);
+Abilities(class_name = "cripple", double_turn = 1);
+Abilities(
+    class_name = "puppet",
+    stand = -1.57,
+    stand_after_move = 1,
+    guard = Guard(div = 10, min = 4, cone = 2.2383847),
+);
+Abilities(class_name = "judge_child", heals = "01_judge");
+Abilities(
+    class_name = "schizo",
+    pairs = list(list(1077, 1078), list(1077, 1079), list(1078, 1079)),
+    double_strike = 1,
+);
+Abilities(
+    class_name = "messiah",
+    stand = 3.14,
+    stand_after_move = 1,
+    open_from = list(0, 1),
+    dodge = "unik",
+    arms = Arms(left = list(-1, 1), right = list(1, 1), blocked = "atakB"),
+);
+Abilities(class_name = "lamare", kill_credit = 0);
+Abilities(fighter = 119, class = 0, no_push = 1, no_hands = 1, battle_only = 1);
+Abilities(fighter = 120, class = 0, invisible = 1);
+Abilities(fighter = "04mf_invisible1", class = 0, invisible = 1, leaves = 1);
+FighterStrike(
+    special = 118,
+    spins = list(Spin(link = "pila lewa", at = 30), Spin(link = "pila prawa", at = 35)),
+);

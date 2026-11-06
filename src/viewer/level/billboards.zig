@@ -3,6 +3,7 @@
 //! flare drops, trails, projectile planes. Each enumerator hands billboards to a sink
 //! (`put(Billboard)`): the screen pass off combat levels, the depth-tested layer on them.
 
+const std = @import("std");
 const og = @import("opengorky");
 const LevelView = @import("../level.zig").LevelView;
 const place = @import("place.zig");
@@ -26,7 +27,7 @@ pub fn all(self: *LevelView, sink: anytype) !void {
 pub fn fireCells(self: *LevelView, sink: anytype) !void {
     const w = self.world;
     const b = &(w.battle orelse return);
-    const cm = w.combat_map orelse return;
+    const cm = w.map.combat orelse return;
     const as = w.actorScale();
     for (0..cm.height) |y| for (0..cm.width) |x| {
         const t: og.battle.grid.Tile = .{ @intCast(x), @intCast(y) };
@@ -43,7 +44,7 @@ pub fn fireCells(self: *LevelView, sink: anytype) !void {
     };
 }
 
-/// Incubus glow (0x42a620): "poswiata" on points t1–t6, size 46, colour (0.5, 0.4, 1.0).
+/// The actors' glows (rules Glow; 0x42a620, the Incubus's): the effect on its link points.
 pub fn incubusGlow(self: *LevelView, sink: anytype) !void {
     const w = self.world;
     const ms = self.models orelse return;
@@ -52,24 +53,28 @@ pub fn incubusGlow(self: *LevelView, sink: anytype) !void {
         const n = World.nativeOf(o);
         // A faded corpse is removed (+0x60 at 0x426950), so its glow goes with it.
         if (n.kind != .actor or !o.enabled or n.deleted or n.actor.gone or !n.actor.placed) continue;
-        if (og.fields.nameId(o) != 138) continue;
+        const g = og.rules.glow(og.rules.who(o)) orelse continue;
         const m = ms.get(og.fields.meshFile(o)) orelse continue;
         const pl = place.placement(self, o, m) orelse continue;
         const fr = @min(pl.frame, m.frames.frames -| 1);
         const sc = pl.scale * m.unitScale();
-        for ([_][]const u8{ "t1", "t2", "t3", "t4", "t5", "t6" }, 0..) |ln, k| {
+        var links = std.mem.tokenizeAny(u8, g.links, " ,");
+        var k: usize = 0;
+        while (links.next()) |ln| : (k += 1) {
             const lp = og.actor.model_cache.linkPoint(m, fr, ln) orelse continue;
             const wp = og.actor.model_cache.toWorld(m, lp, sc, pl.pos, @cos(pl.angle), @sin(pl.angle));
-            try sink.put(.{ .name = "poswiata", .frame = @intCast((w.effects.ticks + k * 3) % 64), .pos = wp, .half = as * 46, .rgb = .{ 0.5, 0.4, 1.0 } });
+            try sink.put(.{ .name = g.effect, .frame = @intCast((w.effects.ticks + k * 3) % 64), .pos = wp, .half = as * g.size, .rgb = g.rgb });
         }
     }
 }
 
-/// Morph sparks (0x4260a0): "poswiata" 80, colour (0.5, 0.5, 0.8).
+/// Morph sparks (0x4260a0): UiEffects morph_sparks, its size and colour.
 pub fn morphSparks(self: *LevelView, sink: anytype) !void {
     const as = self.world.actorScale();
+    const e = og.core.modules.ui().effects;
+    if (e.morph_sparks.len == 0) return;
     for (self.world.effects.morphs.items) |mo| for (mo.parts, 0..) |pt, i| if (pt.active)
-        try sink.put(.{ .name = "poswiata", .frame = 0, .pos = mo.particlePos(i), .half = as * 80, .rgb = .{ 0.5, 0.5, 0.8 } });
+        try sink.put(.{ .name = e.morph_sparks, .frame = 0, .pos = mo.particlePos(i), .half = as * e.morph_sparks_size, .rgb = e.morph_sparks_rgb });
 }
 
 /// Bitmaps and flashes (og.effects.batch).

@@ -11,7 +11,7 @@ const common = @import("common.zig");
 
 /// Voiced lines: how many lines of all `.dlg` have a file in voice.dat.
 pub fn voices(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8) !void {
-    var dat = try common.openDat(io, game_dir, .{});
+    var dat = try common.openDat(io, game_dir);
     defer dat.close(io);
     var lang = try og.formats.archive.Archive.open(io, gpa, dat, "common/lang.dat");
     defer lang.close(io, gpa);
@@ -36,16 +36,16 @@ pub fn voices(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8) !vo
 }
 
 pub fn levelItems(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, level: []const u8) !void {
-    var dat = try common.openDat(io, game_dir, .{});
+    var dat = try common.openDat(io, game_dir);
     defer dat.close(io);
-    const world = try og.game.life.create(io, gpa, dat, level, null, .{});
+    const world = try og.loaders.world.create(io, gpa, dat, level, null, .{});
     defer world.destroy();
     const hero = world.actorObject("Sullivan") orelse return;
     var ground: std.ArrayList(*og.script.object.Object) = .empty;
     defer ground.deinit(gpa);
     for (world.rt.objects.items) |o| if (og.state.world.isGroundItem(o)) try ground.append(gpa, o);
     for (ground.items) |o| {
-        try out.print("{s:<24} funcID {d} mesh {s}\n", .{ o.name, o.getInt("funcID"), og.fields.meshFile(o) });
+        try out.print("{s:<24} action {d} mesh {s}\n", .{ o.name, o.getInt("action"), og.fields.meshFile(o) });
         for (0..2) |_| try og.inventory.box.itemOperation(world, o, hero);
         if (world.act.exploring) |ex| {
             try og.inventory.box.takeAllFromBox(world, ex.box, hero);
@@ -55,7 +55,7 @@ pub fn levelItems(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8,
     try out.print("Sullivan's backpack:\n", .{});
     var buf: [og.inventory.list.max_entries]og.inventory.list.Entry = undefined;
     for ([_]og.inventory.list.Tab{ .weapons, .medicine, .other }) |t| {
-        for (og.inventory.list.list(world, hero, t, &buf)) |e| try out.print("  {t:<8} {s} ×{d} (nameID {d})\n", .{ t, e.item.name, e.count, og.fields.nameId(e.item) });
+        for (og.inventory.list.list(world, hero, t, &buf)) |e| try out.print("  {t:<8} {s} ×{d} (classic_id {d})\n", .{ t, e.item.name, e.count, og.fields.classicId(e.item) });
     }
     try out.print("not implemented: ", .{});
     var it = world.rt.missing_builtins.iterator();
@@ -65,9 +65,9 @@ pub fn levelItems(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8,
 
 /// Take an item and use it on an area/item (UseItem), as "Use … on …".
 pub fn useItemOn(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, level: []const u8, item_name: []const u8, target_name: []const u8) !void {
-    var dat = try common.openDat(io, game_dir, .{});
+    var dat = try common.openDat(io, game_dir);
     defer dat.close(io);
-    const world = try og.game.life.create(io, gpa, dat, level, null, .{});
+    const world = try og.loaders.world.create(io, gpa, dat, level, null, .{});
     defer world.destroy();
     const hero = world.actorObject("Sullivan") orelse return;
     const item = world.rt.findObject(item_name) orelse return out.print("no item {s}\n", .{item_name});
@@ -86,13 +86,13 @@ pub fn useItemOn(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, 
 
 /// `.ap` paths: walkability of the ends on `.wm`/`.wm2`; floor-change areas.
 pub fn levelPaths(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, name: []const u8) !void {
-    var dat = try common.openDat(io, game_dir, .{});
+    var dat = try common.openDat(io, game_dir);
     defer dat.close(io);
-    const w = try og.game.life.create(io, gpa, dat, name, null, .{});
+    const w = try og.loaders.world.create(io, gpa, dat, name, null, .{});
     defer w.destroy();
-    const walk_maps = [2]?og.formats.level_files.WalkMap{ w.walk_map, w.walk_map2 };
+    const walk_maps = [2]?og.core.map.WalkMap{ w.map.walk, w.map.walk2 };
     const kind = struct {
-        fn f(m: ?og.formats.level_files.WalkMap, x: f32, y: f32) i32 {
+        fn f(m: ?og.core.map.WalkMap, x: f32, y: f32) i32 {
             const mm = m orelse return -1;
             const xi: usize = @intFromFloat(x);
             const yi: usize = @intFromFloat(y);
@@ -100,7 +100,7 @@ pub fn levelPaths(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8,
             return mm.at(xi, yi).kind;
         }
     }.f;
-    for (w.paths) |p| {
+    for (w.map.paths) |p| {
         const l = p.link;
         try out.print("{s:<12} start {d},{d} wm {d} wm2 {d} | end {d},{d} wm {d} wm2 {d} | {d} points, z {d:.1}..{d:.1}\n", .{
             p.name,         l[0],                          l[1],                           kind(walk_maps[0], l[0], l[1]), kind(walk_maps[1], l[0], l[1]),
@@ -108,7 +108,7 @@ pub fn levelPaths(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8,
             p.points[0][2], p.points[p.points.len - 1][2],
         });
     }
-    for (w.areas) |a| {
+    for (w.map.areas) |a| {
         if (std.mem.indexOf(u8, a.name, "Go") == null) continue;
         try out.print("area {s}: control point {d:.0},{d:.0}\n", .{ a.name, a.control[0], a.control[1] });
     }
@@ -116,11 +116,11 @@ pub fn levelPaths(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8,
 
 /// Put Sullivan at a background point and send him to the target; movement log.
 pub fn walkTest(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, level: []const u8, from: [2]f32, to: [2]f32, party: bool) !void {
-    var dat = try common.openDat(io, game_dir, .{});
+    var dat = try common.openDat(io, game_dir);
     defer dat.close(io);
-    var models = try og.actor.model_cache.Cache.open(io, gpa, dat);
+    var models = try og.compose.models.open(io, gpa, dat, null);
     defer models.deinit();
-    const world = try og.game.life.create(io, gpa, dat, level, &models, .{});
+    const world = try og.loaders.world.create(io, gpa, dat, level, &models, .{});
     defer world.destroy();
     world.scene.cutscene = false;
     world.scene.runner = null;
@@ -131,8 +131,8 @@ pub fn walkTest(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, l
     a.attached_to = null;
     {
         const here = world.cam.project(og.fields.pos(hero));
-        try out.print("start bg {d:.0},{d:.0}; paths {d}; map {}\n", .{ here.x, here.y, world.paths.len, world.walk_map != null });
-        if (world.walk_map) |m| {
+        try out.print("start bg {d:.0},{d:.0}; paths {d}; map {}\n", .{ here.x, here.y, world.map.paths.len, world.map.walk != null });
+        if (world.map.walk) |m| {
             var cells: []?u32 = &.{};
             defer gpa.free(cells);
             const r0 = try og.world.nav.findRoute(gpa, &cells, m, &.{}, .{ here.x, here.y }, to);
@@ -199,14 +199,14 @@ pub fn walkTest(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, l
 }
 
 pub fn runWorld(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, level: []const u8, ticks: u32) !void {
-    var dat = try common.openDat(io, game_dir, .{});
+    var dat = try common.openDat(io, game_dir);
     defer dat.close(io);
 
-    var models = try og.actor.model_cache.Cache.open(io, gpa, dat);
+    var models = try og.compose.models.open(io, gpa, dat, null);
     defer models.deinit();
-    const world = try og.game.life.create(io, gpa, dat, level, &models, .{});
+    const world = try og.loaders.world.create(io, gpa, dat, level, &models, .{});
     defer world.destroy();
-    var bank = try og.audio.sound.Bank.open(io, gpa, dat);
+    var bank = try og.compose.sounds.open(io, gpa, dat);
     defer bank.deinit();
 
     // Sounds over all ticks: name → start count; also checks that each sound resolves.
@@ -262,8 +262,12 @@ pub fn runWorld(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, l
         }
     }
 
-    try out.print("{s}: {d} objects, {d} ticks\n", .{ level, world.rt.objects.items.len, ticks });
+    // Empty ammo packs (the exe's ready ones) as the game shows them: nowhere.
+    var shown: usize = 0;
+    for (world.rt.objects.items) |o| shown += @intFromBool(!og.inventory.item.emptyPack(o));
+    try out.print("{s}: {d} objects, {d} ticks\n", .{ level, shown, ticks });
     for (world.rt.objects.items) |o| {
+        if (og.inventory.item.emptyPack(o)) continue;
         const n = og.state.world.World.nativeOf(o);
         try out.print("  {s:<28} {t:<17} {s}", .{ o.name, n.kind, if (o.enabled) "on " else "off" });
         if (n.kind == .actor) {
@@ -276,8 +280,8 @@ pub fn runWorld(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, l
         }
         if (n.kind == .animation or n.kind == .active_animation) {
             try out.print("  sprite {s} at {d},{d} frame {d} state {d}{s}", .{
-                o.getString("spriteFile"), o.getInt("pos_x"), o.getInt("pos_y"),
-                o.getInt("cur_frame"),     o.getInt("state"), if (n.visible) "" else " hidden",
+                o.getString("sprite"), o.getInt("pos_x"), o.getInt("pos_y"),
+                o.getInt("frame"),     o.getInt("state"), if (n.visible) "" else " hidden",
             });
         }
         try out.writeByte('\n');
@@ -300,12 +304,12 @@ fn printCounts(out: *Io.Writer, title: []const u8, map: *const std.StringArrayHa
 pub fn listen(io: Io, gpa: Allocator, out: *Io.Writer, game_dir: []const u8, level: []const u8, seconds: u32, path: []const u8, center: [2]f32) !void {
     const rate = 44100;
     const tick_hz = og.state.world.tick_hz;
-    var dat = try common.openDat(io, game_dir, .{});
+    var dat = try common.openDat(io, game_dir);
     defer dat.close(io);
 
-    const world = try og.game.life.create(io, gpa, dat, level, null, .{});
+    const world = try og.loaders.world.create(io, gpa, dat, level, null, .{});
     defer world.destroy();
-    var bank = try og.audio.sound.Bank.open(io, gpa, dat);
+    var bank = try og.compose.sounds.open(io, gpa, dat);
     defer bank.deinit();
     var mixer: og.audio.mixer.Mixer = .init(rate);
     defer mixer.deinit(gpa);

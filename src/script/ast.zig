@@ -1,7 +1,10 @@
 //! Script parse tree. Nodes and strings live in the parser arena and point into
-//! the source text, which must outlive the tree.
+//! the source text, which must outlive the tree. `start`/`end` are byte offsets of a
+//! node's text in its file (0, 0 for a node built outside the parser): the Classic
+//! exporter (`classic/export.zig`) rewrites only the bytes of what changed.
 
-pub const Type = enum { int, float, string, object };
+/// Declared types: the IR's (`ir.Type`), which the Classic parser reads a part of.
+pub const Type = @import("value.zig").Type;
 
 pub const VarDecl = struct {
     type: Type,
@@ -9,6 +12,9 @@ pub const VarDecl = struct {
     line: u32,
     /// Interned name id (`object.intern`); null when built outside the parser.
     id: ?u32 = null,
+    /// From the type through `;`.
+    start: u32 = 0,
+    end: u32 = 0,
 };
 
 pub const Param = struct {
@@ -22,6 +28,9 @@ pub const Function = struct {
     params: []const Param,
     body: []const Stmt,
     line: u32,
+    /// From `function` through `}` and the `;` after it, if any.
+    start: u32 = 0,
+    end: u32 = 0,
 };
 
 /// File top level. `.ss` snippets may also contain plain statements.
@@ -35,6 +44,8 @@ pub const Item = union(enum) {
 
 pub const Unit = struct {
     items: []const Item,
+    /// The parsed text (offsets are into it; directive arguments are slices of it).
+    src: []const u8 = "",
 };
 
 pub const Stmt = union(enum) {
@@ -44,22 +55,34 @@ pub const Stmt = union(enum) {
     include: []const u8,
     block: []const Stmt,
     @"if": If,
-    @"return": ?*const Expr,
+    @"return": Return,
     empty,
 
+    /// From `if` through the end of the last branch (its `;` included).
     const If = struct {
         cond: *const Expr,
         then: *const Stmt,
         @"else": ?*const Stmt,
+        start: u32 = 0,
+        end: u32 = 0,
+    };
+    /// From `return` through `;`.
+    const Return = struct {
+        value: ?*const Expr,
+        start: u32 = 0,
+        end: u32 = 0,
     };
 };
 
-pub const BinaryOp = enum { add, sub, mul, div, eq, ne, lt, le, gt, ge, @"and", @"or" };
+pub const BinaryOp = @import("value.zig").BinaryOp;
 const UnaryOp = enum { neg, not };
 
 pub const Expr = struct {
     line: u32,
     kind: Kind,
+    /// Without the parentheses around it (they belong to the enclosing text).
+    start: u32 = 0,
+    end: u32 = 0,
 
     pub const Kind = union(enum) {
         int: i32,

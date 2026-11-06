@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const num = @import("../num.zig");
-const level_files = @import("../formats.zig").level_files;
+const level_files = @import("../core.zig").map;
 const fields = @import("../fields.zig");
 const nav = @import("nav.zig");
 const floor_mod = @import("floor.zig");
@@ -14,7 +14,8 @@ const Object = object.Object;
 const world = @import("../state.zig").world;
 const World = world.World;
 
-/// Party hero under a background point (click selection).
+/// Party hero under a background point (his figure: 36 × 96 px over his feet): the exe's
+/// actor target lookup (0x450fa0) for selection and "Use … on …".
 pub fn heroAt(self: *World, bg: [2]f32) ?*Object {
     const members = self.party();
     for (members.slice()) |h| {
@@ -32,7 +33,7 @@ pub fn heroAt(self: *World, bg: [2]f32) ?*Object {
 /// end, with no delays or spreading (only party walk 0x427780 does that). A companion
 /// already on the ladder is left alone, or he would get stuck on its cells.
 pub fn walkPath(self: *World, hero: *Object, name: []const u8) !void {
-    for (self.paths) |pa| {
+    for (self.map.paths) |pa| {
         if (!std.ascii.eqlIgnoreCase(pa.name, name)) continue;
         const cs = level_files.WalkMap.cell_size;
         const link_start = [2]f32{ (pa.link[0] + 0.5) * cs, (pa.link[1] + 0.5) * cs };
@@ -40,7 +41,7 @@ pub fn walkPath(self: *World, hero: *Object, name: []const u8) !void {
         if (!self.walk_ok) return;
         const members = self.party();
         for (members.slice()) |h| {
-            if (h == hero or !h.enabled or h.getInt("avoidEnumerate") != 0) continue;
+            if (h == hero or !h.enabled or h.getInt("outside_party") != 0) continue;
             const ha = world.actorOf(h);
             if (!ha.placed or ha.onPortal()) continue;
             ha.queue.clearRetainingCapacity();
@@ -139,7 +140,7 @@ pub fn partyWalk(self: *World, hero: *Object, goal_in: [2]f32) !bool {
     const rand = self.crt();
     const members = self.party();
     for (members.slice()) |h| {
-        if (h == hero or !h.enabled or h.getInt("avoidEnumerate") != 0) continue;
+        if (h == hero or !h.enabled or h.getInt("outside_party") != 0) continue;
         const ha = world.actorOf(h);
         // The companion's floor is not compared (0x4279a9); he routes on his own (0x427340).
         if (!ha.placed) continue;
@@ -180,8 +181,8 @@ pub fn partyWalk(self: *World, hero: *Object, goal_in: [2]f32) !bool {
 
 /// Walk-to point of an item: `walk_x`, `walk_y` (background pixels) or the item itself.
 pub fn itemGoal(self: *World, item: *Object) [2]f32 {
-    const wx = fields.getF(item, "walk_x");
-    const wy = fields.getF(item, "walk_y");
+    const wx = fields.getF(item, "approach_x");
+    const wy = fields.getF(item, "approach_y");
     return if (wx != 0 or wy != 0) .{ wx, wy } else self.screenPos(item);
 }
 
@@ -199,8 +200,8 @@ pub fn unstickHeroes(self: *World) void {
         // Old saves: PLACE without a floor didn't reset the hero to floor 0 (BT after
         // port-deska → port-meet_bt stayed on .wm2 by the trabant). If only the other grid
         // has floor under him, switch to it.
-        if (self.walk_map2) |m2| {
-            const other = if (a.map == 1) self.walk_map orelse m2 else m2;
+        if (self.map.walk2) |m2| {
+            const other = if (a.map == 1) self.map.walk orelse m2 else m2;
             if (nav.walkableNear(other, p)) {
                 a.map = if (a.map == 1) 0 else 1;
                 a.clearPath();
@@ -209,7 +210,7 @@ pub fn unstickHeroes(self: *World) void {
         }
         var best: ?[2]f32 = null;
         var best_d: f32 = 32;
-        for (self.paths) |pa| {
+        for (self.map.paths) |pa| {
             const ends = [2][2]f32{
                 .{ (pa.link[0] + 0.5) * cs, (pa.link[1] + 0.5) * cs },
                 .{ (pa.link[2] + 0.5) * cs, (pa.link[3] + 0.5) * cs },
@@ -350,7 +351,7 @@ pub fn walkToReach(self: *World, hero: *Object, goal: [2]f32) !bool {
 /// Forbid/AllowWalkInArea (0x4bee50 / 0x4bee00): floor cells whose centre is in the area
 /// lose or gain the walkable bit.
 pub fn setWalkInArea(self: *World, name: []const u8, allow: bool, floor: i32) !void {
-    const m = (if (floor == 1) self.walk_map2 else self.walk_map) orelse return;
+    const m = (if (floor == 1) self.map.walk2 else self.map.walk) orelse return;
     const area = areas.findArea(self, name) orelse return;
     const cs: f32 = level_files.WalkMap.cell_size;
     // Opened cells without a height (blocked cells have height 0 in .wm).
@@ -375,8 +376,8 @@ pub fn setWalkInArea(self: *World, name: []const u8, allow: bool, floor: i32) !v
     try self.walk_areas.append(a, .{ .name = try a.dupe(u8, area.name), .allow = allow, .floor = floor });
 }
 
-/// Input gate (0x45bf90): a scene runs (list 0x68b154 not empty), the GUI is in scene
-/// mode, or a line is shown — field clicks are ignored.
+/// Player gate (0x45bf90): a scene runs (list 0x68b154 not empty), the GUI is in scene
+/// mode, or a line is shown — the player's field actions are ignored.
 pub fn playerLocked(self: *const World) bool {
     return self.scene.cutscene or self.scene.runner != null or self.scene.subtitle != null;
 }

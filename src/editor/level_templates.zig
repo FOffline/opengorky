@@ -8,7 +8,7 @@ const og = @import("opengorky");
 const archive = og.formats.archive;
 const level = @import("level.zig");
 const Template = level.Template;
-const templates = @import("level_templates.zig");
+const catalog = @import("catalog.zig");
 
 // A fighter of a class no battle has, as the battles' own (01__port_park hornets).
 pub const built_fighter =
@@ -149,23 +149,29 @@ pub const LevelEntry = struct {
     battle: bool,
 };
 
-/// Levels in `<game>/dat`: folders whose other.dat holds `<name>.lev`, sorted by name.
+/// OpenGorky's hidden battle where a character is tried (testroom.zig): no level list
+/// shows it, the mod package leaves it out.
+pub const test_room = "og__testroom";
+
+/// Levels in `<game>/dat`: folders whose other.dat holds `<name>.lev`, sorted by name
+/// (the test room left out).
 pub fn listLevels(io: Io, gpa: Allocator, dat: Io.Dir) ![]LevelEntry {
     var list: std.ArrayList(LevelEntry) = .empty;
     errdefer {
         for (list.items) |e| gpa.free(e.name);
         list.deinit(gpa);
     }
-    var it = dat.iterate();
-    while (try it.next(io)) |e| {
-        if (e.kind != .directory) continue;
+    const dirs = try archive.levelDirs(io, gpa, dat);
+    defer archive.freeList(gpa, dirs);
+    for (dirs) |name| {
+        if (std.ascii.eqlIgnoreCase(name, test_room)) continue;
         var buf: [256]u8 = undefined;
-        var ar = archive.Archive.open(io, gpa, dat, std.fmt.bufPrint(&buf, "{s}/other.dat", .{e.name}) catch continue) catch continue;
+        var ar = archive.Archive.open(io, gpa, dat, std.fmt.bufPrint(&buf, "{s}/other.dat", .{name}) catch continue) catch continue;
         defer ar.close(io, gpa);
-        const lev = ar.find(std.fmt.bufPrint(&buf, "{s}.lev", .{e.name}) catch continue) orelse continue;
+        const lev = ar.find(std.fmt.bufPrint(&buf, "{s}.lev", .{name}) catch continue) orelse continue;
         const text = ar.readAlloc(io, gpa, lev) catch continue;
         defer gpa.free(text);
-        try list.append(gpa, .{ .name = try gpa.dupe(u8, e.name), .battle = std.mem.indexOf(u8, text, "CombatLevel") != null });
+        try list.append(gpa, .{ .name = try gpa.dupe(u8, name), .battle = std.mem.indexOf(u8, text, "CombatLevel") != null });
     }
     std.mem.sort(LevelEntry, list.items, {}, struct {
         fn lt(_: void, a: LevelEntry, b: LevelEntry) bool {
@@ -175,12 +181,47 @@ pub fn listLevels(io: Io, gpa: Allocator, dat: Io.Dir) ![]LevelEntry {
     return list.toOwnedSlice(gpa);
 }
 
+/// OpenGorky: `levels` with the project's own levels (`src/locations/<l>/`, `src/battles/<b>/`
+/// that the installed game has no level of: made in the editor), sorted by name; takes
+/// `levels`.
+pub fn withOwnLevels(io: Io, gpa: Allocator, root: Io.Dir, levels: []LevelEntry) ![]LevelEntry {
+    var list: std.ArrayList(LevelEntry) = .fromOwnedSlice(levels);
+    errdefer {
+        for (list.items) |e| gpa.free(e.name);
+        list.deinit(gpa);
+    }
+    for ([_]bool{ false, true }) |battle| {
+        var dir = root.openDir(io, if (battle) "src/battles" else "src/locations", .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+        var it = dir.iterate();
+        next: while (try it.next(io)) |e| {
+            if (e.kind != .directory) continue;
+            for (list.items) |x| if (std.ascii.eqlIgnoreCase(x.name, e.name)) continue :next;
+            try list.append(gpa, .{ .name = try gpa.dupe(u8, e.name), .battle = battle });
+        }
+    }
+    std.mem.sort(LevelEntry, list.items, {}, struct {
+        fn lt(_: void, a: LevelEntry, b: LevelEntry) bool {
+            return std.mem.order(u8, a.name, b.name) == .lt;
+        }
+    }.lt);
+    return list.toOwnedSlice(gpa);
+}
+
+/// OpenGorky: level `name` has its folder in the project's `src/` (`locations/`, `battles/`).
+pub fn ownLevel(io: Io, root: Io.Dir, name: []const u8, battle: bool) bool {
+    var buf: [256]u8 = undefined;
+    const p = std.fmt.bufPrint(&buf, "src/{s}/{s}", .{ if (battle) "battles" else "locations", name }) catch return false;
+    root.access(io, p, .{}) catch return false;
+    return true;
+}
+
 /// Templates for adding enemies: the first armed `.ftr` of each fighter class in the
 /// battles (else the first), sorted by class.
 /// The close attack of a built fighter: a big monster's (cutterpill's, 25).
 const built_attack = "wp_cutterpillshort.ss";
 
-/// The weapon nameID the exe's strike branch of a built class wants (its own weapon
+/// The weapon classic_id the exe's strike branch of a built class wants (its own weapon
 /// class is gone from the data): the shoggoth's tail.
 pub fn builtWeaponId(class: []const u8) ?i32 {
     return if (std.ascii.eqlIgnoreCase(class, "shogoth")) 1015 else null;
@@ -241,6 +282,8 @@ pub fn listTemplates(io: Io, gpa: Allocator, dat: Io.Dir, levels: []const LevelE
             } else {
                 const text = ar.readAlloc(io, gpa, e) catch continue;
                 defer gpa.free(text);
+                // An editor copy is its base's (App.allTemplates), weapon and all.
+                if (std.mem.startsWith(u8, text, catalog.copy_mark)) continue;
                 const p = std.ascii.findIgnoreCase(text, "#include act_") orelse continue;
                 const s = p + "#include ".len;
                 var k = s;

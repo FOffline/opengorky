@@ -8,12 +8,13 @@ const actions = @import("../world.zig").actions;
 const areas = @import("../world.zig").areas;
 const world_mod = @import("../state.zig").world;
 const World = world_mod.World;
+const Mouse = @import("../input.zig").mouse.Mouse;
 const og_value = @import("../script.zig").value.Value;
 const common = @import("common.zig");
 const Cmd = common.Cmd;
 const Effect = common.Effect;
 
-pub fn run(c: Cmd, w: *World, cmd: []const u8, it: *common.Args, out: *std.Io.Writer) !Effect {
+pub fn run(c: Cmd, w: *World, mouse: *Mouse, cmd: []const u8, it: *common.Args, out: *std.Io.Writer) !Effect {
     const eq = std.ascii.eqlIgnoreCase;
     switch (c) {
         .map, .whereami => {
@@ -93,7 +94,7 @@ pub fn run(c: Cmd, w: *World, cmd: []const u8, it: *common.Args, out: *std.Io.Wr
         .click => {
             const x = std.fmt.parseFloat(f32, it.next() orelse "") catch return common.usage(out, "click <x> <y>");
             const y = std.fmt.parseFloat(f32, it.next() orelse "") catch return common.usage(out, "click <x> <y>");
-            const ok = try actions.clickPlay(w, .{ x, y }, false);
+            const ok = try actions.playAt(w, .{ x, y }, false, &mouse.use);
             try out.print("click {d:.0},{d:.0}: {s}\n", .{ x, y, if (ok) "ok" else "ignored" });
         },
         .get, .set => {
@@ -106,12 +107,14 @@ pub fn run(c: Cmd, w: *World, cmd: []const u8, it: *common.Args, out: *std.Io.Wr
                     .int => .{ .int = std.fmt.parseInt(i32, text, 10) catch return common.say(out, "integer expected\n", .{}) },
                     .float => .{ .float = std.fmt.parseFloat(f32, text) catch return common.say(out, "number expected\n", .{}) },
                     .string => .{ .string = try w.rt.arena().dupe(u8, text) },
+                    else => return common.say(out, "cannot set a {t}\n", .{v.value}),
                 };
             }
             switch (v.value) {
                 .int => |i| try out.print("{s}.{s} = {d}\n", .{ o.name, vname, i }),
                 .float => |f| try out.print("{s}.{s} = {d}\n", .{ o.name, vname, f }),
                 .string => |t| try out.print("{s}.{s} = \"{s}\"\n", .{ o.name, vname, t }),
+                else => try out.print("{s}.{s} = {f}\n", .{ o.name, vname, v.value }),
             }
         },
         .where => {

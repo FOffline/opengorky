@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ast = @import("ast.zig");
 
 pub const Value = union(enum) {
     int: i32,
@@ -10,6 +9,36 @@ pub const Value = union(enum) {
     /// Strings are immutable; memory is the runtime string arena or the script source.
     /// `object` values are stored as a string with the object's name.
     string: []const u8,
+    // OGS only: Classic scripts never make these.
+    nil,
+    bool: bool,
+    /// An entity or a component instance: its `Object.handle` (`Object.of` gives the
+    /// object; this file cannot import object.zig, which imports it). shortcut: a pointer,
+    /// not index + generation: the runtime never frees objects (they live in its arena);
+    /// upgrade when objects can be removed.
+    ref: *const Handle,
+    /// Literals and temporaries (v1 has no mutable containers).
+    list: []const Value,
+    map: *const Map,
+
+    pub const Map = struct { keys: []const Value, values: []const Value };
+
+    /// What a value knows of the object it refers to. `far`: the location of an object of
+    /// another one (`Runtime.farRef`: its stand-in here); "": an object of this world (or
+    /// a name a save keeps, world/snapshot.zig).
+    pub const Handle = struct { name: []const u8 = "", far: []const u8 = "" };
+
+    /// OGS truth (the runtime's conditions, `not`, `and`, `or`): false are nil, false, 0, 0.0 and "".
+    pub fn truth(self: Value) bool {
+        return switch (self) {
+            .int => |i| i != 0,
+            .float => |f| f != 0,
+            .string => |s| s.len > 0,
+            .nil => false,
+            .bool => |b| b,
+            .ref, .list, .map => true,
+        };
+    }
 
     pub const zero: Value = .{ .int = 0 };
 
@@ -18,6 +47,8 @@ pub const Value = union(enum) {
             .int => |v| v,
             .float => |v| floatToInt(v),
             .string => |s| std.fmt.parseInt(i32, std.mem.trim(u8, s, " "), 10) catch 0,
+            .bool => |b| @intFromBool(b),
+            .nil, .ref, .list, .map => 0,
         };
     }
 
@@ -26,21 +57,28 @@ pub const Value = union(enum) {
             .int => |v| @floatFromInt(v),
             .float => |v| v,
             .string => |s| std.fmt.parseFloat(f32, std.mem.trim(u8, s, " ")) catch 0,
+            .bool => |b| @floatFromInt(@intFromBool(b)),
+            .nil, .ref, .list, .map => 0,
         };
     }
 
     /// Allocates a string in `arena` for numbers.
-    fn toString(self: Value, arena: Allocator) Allocator.Error![]const u8 {
+    pub fn toString(self: Value, arena: Allocator) Allocator.Error![]const u8 {
         return switch (self) {
             .string => |s| s,
             .int => |v| std.fmt.allocPrint(arena, "{d}", .{v}),
             .float => |v| std.fmt.allocPrint(arena, "{d:.6}", .{v}),
+            // An object by its name, as builtins take it.
+            .ref => |o| o.name,
+            .nil => "",
+            .bool => |b| if (b) "true" else "false",
+            .list, .map => std.fmt.allocPrint(arena, "{f}", .{self}),
         };
     }
 
     /// Condition of `if`, `&&`, `||` (0x4c6510): `toInt(v) != 0`; a fraction truncates
     /// (`0.5` is false), a string is false (the exe reads its pointer as a float ≈ 0).
-    pub fn truthy(self: Value) bool {
+    pub fn exeTruth(self: Value) bool {
         return self.exeInt() != 0;
     }
 
@@ -54,7 +92,7 @@ pub const Value = union(enum) {
 
     /// Conversion to the variable's declared type: setter 0x44ae80 (from assignment
     /// 0x4e3d50) by target type. Int is 0x4c6510: a string gives 0.
-    pub fn convert(self: Value, t: ast.Type, arena: Allocator) Allocator.Error!Value {
+    pub fn convert(self: Value, t: Type, arena: Allocator) Allocator.Error!Value {
         return switch (t) {
             .int => .{ .int = self.exeInt() },
             // shortcut: the exe (0x4c6530) does `fild` on the data, i.e. a string's address;
@@ -62,13 +100,15 @@ pub const Value = union(enum) {
             .float => .{ .float = self.toFloat() },
             // shortcut: the exe copies the data as `char*`, garbage for a number; we format it.
             .string, .object => .{ .string = try self.toString(arena) },
+            .bool => .{ .bool = self.truth() },
+            .any => self,
         };
     }
 
     /// Value from `.var` text (0x431ee0): int is the leading digits without sign or
     /// spaces ("-1" → 0, "5x" → 5, wrapping), float is `atof` (0x4f7fb4). The exe
     /// doesn't read strings or objects from `.var`, so those give null.
-    pub fn parse(text: []const u8, t: ast.Type) ?Value {
+    pub fn parse(text: []const u8, t: Type) ?Value {
         return switch (t) {
             .int => blk: {
                 var n: i32 = 0;
@@ -79,24 +119,40 @@ pub const Value = union(enum) {
                 break :blk .{ .int = n };
             },
             .float => .{ .float = atof(text) },
-            .string, .object => null,
+            .string, .object, .bool, .any => null,
         };
     }
 
-    pub fn initial(t: ast.Type) Value {
+    pub fn initial(t: Type) Value {
         return switch (t) {
             .int => .{ .int = 0 },
             .float => .{ .float = 0 },
             .string, .object => .{ .string = "" },
+            .bool => .{ .bool = false },
+            .any => .nil,
         };
     }
 
     /// Copy with its own string in `a`.
+    /// A copy in `a`: strings, lists and maps deep (a carried or saved value outlives the
+    /// world that made it: a battle's, destroyed on leaving); a `ref` stays its handle.
     pub fn dupe(self: Value, a: Allocator) Allocator.Error!Value {
         return switch (self) {
             .string => |s| .{ .string = try a.dupe(u8, s) },
+            .list => |l| .{ .list = try dupeAll(a, l) },
+            .map => |m| blk: {
+                const c = try a.create(Map);
+                c.* = .{ .keys = try dupeAll(a, m.keys), .values = try dupeAll(a, m.values) };
+                break :blk .{ .map = c };
+            },
             else => self,
         };
+    }
+
+    fn dupeAll(a: Allocator, xs: []const Value) Allocator.Error![]const Value {
+        const out = try a.alloc(Value, xs.len);
+        for (xs, out) |x, *d| d.* = try x.dupe(a);
+        return out;
     }
 
     pub fn format(self: Value, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -104,6 +160,19 @@ pub const Value = union(enum) {
             .int => |v| try w.print("{d}", .{v}),
             .float => |v| try w.print("{d}", .{v}),
             .string => |s| try w.print("\"{s}\"", .{s}),
+            .nil => try w.writeAll("nil"),
+            .bool => |b| try w.writeAll(if (b) "true" else "false"),
+            .ref => |o| if (o.far.len > 0) try w.print("@{s}::{s}", .{ o.far, o.name }) else try w.print("@{s}", .{o.name}),
+            .list => |l| {
+                try w.writeByte('[');
+                for (l, 0..) |x, i| try w.print("{s}{f}", .{ if (i > 0) ", " else "", x });
+                try w.writeByte(']');
+            },
+            .map => |m| {
+                try w.writeByte('{');
+                for (m.keys, m.values, 0..) |k, x, i| try w.print("{s}{f}: {f}", .{ if (i > 0) ", " else "", k, x });
+                try w.writeByte('}');
+            },
         }
     }
 };
@@ -144,7 +213,14 @@ pub fn scaleInt(x: i32, k: f32) i32 {
 }
 
 /// Arithmetic and comparisons: if either operand is float, compute in float.
-pub fn binary(op: ast.BinaryOp, a: Value, b: Value) Value {
+/// The binary operators both languages parse (`ast.BinaryOp`).
+pub const BinaryOp = enum { add, sub, mul, div, eq, ne, lt, le, gt, ge, @"and", @"or" };
+
+/// Declared types (variables, parameters, schema fields; `ir.Type`). `bool` and `any`
+/// (untyped) are OGS only: the Classic parser never reads them (`parser.typeKeyword`).
+pub const Type = enum { int, float, string, object, bool, any };
+
+pub fn binary(op: BinaryOp, a: Value, b: Value) Value {
     const use_float = a == .float or b == .float;
     switch (op) {
         .add, .sub, .mul, .div => {
@@ -204,8 +280,8 @@ pub fn binary(op: ast.BinaryOp, a: Value, b: Value) Value {
             return .{ .int = @intFromBool(r) };
         },
         // && and || without short-circuit (0x4c6460, 0x4c64a0).
-        .@"and" => return .{ .int = @intFromBool(a.truthy() and b.truthy()) },
-        .@"or" => return .{ .int = @intFromBool(a.truthy() or b.truthy()) },
+        .@"and" => return .{ .int = @intFromBool(a.exeTruth() and b.exeTruth()) },
+        .@"or" => return .{ .int = @intFromBool(a.exeTruth() or b.exeTruth()) },
     }
 }
 
@@ -224,8 +300,8 @@ test "comparisons as in the exe" {
     try std.testing.expectEqual(Value{ .int = 1 }, binary(.eq, .{ .float = 1.5 }, .{ .int = 1 }));
     try std.testing.expectEqual(Value{ .int = 0 }, binary(.le, .{ .int = 3 }, .{ .int = 5 }));
     try std.testing.expectEqual(Value{ .int = 5 }, binary(.ne, .{ .int = 2 }, .{ .int = 3 }));
-    try std.testing.expect(!(Value{ .float = 0.5 }).truthy());
-    try std.testing.expect(!(Value{ .string = "x" }).truthy());
+    try std.testing.expect(!(Value{ .float = 0.5 }).exeTruth());
+    try std.testing.expect(!(Value{ .string = "x" }).exeTruth());
 }
 
 test "NaN comparisons as x87" {

@@ -6,7 +6,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 
-const Scaling = enum {
+pub const Scaling = enum {
     /// Integer 640×480 zoom: crisp pixels, possible borders.
     integer,
     /// Whole window, sharp pixels (SDL 3.4 PIXELART, else smoothing).
@@ -35,6 +35,27 @@ pub const Upscale = enum {
     off,
 };
 
+/// A path in a fixed buffer (the settings files' folders; the editor's too).
+pub const PathBuf = struct {
+    buf: [1024]u8 = undefined,
+    len: usize = 0,
+
+    pub fn get(self: *const PathBuf) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    /// A path longer than the buffer is dropped (left unset): a cut path would point elsewhere.
+    pub fn set(self: *PathBuf, p: []const u8) void {
+        if (p.len > self.buf.len) {
+            std.log.warn("path longer than {d} bytes ignored: {s}...", .{ self.buf.len, p[0..64] });
+            self.len = 0;
+            return;
+        }
+        self.len = p.len;
+        @memcpy(self.buf[0..self.len], p);
+    }
+};
+
 pub const Config = struct {
     scaling: Scaling = .integer,
     /// Models, shadows and effects at window resolution (the frame is drawn an
@@ -59,23 +80,27 @@ pub const Config = struct {
     /// debug commands), 1 — available. Launch options (--console, --input, --dev) and
     /// the resource viewer (without --play) work regardless.
     console: bool = false,
+    /// The launcher window (game folder and these settings) when the game is started
+    /// without arguments; with 0 it is skipped (Shift at startup shows it anyway).
+    launcher: bool = true,
     /// Game directory (with dat and avi): used when no path is given at launch;
     /// empty — unset. The first launch with a path stores it here.
-    game_path_buf: [1024]u8 = undefined,
-    game_path_len: usize = 0,
+    game_path: PathBuf = .{},
+    /// The OpenGorky package Play starts (its file name in a `mods/` folder: app/packages.zig);
+    /// empty — the original game.
+    package: PathBuf = .{},
 
     pub fn gamePath(self: *const Config) []const u8 {
-        return self.game_path_buf[0..self.game_path_len];
+        return self.game_path.get();
     }
 
     pub fn setGamePath(self: *Config, path: []const u8) void {
-        const n = @min(path.len, self.game_path_buf.len);
-        @memcpy(self.game_path_buf[0..n], path[0..n]);
-        self.game_path_len = n;
+        self.game_path.set(path);
     }
 
-    /// Parses the file text; unknown keys and errors are skipped.
-    fn parse(text: []const u8) Config {
+    /// Parses the file text; unknown keys and errors are skipped (no file is touched:
+    /// the editor reads the viewer's `game_path` with it).
+    pub fn parse(text: []const u8) Config {
         var cfg: Config = .{};
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |raw| {
@@ -101,8 +126,12 @@ pub const Config = struct {
                 cfg.fps_limit = std.fmt.parseInt(u32, val, 10) catch cfg.fps_limit;
             } else if (std.mem.eql(u8, key, "game_path")) {
                 cfg.setGamePath(val);
+            } else if (std.mem.eql(u8, key, "package")) {
+                cfg.package.set(val);
             } else if (std.mem.eql(u8, key, "console")) {
                 cfg.console = flag(val) orelse cfg.console;
+            } else if (std.mem.eql(u8, key, "launcher")) {
+                cfg.launcher = flag(val) orelse cfg.launcher;
             } else if (std.mem.eql(u8, key, "pause_background")) {
                 cfg.pause_background = flag(val) orelse cfg.pause_background;
             } else if (std.mem.eql(u8, key, "fps_background")) {
@@ -167,10 +196,18 @@ pub const Config = struct {
             \\# win the battle, give items, etc.)
             \\console = {d}
             \\
+            \\# Launcher window at startup (game folder and these settings): 1 — show,
+            \\# 0 — start the game at once (hold Shift while starting to show it anyway)
+            \\launcher = {d}
+            \\
             \\# Game directory (with dat and avi), used when no path is given at startup
             \\game_path = {s}
             \\
-        , .{ self.scaling, @intFromBool(self.hires), self.upscale, @intFromBool(self.fullscreen), @intFromBool(self.debug), self.log, self.fps_limit, self.fps_background, @intFromBool(self.pause_background), @intFromBool(self.console), self.gamePath() });
+            \\# OpenGorky package to play (a .ogp file in the game's or this folder's mods/):
+            \\# empty — the original game
+            \\package = {s}
+            \\
+        , .{ self.scaling, @intFromBool(self.hires), self.upscale, @intFromBool(self.fullscreen), @intFromBool(self.debug), self.log, self.fps_limit, self.fps_background, @intFromBool(self.pause_background), @intFromBool(self.console), @intFromBool(self.launcher), self.gamePath(), self.package.get() });
     }
 
     /// Reads `path`; creates it with defaults only if the file does not exist.
@@ -193,7 +230,7 @@ pub const Config = struct {
         return cfg;
     }
 
-    const keys = [_][]const u8{ "scaling", "hires", "upscale", "fullscreen", "debug", "log", "fps_limit", "fps_background", "pause_background", "console", "game_path" };
+    const keys = [_][]const u8{ "scaling", "hires", "upscale", "fullscreen", "debug", "log", "fps_limit", "fps_background", "pause_background", "console", "launcher", "game_path", "package" };
 
     fn hasKey(data: []const u8, key: []const u8) bool {
         var it = std.mem.splitScalar(u8, data, '\n');
@@ -206,11 +243,20 @@ pub const Config = struct {
         return false;
     }
 
+    /// `format` buffer: the ~2.7 KB template plus the longest `game_path`, with room
+    /// for new options (the test "format fits" fails before saving silently would).
+    const text_max = 8192;
+
+    /// Writes the file; a failure is logged (the settings stay in memory).
     pub fn save(self: Config, io: Io, dir: []const u8, path: []const u8) void {
-        var buf: [4096]u8 = undefined;
-        const text = self.format(&buf) catch return;
-        Io.Dir.cwd().createDirPath(io, dir) catch return;
-        writeAtomic(io, path, text) catch {};
+        self.trySave(io, dir, path) catch |err| std.log.warn("{s}: not saved: {t}", .{ path, err });
+    }
+
+    fn trySave(self: Config, io: Io, dir: []const u8, path: []const u8) !void {
+        var buf: [text_max]u8 = undefined;
+        const text = try self.format(&buf);
+        try Io.Dir.cwd().createDirPath(io, dir);
+        try writeAtomic(io, path, text);
     }
 };
 
@@ -243,6 +289,36 @@ test "parse config" {
     try std.testing.expectEqual(cfg, back);
     try std.testing.expect(!Config.parse("pause_background = false\n").pause_background);
     try std.testing.expect(Config.parse("pause_background = junk\n").pause_background);
+    try std.testing.expect(!Config.parse("launcher = 0\n").launcher);
+    try std.testing.expect(Config.parse("").launcher);
+}
+
+test "format fits with the longest path and room to grow" {
+    var cfg: Config = .{ .scaling = .@"stretch-blur", .fps_limit = std.math.maxInt(u32), .fps_background = std.math.maxInt(u32) };
+    const longest: [1024]u8 = @splat('p');
+    cfg.setGamePath(&longest);
+    try std.testing.expectEqual(@as(usize, 1024), cfg.gamePath().len);
+    var buf: [Config.text_max]u8 = undefined;
+    const text = try cfg.format(&buf);
+    // Half the buffer stays free: a few new options must not reach the limit.
+    try std.testing.expect(text.len < Config.text_max / 2);
+    try std.testing.expectEqual(cfg, Config.parse(text));
+}
+
+test "save round-trip; a write error is returned, not lost" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    var db: [128]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&db, ".zig-cache/tmp/{s}/sub", .{tmp.sub_path});
+    var pb: [160]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pb, "{s}/opengorky.cfg", .{dir});
+    var cfg: Config = .{ .scaling = .sharp, .debug = true, .fps_limit = 0, .launcher = false };
+    cfg.setGamePath("/games/Gorky 17");
+    try cfg.trySave(io, dir, path);
+    try std.testing.expectEqual(cfg, Config.load(io, std.testing.allocator, dir, path));
+    var mb: [160]u8 = undefined;
+    try std.testing.expectError(error.FileNotFound, cfg.trySave(io, dir, try std.fmt.bufPrint(&mb, "{s}/missing/opengorky.cfg", .{dir})));
 }
 
 /// Saves directory: macOS ~/Library/Application Support/OpenGorky/saves,

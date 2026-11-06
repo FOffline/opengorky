@@ -7,6 +7,7 @@ const menu_slots = @import("../menu/slots.zig");
 const gui_short = @import("../gui/short.zig");
 const camera_view = @import("../level/camera.zig");
 const c = @import("sdl");
+const og = @import("opengorky");
 const viewer = @import("viewer.zig");
 const Viewer = viewer.Viewer;
 const keys = @import("keys.zig");
@@ -21,10 +22,20 @@ pub fn handle(v: *Viewer, ctx: *Ctx, raw: c.SDL_Event) !Flow {
     var ev = raw;
     _ = c.SDL_ConvertEventToRenderCoordinates(ctx.renderer, &ev);
     // A wide frame (`scaling = adaptive`): x from the middle 640's left edge.
+    // A tall canvas: y from the interface box's top (`gfx.uiY`).
     switch (ev.type) {
-        c.SDL_EVENT_MOUSE_MOTION => ev.motion.x -= gfx.wide,
-        c.SDL_EVENT_MOUSE_BUTTON_DOWN, c.SDL_EVENT_MOUSE_BUTTON_UP => ev.button.x -= gfx.wide,
-        c.SDL_EVENT_MOUSE_WHEEL => ev.wheel.mouse_x -= gfx.wide,
+        c.SDL_EVENT_MOUSE_MOTION => {
+            ev.motion.x -= gfx.wide;
+            ev.motion.y -= gfx.uiY();
+        },
+        c.SDL_EVENT_MOUSE_BUTTON_DOWN, c.SDL_EVENT_MOUSE_BUTTON_UP => {
+            ev.button.x -= gfx.wide;
+            ev.button.y -= gfx.uiY();
+        },
+        c.SDL_EVENT_MOUSE_WHEEL => {
+            ev.wheel.mouse_x -= gfx.wide;
+            ev.wheel.mouse_y -= gfx.uiY();
+        },
         else => {},
     }
     switch (ev.type) {
@@ -32,7 +43,7 @@ pub fn handle(v: *Viewer, ctx: *Ctx, raw: c.SDL_Event) !Flow {
         c.SDL_EVENT_TEXT_INPUT => if (v.menu != null and v.menu.?.open and v.menu.?.editing != null) {
             // Save name (0x415470): what 0x412a00 lets through; "keyboard" sound.
             for (std.mem.span(ev.text.text)) |ch| {
-                if (menu_slots.typeChar(v.menu.?, ch)) v.uiSound("keyboard");
+                if (menu_slots.typeChar(v.menu.?, ch)) v.uiSound(og.core.modules.ui().sounds.keyboard);
             }
         } else if (v.console.open) v.console.typeText(std.mem.span(ev.text.text)),
         c.SDL_EVENT_KEY_DOWN => return keys.keyDown(v, ctx, ev),

@@ -6,7 +6,9 @@ const std = @import("std");
 const value = @import("../script.zig").value;
 const num = @import("../num.zig");
 const Rand = @import("../crt_rand.zig").Rand;
-const WeaponClass = @import("weapon_class.zig").WeaponClass;
+const seam = @import("../rules.zig");
+/// Fighter state applied by 0x4900f0 (the number is the call argument).
+pub const Effect = seam.Effect;
 
 /// Hit chance in percent (0x4cedc2): shooter accuracy plus a tenth of the miss
 /// for each tile of the target's size; halved in rage.
@@ -17,57 +19,26 @@ pub fn hitChance(accuracy: f32, target_size: i32, berserk: bool) i32 {
     return c;
 }
 
-/// Only firearms roll to hit (weapon method +0xc4: 1 for subclasses 1, 2, 3, 12,
-/// 14, 126, 127); everything else always hits.
-pub fn rollsToHit(class: i32) bool {
-    return switch (WeaponClass.from(class)) {
-        .pistol, .rifle, .dartgun, .knife_throwing, .shotgun, .ally_pistol, .ally_rifle => true,
-        else => false,
-    };
-}
-
-/// Fighter state applied by 0x4900f0 (the number is the call argument).
-pub const Effect = enum(u8) {
-    burn = 1,
-    freeze = 2,
-    gas = 3,
-    /// Soaked with fuel (if burning, 3 more turns of fire).
-    soak = 4,
-    defend = 5,
-    sleep = 6,
-    /// Invisible's poison in 04__city_mfd (+0x248e8), incurable.
-    bite = 8,
-};
-
 /// State a weapon class applies to a live target on hit (subclass methods +0xf0 →
 /// 0x4900f0).
 pub fn weaponEffect(class: i32) ?Effect {
-    return switch (WeaponClass.from(class)) {
-        // Flamethrower (0x4b76a0): always ignites; damage only if the fire took.
-        // Molotov (+0xdc 0x4bb6e0) and napalm launcher (0x4b8120) ignite any hit target
-        // by the strike flag (6th argument of +0xf0, 1 for hits and projectiles,
-        // 0x49b93e), not by soaking; matches (21) only a soaked one.
-        .flame_thrower, .molotov, .napalm => .burn,
-        .dartgun, .shocker, .stun_bomb, .needle, .medusa_short, .stinger_long, .guard2, .schizo1 => .sleep,
-        .nitrogen, .reverend_insect => .freeze,
-        .bottle, .hornet => .soak,
-        .gas_grenade, .invisible => .gas,
-        .invisible_mfd => .bite,
-        else => null,
-    };
+    const wc = seam.weaponClass(class);
+    return if (wc.effects.len > 0) wc.effects[0] else wc.effect;
 }
 
-/// Recharge turns after a shot (+0xc8 of subclasses: 0x4b7640 flamethrower 3,
-/// 0x4b8490 ion rifle 4, 0x4b89e0 blaster 3, 0x4b9ca0 shocker 4, 0x4bbc50
-/// nitrogen gun 3); 0 = no recharge. Firing is allowed at counter ≤ 0 (+0xcc).
+/// The states a weapon class applies on hit, in order: its `effects`, else its one
+/// `effect` (in `one`).
+pub fn weaponEffects(class: i32, one: *[1]Effect) []const Effect {
+    const wc = seam.weaponClass(class);
+    if (wc.effects.len > 0) return wc.effects;
+    one[0] = wc.effect orelse return &.{};
+    return one;
+}
+
+/// Recharge turns after a shot (+0xc8); 0 = no recharge. Firing is allowed at
+/// counter ≤ 0 (+0xcc).
 pub fn rechargeTurns(class: i32) i32 {
-    return switch (WeaponClass.from(class)) {
-        .flame_thrower, .blaster, .nitrogen => 3,
-        // Medusa's short strike (wp_medusashort, class 123: +0xc8 0x4d6570, check
-        // 0x4d6560) has 4 turns; the long one (124) has none (base methods).
-        .ion_rifle, .shocker, .medusa_short => 4,
-        else => 0,
-    };
+    return seam.weaponClass(class).recharge;
 }
 
 /// Enemy turn start (0x49843e…0x49845a): every weapon's +0xc0 decrements the
@@ -76,19 +47,15 @@ pub fn rechargeTick(left: i32) i32 {
     return if (left > 0) left - 1 else left;
 }
 
-/// Weapon that ignites a fuel-soaked target (clears "soaked" and applies fire).
-pub fn ignitesSoaked(class: i32) bool {
-    return switch (WeaponClass.from(class)) {
-        .pistol, .rifle, .flame_thrower, .rocket_launcher, .time_bomb, .grenade, .chaingun, .shotgun, .molotov, .napalm, .barrel, .matches, .garcia_long, .headnail, .ally_pistol, .ally_rifle => true,
-        else => false,
-    };
-}
-
 /// Exp threshold per level (table 0x528c3c, 0x48f9c0): the level grows while exp
 /// exceeds the current level's threshold.
 pub fn levelThreshold(level: i32) i32 {
-    const t = [20]i32{ 0, 220, 450, 705, 1010, 1385, 1910, 2720, 4260, 8745, 17490, 34980, 69960, 139920, 279840, 559680, 1119360, 2238720, 4477440, 8954880 };
-    return if (level < 0 or level > 19) 0 else t[@intCast(level)];
+    return seam.expLevel(level);
+}
+
+/// The highest level (the threshold table's last).
+pub fn maxLevel() i32 {
+    return seam.maxLevel();
 }
 
 /// Miss: `rand() % 101 > chance`.
@@ -97,10 +64,11 @@ fn rollMiss(r: *Rand, chance: i32) bool {
 }
 
 /// Weapon skill in percent (0x48fe10 ← 0x48fdb0): hero level from the skill list
-/// (no entry = 1), non-heroes 10; level ≤ 0 gives 100, else level × 10.
+/// (no entry = 1), non-heroes 100; level ≤ 0 gives 100, else level × Value(skill_step) (10).
 pub fn skillPercent(level: ?i32, hero: bool) i32 {
-    const lv: i32 = if (!hero) 10 else level orelse 1;
-    return if (lv > 0) lv * 10 else 100;
+    if (!hero) return 100; // the exe's level 10 × 10
+    const lv: i32 = level orelse 1;
+    return if (lv > 0) lv * seam.value(.skill_step) else 100;
 }
 
 /// Skill damage factor (0x4ceeee): k = clamp(skill/100 ± (roll/100)^8, 0, 1),
@@ -161,10 +129,10 @@ pub fn strike(r: *Rand, p: StrikeParams) Strike {
     if (st.dmg > 3) if (p.luck) |l| {
         if (@rem(r.next(), 101) < l and @rem(r.next(), 101) < l) {
             st.crit = true;
-            st.dmg = value.scaleInt(st.dmg, 1.2);
+            st.dmg = value.scaleInt(st.dmg, perMille(.crit_pm));
         }
     };
-    if (p.rage) st.dmg *= 2;
+    if (p.rage) st.dmg = @intCast(@divTrunc(@as(i64, st.dmg) * seam.value(.rage_pm), 1000));
     return st;
 }
 
@@ -203,6 +171,12 @@ test "strike: no luck rolls when damage after skill is 3 or less, monsters never
     try std.testing.expectEqual(a.next(), b.next());
 }
 
+/// Value `c` per mille as a factor (an f32 division: 1200 → the f32 nearest 1.2, as the
+/// exe's constant).
+pub fn perMille(c: seam.Const) f32 {
+    return @as(f32, @floatFromInt(seam.value(c))) / 1000;
+}
+
 /// Damage after the target's armour (0x49123e). Hero: armour is subtracted.
 /// Monster: armour class picks the weapon's percent (`lightArmor` etc.), damage × (100 − percent) / 100.
 pub fn afterArmor(dmg: i32, hero: bool, armor: i32, weapon_armor_pct: [3]i32) i32 {
@@ -219,8 +193,8 @@ pub fn sideBonus(want: f32, facing: f32) i32 {
     const two_pi = 2.0 * std.math.pi;
     const r = @mod(@abs(@as(f64, want) - @as(f64, facing)), two_pi);
     const delta = @min(r, two_pi - r);
-    if (delta >= std.math.pi * 0.7125) return 4;
-    if (delta >= std.math.pi * 0.2375) return 2;
+    if (delta >= std.math.pi * 0.7125) return seam.value(.back_bonus);
+    if (delta >= std.math.pi * 0.2375) return seam.value(.side_bonus);
     return 0;
 }
 

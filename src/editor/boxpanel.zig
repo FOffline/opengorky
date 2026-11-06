@@ -6,19 +6,20 @@ const Allocator = std.mem.Allocator;
 const c = @import("sdl");
 const ui = @import("ui");
 const clay = @import("clay.zig");
+const gui = @import("widgets.zig");
+const lay = @import("layout.zig");
 const font_mod = @import("font.zig");
 const tx = @import("text.zig");
-const vars = @import("vars.zig");
+const model = @import("model.zig");
 const box = @import("box.zig");
 const catalog = @import("catalog.zig");
 const search = @import("search.zig");
 const common_archive = @import("store.zig").common_archive;
-const main = @import("app.zig");
-const App = main.App;
-const theme = main.theme;
-const txt = main.txt;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
+const theme = app_mod.theme;
 
-const Open = main.BoxOpen;
+const Open = app_mod.BoxOpen;
 
 /// Catalog entry of class file `class` (`cw_crowbar.s`).
 fn entryOf(app: *App, class: []const u8) ?catalog.Entry {
@@ -30,10 +31,10 @@ fn entryOf(app: *App, class: []const u8) ?catalog.Entry {
 }
 
 /// The class's own ammo count (`counter`).
-fn defaultCount(app: *App, class: []const u8) ?i32 {
+pub fn defaultCount(app: *App, class: []const u8) ?i32 {
     var buf: [96]u8 = undefined;
     const f = app.store.file(common_archive, std.fmt.bufPrint(&buf, "classes\\{s}", .{class}) catch return null) catch return null;
-    const v = vars.get(app.store.text(f), "counter") orelse return null;
+    const v = model.ownNum(app, f, "count") orelse return null;
     return @intFromFloat(v);
 }
 
@@ -41,48 +42,53 @@ fn isAmmo(class: []const u8) bool {
     return std.ascii.startsWithIgnoreCase(class, "ca_");
 }
 
-/// Adds one `class` to box `o` (CLI `--box-add`).
+/// Adds one `class` to box `o` (CLI `--box-add`): a class file the panel offers
+/// (`ci_bandage.s`) or its entry id (`bandage`, if only one class has it); the exe's
+/// Item_New/Weapon_New of a missing class fails the box's script.
 pub fn addClass(app: *App, a: Allocator, o: Open, class: []const u8) !void {
-    add(app, a, o, try parse(app, a, o), class);
+    const file = if (entryOf(app, class) != null) class else blk: {
+        var found: ?[]const u8 = null;
+        for (app.catalog.entries.items) |e| {
+            if (e.kind == .enemy or e.kind == .hero or !std.ascii.eqlIgnoreCase(e.id, class) or !std.ascii.startsWithIgnoreCase(e.entry, "classes\\")) continue;
+            if (found != null) return error.AmbiguousClass;
+            found = e.entry["classes\\".len..];
+        }
+        break :blk found orelse return error.NoSuchClass;
+    };
+    add(app, a, o, try parse(app, a, o), file);
 }
 
 pub fn panel(app: *App, a: Allocator, o: Open) void {
     const items = parse(app, a, o) catch return;
-    if (main.modal(app, "boxpanel", 860, 600, theme.panel, if (o.owner != null) tx.alloc(a, tx.inv_title, .{o.name}) else tx.alloc(a, tx.box_title, .{o.name}), "") == .close) app.box = null;
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.fit() }, .padding = .{ .left = 16, .right = 16, .bottom = 8 } } });
-    clay.text(tx.get(if (o.owner != null) tx.inv_hint else tx.box_hint), .{ .textColor = theme.warn, .fontSize = 13, .fontId = font_mod.regular });
+    if (gui.modal(app, "boxpanel", .{ .h = lay.height.window, .title = if (o.owner != null) tx.alloc(a, tx.inv_title, .{o.name}) else tx.alloc(a, tx.box_title, .{o.name}) }) == .close) app.box = null;
+    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow() }, .padding = .{ .left = lay.space.lg, .right = lay.space.lg, .bottom = lay.space.sm } } });
+    gui.txtWrap(tx.get(if (o.owner != null) tx.inv_hint else tx.box_hint), .body, theme.warn, font_mod.regular);
     clay.close();
 
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() } }, .border = .{ .color = theme.line, .width = .{ .top = 1 } } });
+    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() } }, .border = .{ .color = theme.line, .width = .{ .top = lay.border.line } } });
     // Contents.
     clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM } });
-    main.panelHeader(tx.alloc(a, tx.box_contents, .{items.len}));
+    gui.panelHeader(tx.alloc(a, tx.box_contents, .{items.len}));
     clay.openScroll(.{ .id = clay.id("box_items"), .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM } });
-    if (items.len == 0) {
-        clay.open(.{ .layout = .{ .padding = .{ .left = 16, .top = 8 } } });
-        txt(tx.get(tx.box_empty), 14, theme.dim, font_mod.regular);
-        clay.close();
-    }
+    if (items.len == 0) gui.listNote(tx.get(tx.box_empty));
     for (items, 0..) |it, i| itemRow(app, a, o, items, i, it);
     clay.close();
     clay.close();
     // Classes to add.
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(320), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM }, .border = .{ .color = theme.line, .width = .{ .left = 1 } } });
-    main.panelHeader(tx.get(tx.box_add));
-    main.searchField(app, a);
+    // A share of the window: room for the contents at any UI scale.
+    gui.sidePanel(app.sidePane(320.0 / 1680.0), .{ .bg = theme.panel });
+    gui.panelHeader(tx.get(tx.box_add));
+    gui.searchField(app, a, "window_search", &app.query_name, true, tx.get(tx.search_hint), "");
     clay.openScroll(.{ .id = clay.id("box_classes"), .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.grow() }, .layoutDirection = ui.CLAY_TOP_TO_BOTTOM } });
     for (app.catalog.entries.items, 0..) |e, i| {
         if (e.kind == .enemy or e.kind == .hero) continue;
         if (!search.matches(app.query(), &.{ e.id, e.title })) continue;
-        const rid = clay.idi("box_cls", @intCast(i));
-        if (main.clickable(app, .{
-            .id = rid,
-            .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.fixed(30) }, .padding = .{ .left = 10, .right = 8 }, .childGap = 8, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } },
-            .backgroundColor = theme.panel,
-        }, false)) add(app, a, o, items, e.entry["classes\\".len..]);
-        clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(26), .height = clay.fixed(26) } }, .image = .{ .imageData = app.icon(e.icon) } });
-        txt(if (e.title.len > 0) e.title else e.id, 14, theme.text, font_mod.regular);
-        txt(e.id, 12, theme.dim, font_mod.regular);
+        if (gui.listRow(app, clay.idi("box_cls", @intCast(i)), .{ .h = lay.height.tool, .rounded = false })) add(app, a, o, items, e.entry["classes\\".len..]);
+        clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(lay.icon.lg), .height = clay.fixed(lay.icon.lg) } }, .image = .{ .imageData = app.icon(e.icon) } });
+        gui.openClip(lay.space.sm);
+        gui.txt(if (e.title.len > 0) e.title else e.id, .label, theme.text, font_mod.regular);
+        gui.txt(e.id, .caption, theme.dim, font_mod.regular);
+        clay.close();
         clay.close();
     }
     clay.close();
@@ -93,16 +99,18 @@ pub fn panel(app: *App, a: Allocator, o: Open) void {
 
 fn itemRow(app: *App, a: Allocator, o: Open, items: []box.Item, i: usize, it: box.Item) void {
     const e = entryOf(app, it.class);
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.fixed(36) }, .padding = .{ .left = 12, .right = 12 }, .childGap = 8, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
-    clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(32), .height = clay.fixed(32) } }, .image = .{ .imageData = if (e) |x| app.icon(x.icon) else null } });
-    txt(if (e) |x| (if (x.title.len > 0) x.title else x.id) else it.class, 14, theme.text, font_mod.regular);
-    txt(it.class, 12, theme.dim, font_mod.regular);
-    clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.grow() } } });
+    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.grow(), .height = clay.fixed(lay.height.tab) }, .padding = gui.pad(lay.space.md, 0), .childGap = lay.space.sm, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } } });
+    clay.leaf(.{ .layout = .{ .sizing = .{ .width = clay.fixed(lay.icon.xl), .height = clay.fixed(lay.icon.xl) } }, .image = .{ .imageData = if (e) |x| app.icon(x.icon) else null } });
+    gui.openClip(lay.space.sm);
+    gui.txt(if (e) |x| (if (x.title.len > 0) x.title else x.id) else it.class, .label, theme.text, font_mod.regular);
+    gui.txt(it.class, .caption, theme.dim, font_mod.regular);
+    clay.close();
+    gui.spacer();
     const ammo = isAmmo(it.class);
     const n: i32 = if (ammo) it.count orelse defaultCount(app, it.class) orelse 1 else @intCast(it.names.items.len);
     smallButton(app, @intCast(i * 4), "-", a, o, items, i, -1);
-    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(48) }, .childAlignment = .{ .x = ui.CLAY_ALIGN_X_CENTER } } });
-    txt(std.fmt.allocPrint(a, "{d}", .{n}) catch "?", 15, theme.text, font_mod.bold);
+    clay.open(.{ .layout = .{ .sizing = .{ .width = clay.fixed(lay.width.number) }, .childAlignment = .{ .x = ui.CLAY_ALIGN_X_CENTER } } });
+    gui.txt(std.fmt.allocPrint(a, "{d}", .{n}) catch "?", .title, theme.text, font_mod.bold);
     clay.close();
     smallButton(app, @intCast(i * 4 + 1), "+", a, o, items, i, 1);
     smallButton(app, @intCast(i * 4 + 2), "×", a, o, items, i, 0);
@@ -112,16 +120,10 @@ fn itemRow(app: *App, a: Allocator, o: Open, items: []box.Item, i: usize, it: bo
 /// −/+ (`delta`, ×10 with Shift) or × (0: remove).
 fn smallButton(app: *App, id: u32, label: []const u8, a: Allocator, o: Open, items: []box.Item, i: usize, delta: i32) void {
     const bid = clay.idi("box_btn", id);
-    if (main.clickable(app, .{
-        .id = bid,
-        .layout = .{ .sizing = .{ .width = clay.fixed(26), .height = clay.fixed(24) }, .childAlignment = .{ .x = ui.CLAY_ALIGN_X_CENTER, .y = ui.CLAY_ALIGN_Y_CENTER } },
-        .backgroundColor = theme.bg,
-    }, false)) {
+    if (gui.buttonOf(app, bid, .{ .label = label, .style = .quiet, .size = .small, .color = if (delta == 0 and clay.pointerOver(bid)) theme.warn else theme.text })) {
         const shift = (c.SDL_GetModState() & c.SDL_KMOD_SHIFT) != 0;
         change(app, a, o, items, i, if (delta == 0) null else delta * @as(i32, if (shift) 10 else 1));
     }
-    txt(label, 15, if (delta == 0 and clay.pointerOver(bid)) theme.warn else theme.text, font_mod.bold);
-    clay.close();
 }
 
 /// Item `i` by `delta` units (ammo: rounds); null removes it.
@@ -155,17 +157,18 @@ pub fn add(app: *App, a: Allocator, o: Open, items: []box.Item, class: []const u
 }
 
 fn store(app: *App, o: Open, items: []const box.Item) void {
-    const out = (if (o.owner) |who| box.writeOwned(app.gpa, app.store.text(o.file), items, who) else box.write(app.gpa, app.store.text(o.file), items)) catch |err| return app.setStatus(tx.st_set_failed, .{err});
+    if (o.owner) |who| return box.writeOwned(app, o.file, items, who) catch |err| app.failed(err);
+    const out = box.write(app.gpa, app.store.text(o.file), items) catch |err| return app.failed(err);
     app.store.replace(o.file, out) catch |err| {
         app.gpa.free(out);
-        app.setStatus(tx.st_set_failed, .{err});
+        app.failed(err);
     };
 }
 
 /// `<level>_<box>_<class>_<k>`: objects are found by name in the whole game (saves,
 /// heroes' inventories), so the level and box keep it unique.
 fn parse(app: *App, a: Allocator, o: Open) ![]box.Item {
-    return if (o.owner) |who| box.parseOwned(a, app.store.text(o.file), who) else box.parse(a, app.store.text(o.file));
+    return if (o.owner) |who| box.parseOwned(app, a, o.file, who) else box.parse(app, a, o.file);
 }
 
 fn newName(app: *App, a: Allocator, o: Open, items: []const box.Item, class: []const u8) ![]const u8 {

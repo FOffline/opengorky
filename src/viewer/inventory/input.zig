@@ -4,7 +4,8 @@
 const inventory_give = @import("give.zig");
 const inventory_mod = @import("../inventory.zig");
 const InventoryView = inventory_mod.InventoryView;
-const World = @import("opengorky").state.world.World;
+const og = @import("opengorky");
+const World = og.state.world.World;
 const Object = @import("opengorky").script.object.Object;
 const inv = @import("opengorky").inventory;
 
@@ -50,7 +51,7 @@ pub fn press(self: *InventoryView, w: *World, x: f32, y: f32) void {
             self.hero = i;
             self.scroll = 0;
             self.current = if (self.heroObj(w)) |h| inv.equipment.equipped(w, h, .hand) else null;
-            w.out.sound(w.gpa, "selecthero", null);
+            w.out.sound(w.gpa, og.core.modules.ui().sounds.select_hero, null);
         },
         .cell => |k| if (!locked) if (self.cellItem(w, hero, k)) |item| pick(self, w, item),
         .torso => if (!locked) if (inv.equipment.equipped(w, hero, .armor)) |item| pick(self, w, item),
@@ -62,9 +63,9 @@ pub fn press(self: *InventoryView, w: *World, x: f32, y: f32) void {
             self.tab = @fromBackingInt(@intCast(i));
             self.scroll = 0;
             w.out.sound(w.gpa, switch (i) {
-                0 => "invbuttonweapons",
-                1 => "invbuttonitems",
-                else => "invbuttonkeys",
+                0 => og.core.modules.ui().sounds.weapons_tab,
+                1 => og.core.modules.ui().sounds.items_tab,
+                else => og.core.modules.ui().sounds.keys_tab,
             }, null);
         },
         else => {},
@@ -76,13 +77,13 @@ fn pick(self: *InventoryView, w: *World, item: *Object) void {
     item.setInt("place", -1);
     self.carried = item;
     self.current = item;
-    w.out.sound(w.gpa, "Itemchoose", null);
+    w.out.sound(w.gpa, og.core.modules.ui().sounds.item_choose, null);
 }
 
 /// The cursor item was put down.
 fn drop(self: *InventoryView, w: *World) void {
     self.carried = null;
-    w.out.sound(w.gpa, "Itemput", null);
+    w.out.sound(w.gpa, og.core.modules.ui().sounds.item_put, null);
 }
 
 /// Right button: cursor item → backpack; otherwise the item under the cursor becomes current.
@@ -92,11 +93,11 @@ pub fn pressRight(self: *InventoryView, w: *World, x: f32, y: f32) void {
     if (self.carried) |item| {
         inv.item.setPlace(item, .backpack);
         self.carried = null;
-        w.out.sound(w.gpa, "Itemput", null);
+        w.out.sound(w.gpa, og.core.modules.ui().sounds.item_put, null);
         return;
     }
     if (self.hoverItem(w, x, y)) |item| {
         self.current = item;
-        w.out.sound(w.gpa, "Itemchoose", null);
+        w.out.sound(w.gpa, og.core.modules.ui().sounds.item_choose, null);
     }
 }

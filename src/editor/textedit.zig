@@ -1,79 +1,165 @@
-//! A text field for free text (names, descriptions, lines; Cyrillic too): a click types
-//! into it, Enter or a click elsewhere gives the text, Esc drops it. One at a time; its
-//! text lives in the App (`text_edit`) while typed.
+//! The one field typed into — a text field (names, descriptions, lines; Cyrillic too),
+//! a number field or stepper, a script value: a click types into it (all of it selected),
+//! Enter (Tab) or a click elsewhere gives the text, Esc drops it. One at a time; its text
+//! lives in the App (`text_edit`) while typed, then (`text_given`) until its field takes
+//! it at the next layout; a script value is written at once (its row may be gone).
+//! A search or a new level's name types straight into its App buffer (`live`: a list
+//! filters as it is typed). Also where the App's typing goes (`typed`).
 
-const std = @import("std");
 const ui = @import("ui");
 const clay = @import("clay.zig");
-const font_mod = @import("font.zig");
-const main = @import("app.zig");
-const App = main.App;
-const theme = main.theme;
+const app_mod = @import("app.zig");
+const model = @import("model.zig");
+const App = app_mod.App;
+const search = @import("search.zig");
+const std = @import("std");
+const c = @import("sdl");
 
 pub const Edit = struct {
-    /// The field typed into.
+    /// The field typed into (its box: a click outside it gives the text).
     id: ui.Clay_ElementId,
-    buf: [1024]u8 = undefined,
-    len: usize = 0,
+    field: search.Field(1024) = .{},
     /// Laid out this frame (else it was left: dropped).
     seen: bool = false,
+    /// Given by Enter (not by a click away).
+    entered: bool = false,
+    /// A script value's (valueField) variable: `names` of `file`, a missing one after the
+    /// line holding `after`.
+    value: ?struct { file: usize, names: []const []const u8, after: ?[]const u8 } = null,
+    /// The buffer following each change (`live`); Esc puts back what it held.
+    live: ?Live = null,
 
     pub fn text(self: *const Edit) []const u8 {
-        return self.buf[0..self.len];
+        return self.field.text();
     }
 };
 
-/// Field `key` showing `value` (`width` 0: the rest of the row); the typed text when
-/// given (Enter or a click away), else null. `hint` shows while empty.
-pub fn field(app: *App, key: []const u8, value: []const u8, width: f32, hint: []const u8) ?[]const u8 {
-    const fid = clay.id(key);
-    // Its typing ended (Enter, a click away): the text, once.
-    var given: ?[]const u8 = null;
-    if (app.text_given) |g| if (g.id.id == fid.id) {
-        given = app.frame.allocator().dupe(u8, g.text()) catch null;
-        app.text_given = null;
-    };
-    var typing = if (app.text_edit) |*e| e.id.id == fid.id else false;
-    if (typing) app.text_edit.?.seen = true;
-    clay.open(.{
-        .id = fid,
-        .layout = .{ .sizing = .{ .width = if (width == 0) clay.grow() else clay.fixed(width), .height = .{ .type = ui.CLAY__SIZING_TYPE_FIT, .size = .{ .minMax = .{ .min = 30, .max = 0 } } } }, .padding = .{ .left = 10, .right = 10, .top = 6, .bottom = 6 }, .childAlignment = .{ .y = ui.CLAY_ALIGN_Y_CENTER } },
-        .backgroundColor = if (typing) theme.field else if (clay.pointerOver(fid)) theme.row_hover else theme.field,
-        .cornerRadius = clay.radius(theme.radius),
-        .border = .{ .color = if (typing) theme.accent else theme.field_border, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } },
-    });
-    if (!typing and clay.hovered() and app.clicked) {
-        var e: Edit = .{ .id = fid, .seen = true };
-        e.len = @min(value.len, e.buf.len);
-        @memcpy(e.buf[0..e.len], value[0..e.len]);
-        app.text_edit = e;
-        typing = true;
-    }
-    const shown = if (typing) std.fmt.allocPrint(app.frame.allocator(), "{s}|", .{app.text_edit.?.text()}) catch "" else value;
-    clay.text(if (shown.len == 0) hint else shown, .{ .textColor = if (shown.len == 0) theme.dim else theme.text, .fontSize = 13, .fontId = font_mod.regular, .wrapMode = ui.CLAY_TEXT_WRAP_WORDS });
-    clay.close();
-    return given;
+pub const Live = struct { buf: []u8, len: *usize };
+
+/// An App.Name as a field's `live` buffer.
+pub fn live(name: anytype) Live {
+    return .{ .buf = &name.buf, .len = &name.len };
+}
+
+/// Field `id` typed into from `value`, at its end (a search, a name: nothing selected),
+/// each byte as `filter` takes it (search.keep); `to`: the buffer following it.
+pub fn focusEnd(app: *App, id: ui.Clay_ElementId, value: []const u8, filter: *const fn (u8, usize) ?u8, to: ?Live) void {
+    var f: search.Field(1024) = .begin(value, filter);
+    f.all = false;
+    begin(app, .{ .id = id, .field = f, .live = to });
+}
+
+/// Field `key` is the one typed into (not marking it laid out).
+pub fn typingIn(app: *const App, key: []const u8) bool {
+    return if (app.text_edit) |e| e.id.id == clay.id(key).id else false;
+}
+
+/// The field's text into its `live` buffer (cut to its room, never inside a letter).
+fn changed(e: *Edit) void {
+    const l = e.live orelse return;
+    e.field.fit(l.buf.len);
+    @memcpy(l.buf[0..e.field.len], e.field.text());
+    l.len.* = e.field.len;
 }
 
 /// Field `key` typed into now (as clicked), starting from `value`.
 pub fn focus(app: *App, key: []const u8, value: []const u8) void {
-    var e: Edit = .{ .id = clay.id(key), .seen = true };
-    e.len = @min(value.len, e.buf.len);
-    @memcpy(e.buf[0..e.len], value[0..e.len]);
+    begin(app, .{ .id = clay.id(key), .field = .begin(value, search.keep.any) });
+}
+
+/// Typing `e` begun (the one typed into before given first).
+pub fn begin(app: *App, e: Edit) void {
+    if (app.text_edit) |old| if (old.id.id != e.id.id) give(app, false);
     app.text_edit = e;
+    app.text_edit.?.seen = true;
+}
+
+/// Field `id` typed into (it is laid out: kept).
+pub fn typedIn(app: *App, id: ui.Clay_ElementId) ?*Edit {
+    const e = &(app.text_edit orelse return null);
+    if (e.id.id != id.id) return null;
+    e.seen = true;
+    return e;
+}
+
+/// Field `id`'s typing given (Enter, a click away): taken, once.
+pub fn taken(app: *App, id: ui.Clay_ElementId) ?Edit {
+    const g = app.text_given orelse return null;
+    if (g.id.id != id.id) return null;
+    app.text_given = null;
+    return g;
+}
+
+/// A number field's given text as a finite number; null: left as it was or not a number.
+pub fn number(e: Edit) ?f32 {
+    const x = std.fmt.parseFloat(f32, e.field.give() orelse return null) catch return null;
+    return if (std.math.isFinite(x)) std.math.clamp(x, -1e5, 1e5) else null;
 }
 
 /// Before a layout: a click outside the field typed into gives its text.
 pub fn clickAway(app: *App) void {
     const e = &(app.text_edit orelse return);
-    if (app.clicked and !clay.pointerOver(e.id)) return enter(app);
+    if (app.clicked and !clay.pointerOver(e.id)) return give(app, false);
     e.seen = false;
 }
 
 /// Enter: the typed text given to its field (at its next layout).
 pub fn enter(app: *App) void {
-    app.text_given = app.text_edit;
+    give(app, true);
+}
+
+fn give(app: *App, entered: bool) void {
+    const e = app.text_edit orelse return;
     app.text_edit = null;
+    if (e.value) |val| {
+        const v = e.field.give() orelse return;
+        _ = std.fmt.parseFloat(f32, v) catch return;
+        model.set(app, val.file, val.names, v, val.after) catch |err| app.failed(err);
+        return;
+    }
+    app.text_given = e;
+    app.text_given.?.entered = entered;
+}
+
+/// Key `k` while a field is typed into; false: not the field's (a shortcut).
+pub fn keyDown(app: *App, k: c.SDL_Keycode, mod: c.SDL_Keymod) bool {
+    const e = &(app.text_edit orelse return false);
+    const cmd = (mod & (c.SDL_KMOD_CTRL | c.SDL_KMOD_GUI)) != 0;
+    switch (k) {
+        c.SDLK_BACKSPACE => {
+            e.field.backspace();
+            changed(e);
+        },
+        c.SDLK_DELETE => {
+            e.field.delete();
+            changed(e);
+        },
+        // Cmd+←/→ (macOS): to the line's ends.
+        c.SDLK_LEFT => e.field.move(if (cmd) .home else .left),
+        c.SDLK_RIGHT => e.field.move(if (cmd) .end else .right),
+        c.SDLK_HOME => e.field.move(.home),
+        c.SDLK_END => e.field.move(.end),
+        c.SDLK_A => if (cmd) e.field.selectAll() else return true,
+        c.SDLK_RETURN, c.SDLK_KP_ENTER, c.SDLK_TAB => enter(app),
+        c.SDLK_ESCAPE => {
+            if (e.live != null) {
+                e.field.buf = e.field.orig;
+                e.field.len = e.field.orig_len;
+                e.field.caret = e.field.len;
+                changed(e);
+            }
+            app.text_edit = null;
+        },
+        c.SDLK_V => if (cmd) {
+            const p = c.SDL_GetClipboardText() orelse return true;
+            defer c.SDL_free(p);
+            e.field.add(std.mem.span(p));
+            changed(e);
+        } else return true,
+        // Plain keys are letters, not shortcuts.
+        else => return !cmd,
+    }
+    return true;
 }
 
 /// After a layout: a field no longer shown drops its typing (and an unclaimed text).
@@ -85,28 +171,29 @@ pub fn afterLayout(app: *App) void {
 
 pub fn typed(app: *App, s: []const u8) void {
     const e = &(app.text_edit orelse return);
-    const n = @min(s.len, e.buf.len - e.len);
-    @memcpy(e.buf[e.len..][0..n], s[0..n]);
-    e.len += n;
+    e.field.add(s);
+    changed(e);
 }
 
-/// Backspace: the last character (all its UTF-8 bytes).
-pub fn backspace(app: *App) void {
-    const e = &(app.text_edit orelse return);
-    while (e.len > 0) {
-        e.len -= 1;
-        if (e.buf[e.len] & 0xc0 != 0x80) break;
-    }
+/// A script value typed into: dropped (another level opened).
+pub fn stopEditing(self: *App) void {
+    if (self.text_edit) |e| if (e.value != null) {
+        self.text_edit = null;
+    };
 }
 
-test backspace {
-    var e: Edit = .{ .id = .{} };
-    const s = "ab\u{0436}";
-    @memcpy(e.buf[0..s.len], s);
-    e.len = s.len;
-    while (e.len > 0) {
-        e.len -= 1;
-        if (e.buf[e.len] & 0xc0 != 0x80) break;
-    }
-    try std.testing.expectEqualStrings("ab", e.text());
+/// Text input on while something takes typing; a newly opened window starts an
+/// empty search.
+pub fn syncTextInput(self: *App) void {
+    if (self.overlay() and !self.overlay_was) self.query_name.len = 0;
+    self.overlay_was = self.overlay();
+    const want = self.text_edit != null or self.overlay();
+    if (want == self.text_input) return;
+    self.text_input = want;
+    _ = if (want) c.SDL_StartTextInput(self.window) else c.SDL_StopTextInput(self.window);
+}
+
+/// A script value typed into: written now (before a save, a discard, a return).
+pub fn commitEditing(self: *App) void {
+    if (self.text_edit) |e| if (e.value != null) give(self, false);
 }

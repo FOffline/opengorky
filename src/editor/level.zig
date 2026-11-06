@@ -9,12 +9,16 @@ const Allocator = std.mem.Allocator;
 const og = @import("opengorky");
 const c = @import("sdl");
 const placement = @import("placement.zig");
+const model = @import("model.zig");
+const newlevel = @import("newlevel.zig");
+const level_og = @import("level_og.zig");
+const App = @import("app.zig").App;
 const store_mod = @import("store.zig");
 const Store = store_mod.Store;
 const common_archive = store_mod.common_archive;
-const trigger = @import("trigger.zig");
 const World = og.state.world.World;
-const lf = og.formats.level_files;
+const map_io = og.loaders.map;
+const core_map = og.core.map;
 const archive = og.formats.archive;
 
 pub const Kind = enum { enemy, hero, neutral, prop, item, actor, area };
@@ -86,7 +90,7 @@ pub const Doc = struct {
     /// `<name>/other.dat`.
     level_archive: []u8 = &.{},
     /// The level's areas as edited (its `.ar` changed in the Store); null: the world's.
-    own_areas: ?[]lf.Area = null,
+    own_areas: ?[]core_map.Area = null,
     world: *World,
     bg: ?*c.SDL_Texture = null,
     /// Walkable cells of the location (made on first show).
@@ -105,6 +109,9 @@ pub const Doc = struct {
     /// The level script (Store index) and its placement calls.
     lev: usize = 0,
     script: placement.Script = .{ .calls = &.{}, .restore_close = null },
+    /// The level script does not parse now (being typed): `script` is the last good
+    /// one's, its byte positions stale — placement edits wait until it parses again.
+    broken: bool = false,
     preview: ?Preview = null,
     /// Removal refused: the file naming the object.
     ref_file: [128]u8 = undefined,
@@ -114,7 +121,7 @@ pub const Doc = struct {
     zoom: f32 = 1,
     fitted: bool = false,
     /// The level edit mode's battle grid, drawn instead of the level's (or none drawn).
-    grid_view: ?lf.CombatMap = null,
+    grid_view: ?core_map.CombatMap = null,
     grid_hidden: bool = false,
     /// Objects the editor's view leaves out (names, and `kind:<kind>` for whole kinds); set
     /// by the app before drawing.
@@ -126,11 +133,13 @@ pub const Doc = struct {
 
     var loads: u32 = 0;
 
-    pub fn load(st: *Store, r: *c.SDL_Renderer, name: []const u8) !*Doc {
+    /// Level `name` read as the editor shows it; `r` null: without its picture (only its
+    /// objects wanted).
+    pub fn load(st: *Store, r: ?*c.SDL_Renderer, name: []const u8) !*Doc {
         const gpa = st.gpa;
         const io = st.io;
         const dat = st.dat;
-        const world = try og.game.life.create(io, gpa, dat, name, null, .{});
+        const world = try og.loaders.world.create(io, gpa, dat, name, null, .{});
         errdefer world.destroy();
         const self = try gpa.create(Doc);
         errdefer gpa.destroy(self);
@@ -138,16 +147,18 @@ pub const Doc = struct {
         self.* = .{ .gpa = gpa, .store = st, .name = name, .world = world, .serial = loads };
         errdefer self.freeEdits();
         self.level_archive = try std.fmt.allocPrint(gpa, "{s}/other.dat", .{name});
-        self.loadBackground(io, r, dat, name) catch |err| std.log.warn("{s}: background: {t}", .{ name, err });
+        if (r) |rr| self.loadBackground(io, rr, dat, name) catch |err| std.log.warn("{s}: background: {t}", .{ name, err });
         try self.loadScript();
         try self.applyEdits();
         try self.collect();
+        // OpenGorky: the project's own placement over the installed game's.
+        if (level_og.blockFile(self)) |f| level_og.overlay(self, f);
         self.bind();
         return self;
     }
 
     /// The camera keys of initCamera() the level edit mode changes.
-    pub const camera_keys = [_][]const u8{ "viewX", "viewY", "viewZ", "aimX", "aimY", "aimZ", "angle", "zLevel", "camBan" };
+    pub const camera_keys = [_][]const u8{ "eye_x", "eye_y", "eye_z", "target_x", "target_y", "target_z", "fov", "floor_z", "camera_bank" };
 
     /// Unsaved edits the world (read from disk) lacks: the battle grid (`.cm`) and
     /// the camera of initCamera() from the Store's texts.
@@ -155,13 +166,24 @@ pub const Doc = struct {
         const w = self.world;
         var nb: [160]u8 = undefined;
         if (self.store.find(self.level_archive, try std.fmt.bufPrint(&nb, "{s}.cm", .{self.name}))) |f| {
-            if (lf.parseCombatMap(w.arena_state.allocator(), self.store.text(f))) |cm| {
-                w.combat_map = cm;
+            if (map_io.parseCombatMap(w.arena_state.allocator(), self.store.text(f))) |cm| {
+                w.map.combat = cm;
             } else |_| {}
         }
         const l = w.level orelse return;
-        inline for (camera_keys) |k| if (@import("newlevel.zig").cameraVar(self.text(), k)) |v| og.fields.setF(l, k, v);
+        inline for (camera_keys) |k| if (self.camValue(k)) |v| og.fields.setF(l, k, v);
         w.cam = og.world.start.makeCamera(w, l);
+        // A picture of another size not saved yet: the view spans its width (initBank).
+        switch (w.cam) {
+            .persp => |*pc| if (self.bg != null and pc.cx * 2 != self.bg_size[0]) {
+                const k = self.bg_size[0] / (pc.cx * 2);
+                pc.focal *= k;
+                pc.focal_y *= k;
+                pc.cx = self.bg_size[0] / 2;
+                pc.cy = self.bg_size[1] / 2;
+            },
+            .ortho => {},
+        }
     }
 
     fn freeEdits(self: *Doc) void {
@@ -182,17 +204,31 @@ pub const Doc = struct {
         if (self.walk_tex) |t| c.SDL_DestroyTexture(t);
         if (self.icons) |ts| for (ts) |t| c.SDL_DestroyTexture(t);
         self.freeEdits();
-        if (self.own_areas) |o| lf.freeAreas(self.gpa, o);
+        if (self.own_areas) |o| core_map.freeAreas(self.gpa, o);
         self.world.destroy();
         self.gpa.destroy(self);
     }
 
     fn loadScript(self: *Doc) !void {
         var buf: [256]u8 = undefined;
+        // OpenGorky: a level made in the project (no archive of the installed game) has no
+        // Classic script; a clean one stands in (never saved: as read), the page edits its block.
+        if (self.store.root != null) if (self.store.dat.access(self.store.io, self.level_archive, .{})) |_| {} else |_| {
+            const entry = try std.fmt.bufPrint(&buf, "{s}.lev", .{self.name});
+            self.lev = self.store.find(self.level_archive, entry) orelse blk: {
+                const t = if (self.world.battle != null) try newlevel.battleLevText(self.gpa, "", &.{}) else try newlevel.levText(self.gpa, "", self.name);
+                errdefer self.gpa.free(t);
+                const i = try self.store.add(self.level_archive, entry, t, null);
+                self.store.files.items[i].on_disk = true;
+                break :blk i;
+            };
+            self.script = try placement.scan(self.app(), self.gpa, self.lev);
+            return;
+        };
         {
             var ar = try archive.Archive.open(self.store.io, self.gpa, self.store.dat, self.level_archive);
             defer ar.close(self.store.io, self.gpa);
-            for (ar.entries) |e| for ([_][]const u8{ ".lev", ".are", ".itm", ".ftr", ".hro", ".obs", ".obs_i", ".wpn" }) |x| {
+            for (ar.entries) |e| for (@import("catalog.zig").script_exts) |x| {
                 if (!std.ascii.endsWithIgnoreCase(e.name, x)) continue;
                 const n = try self.gpa.dupe(u8, e.name);
                 self.scripts.append(self.gpa, n) catch |err| {
@@ -203,7 +239,18 @@ pub const Doc = struct {
             };
         }
         self.lev = try self.store.file(self.level_archive, try std.fmt.bufPrint(&buf, "{s}.lev", .{self.name}));
-        self.script = try placement.scan(self.gpa, self.text());
+        self.script = placement.scan(self.app(), self.gpa, self.lev) catch |err| switch (err) {
+            error.ScriptBroken => blk: {
+                self.broken = true;
+                break :blk .{ .calls = &.{}, .restore_close = null };
+            },
+            else => return err,
+        };
+    }
+
+    /// The editor holding the level's Store (its model reads the level script).
+    pub fn app(self: *const Doc) *App {
+        return @fieldParentPtr("store", self.store);
     }
 
     /// The level script as edited.
@@ -212,18 +259,7 @@ pub const Doc = struct {
     }
 
     fn loadBackground(self: *Doc, io: Io, r: *c.SDL_Renderer, dat: Io.Dir, name: []const u8) !void {
-        var lvl = try og.formats.level.load(io, self.gpa, dat, name);
-        defer lvl.deinit();
-        const entry_name = lvl.background orelse return;
-        var buf: [256]u8 = undefined;
-        var sprites = try archive.Archive.open(io, self.gpa, dat, try std.fmt.bufPrint(&buf, "{s}/sprite.dat", .{name}));
-        defer sprites.close(io, self.gpa);
-        const data = try sprites.readAlloc(io, self.gpa, sprites.find(entry_name) orelse return error.NotFound);
-        defer self.gpa.free(data);
-        var img = switch (og.formats.resource.kindOf(entry_name)) {
-            .background => try og.formats.background.decode(self.gpa, data),
-            else => try og.formats.jpeg.decode(self.gpa, data),
-        };
+        var img = try self.backgroundImage(io, dat, name) orelse return;
         defer img.deinit(self.gpa);
         const t = c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_STATIC, @intCast(img.width), @intCast(img.height)) orelse return error.Texture;
         _ = c.SDL_UpdateTexture(t, null, img.pixels.ptr, @intCast(img.width * 4));
@@ -231,15 +267,39 @@ pub const Doc = struct {
         self.bg_size = .{ @floatFromInt(img.width), @floatFromInt(img.height) };
     }
 
+    /// Level `name`'s background picture as the Store has it (null: none; `self.gpa` owns it).
+    pub fn backgroundImage(self: *Doc, io: Io, dat: Io.Dir, name: []const u8) !?og.image.Image {
+        var arena: std.heap.ArenaAllocator = .init(self.gpa);
+        defer arena.deinit();
+        const bg = (try self.world.res.source.loadBackdrop(arena.allocator())).background orelse return null;
+        // The Store keeps archive entries: the asset path's.
+        var bufs: [2][og.loaders.assets.max_path]u8 = undefined;
+        const entry_name = (og.loaders.assets.toEntry(&bufs, bg) orelse return null).name;
+        var buf: [256]u8 = undefined;
+        const sprites_path = try std.fmt.bufPrint(&buf, "{s}/sprite.dat", .{name});
+        // An unsaved picture (one of another size too) as the Store has it.
+        // OpenGorky: the Store reads the project's own picture first (store.zig ownAsset).
+        const data = if (self.store.find(sprites_path, entry_name) orelse (if (self.store.root != null) try self.store.file(sprites_path, entry_name) else null)) |f| try self.gpa.dupe(u8, self.store.text(f)) else blk: {
+            var sprites = try archive.Archive.open(io, self.gpa, dat, sprites_path);
+            defer sprites.close(io, self.gpa);
+            break :blk try sprites.readAlloc(io, self.gpa, sprites.find(entry_name) orelse return error.NotFound);
+        };
+        defer self.gpa.free(data);
+        return switch (og.formats.resource.kindOf(entry_name)) {
+            .background => try og.formats.background.decode(self.gpa, data),
+            else => try og.formats.jpeg.decode(self.gpa, data),
+        };
+    }
+
     pub fn isBattle(self: *const Doc) bool {
-        return self.world.battle != null and self.world.combat_map != null;
+        return self.world.battle != null and self.world.map.combat != null;
     }
 
     /// Battle: fighters on the grid and props placed by PlaceCombatActor. Elsewhere:
     /// actors and items lying on the level.
     fn collect(self: *Doc) !void {
         const w = self.world;
-        if (w.battle) |b| if (w.combat_map) |cm| {
+        if (w.battle) |b| if (w.map.combat) |cm| {
             for (b.fighters.items) |f| {
                 if (f.appear_to == null and (f.tile[0] < 0 or f.tile[1] < 0)) continue;
                 const t = f.appear_to orelse f.tile;
@@ -249,6 +309,7 @@ pub const Doc = struct {
                         .enemy => .enemy,
                         .hero => .hero,
                         .neutral => .neutral,
+                        .civilian => .actor,
                     },
                     .pos = self.tilePos(cm, t, f.size),
                     .tile = t,
@@ -300,7 +361,7 @@ pub const Doc = struct {
                 .item => if (og.inventory.item.placeOf(o) == .ground and o.getInt("visible") != 0) .item else continue,
                 // A weapon nobody holds lies there (the port's shotgun by the plank); its
                 // `visible` is only the blink.
-                .weapon => if (og.inventory.item.placeOf(o) == .ground and o.getString("Owner").len == 0) .item else continue,
+                .weapon => if (og.inventory.item.placeOf(o) == .ground and o.getString("owner").len == 0) .item else continue,
                 .actor => if (n.hro) continue else .actor,
                 // An area holding items (the chief's safe): a box at its polygon's centre.
                 .area => {
@@ -321,10 +382,10 @@ pub const Doc = struct {
         // `.ar` (new, renamed, removed areas) over the one the world read from disk.
         var nb: [160]u8 = undefined;
         const areas = blk: {
-            const f = self.store.find(self.level_archive, std.fmt.bufPrint(&nb, "{s}.ar", .{self.name}) catch break :blk w.areas) orelse break :blk w.areas;
-            if (self.own_areas) |o| lf.freeAreas(self.gpa, o);
-            self.own_areas = lf.parseAreas(self.gpa, self.store.text(f)) catch null;
-            break :blk self.own_areas orelse w.areas;
+            const f = self.store.find(self.level_archive, std.fmt.bufPrint(&nb, "{s}.ar", .{self.name}) catch break :blk w.map.areas) orelse break :blk w.map.areas;
+            if (self.own_areas) |o| core_map.freeAreas(self.gpa, o);
+            self.own_areas = map_io.parseAreas(self.gpa, self.store.text(f)) catch null;
+            break :blk self.own_areas orelse w.map.areas;
         };
         for (areas) |ar| {
             if (ar.points.len < 3) continue;
@@ -358,12 +419,12 @@ pub const Doc = struct {
         }
     }
 
-    pub fn tilePos(self: *const Doc, cm: lf.CombatMap, t: [2]i32, size: u32) [2]f32 {
+    pub fn tilePos(self: *const Doc, cm: core_map.CombatMap, t: [2]i32, size: u32) [2]f32 {
         const q = self.world.cam.project(cm.tileCenter(t, size));
         return .{ q.x, q.y };
     }
 
-    pub fn gridPos(self: *const Doc, cm: lf.CombatMap, g: [2]f32) [2]f32 {
+    pub fn gridPos(self: *const Doc, cm: core_map.CombatMap, g: [2]f32) [2]f32 {
         const q = self.world.cam.project(cm.toWorld(g[0], g[1]));
         return .{ q.x, q.y };
     }
@@ -372,7 +433,7 @@ pub const Doc = struct {
 
     /// Grid coordinates (fractional cells) under screen point `s`.
     pub fn gridAt(self: *const Doc, rect: c.SDL_FRect, s: [2]f32) ?[2]f32 {
-        const cm = self.world.combat_map orelse return null;
+        const cm = self.world.map.combat orelse return null;
         const h = switch (self.world.cam) {
             .persp => |pc| cm.center[2] - pc.zlevel / pc.scale,
             .ortho => cm.center[2],
@@ -406,14 +467,14 @@ pub const Doc = struct {
 
     /// Grid point `g` (a barrel, a moving prop) is inside the grid on an open tile.
     pub fn gridOpen(self: *const Doc, g: [2]f32) bool {
-        const cm = self.world.combat_map orelse return false;
+        const cm = self.world.map.combat orelse return false;
         if (g[0] < 0 or g[1] < 0 or g[0] >= @as(f32, @floatFromInt(cm.width)) or g[1] >= @as(f32, @floatFromInt(cm.height))) return false;
         return !cm.blocked[@as(usize, @intFromFloat(g[1])) * cm.width + @as(usize, @intFromFloat(g[0]))];
     }
 
     /// Footprint of object `i` at corner tile `t` is inside the grid, open and free.
     pub fn canPlace(self: *const Doc, i: usize, t: [2]i32) bool {
-        const cm = self.world.combat_map orelse return false;
+        const cm = self.world.map.combat orelse return false;
         const me = self.objects.items[i];
         const n: i32 = @intCast(me.size);
         if (t[0] < 0 or t[1] < 0 or t[0] + n > cm.width or t[1] + n > cm.height) return false;
@@ -447,18 +508,25 @@ pub const Doc = struct {
         }
         if (!p.ok) return error.TileNotFree;
         const o = &self.objects.items[p.obj];
+        // OpenGorky: the tile into the level's block (level_og.zig); a prop on the grid
+        // or a reinforcement is the code's.
+        if (level_og.blockFile(self)) |f| {
+            if (o.grid != null or o.later != null) return error.Scripted;
+            const old = o.tile orelse return;
+            if (old[0] == p.tile[0] and old[1] == p.tile[1]) return;
+            try level_og.move(self, f, p.obj, p.tile);
+            o.tile = p.tile;
+            o.pos = self.tilePos(self.world.map.combat.?, p.tile, o.size);
+            return;
+        }
         const call = self.script.calls[o.call orelse return];
         var bufs: [4 + 2 * 9][24]u8 = undefined;
         var edits: [4 + 2 * 9]placement.Edit = undefined;
         var n: usize = 0;
-        const cm = self.world.combat_map.?;
+        const cm = self.world.map.combat.?;
         if (o.grid) |g| {
             if (g[0] == p.grid[0] and g[1] == p.grid[1]) return;
-            for (0..2) |k| {
-                edits[n] = .{ .span = call.args[k], .text = try std.fmt.bufPrint(&bufs[k], "{d:.1}", .{p.grid[k]}) };
-                n += 1;
-            }
-            try self.edit(edits[0..n]);
+            try self.setArgs(call, &.{ .{ 0, .{ .float = p.grid[0] } }, .{ 1, .{ .float = p.grid[1] } } });
             o.grid = p.grid;
             o.pos = self.gridPos(cm, p.grid);
             return;
@@ -476,6 +544,12 @@ pub const Doc = struct {
             },
             .place_combat => unreachable,
         };
+        if (call.func == .place_actor) {
+            try self.setArgs(call, &.{ .{ 0, .{ .int = new_args[0] } }, .{ 1, .{ .int = new_args[1] } } });
+            o.tile = p.tile;
+            o.pos = self.tilePos(cm, p.tile, o.size);
+            return;
+        }
         const count: usize = if (call.func == .enemy_appear) 4 else 2;
         for (0..count) |k| {
             edits[n] = .{ .span = call.args[k], .text = try std.fmt.bufPrint(&bufs[k], "{d}", .{new_args[k]}) };
@@ -601,10 +675,104 @@ pub const Doc = struct {
     }
 
     pub fn edit(self: *Doc, edits: []placement.Edit) !void {
+        if (self.broken) return error.ScriptBroken;
         const out = try placement.apply(self.gpa, self.text(), edits);
-        errdefer self.gpa.free(out);
-        const script = try placement.scan(self.gpa, out);
         try self.store.replace(self.lev, out);
+        try self.rescan();
+    }
+
+    /// Sets the numeric arguments `args` (by index after the name) of placement call
+    /// `call`, one undo step: a call the model lifts (restore()'s leading data) through the
+    /// exporter (`model.setArgs`), another as text at the arguments' bytes.
+    pub fn setArgs(self: *Doc, call: placement.Call, args: []const struct { usize, og.script.value.Value }) !void {
+        if (self.broken) return error.ScriptBroken;
+        const ap = self.app();
+        var arena: std.heap.ArenaAllocator = .init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const lifted = for (model.calls(ap, a, self.lev, &.{ "PlaceActor", "PlaceCombatActor" })) |mc| {
+            if (mc.span.start == call.stmt.start) break mc;
+        } else null;
+        if (lifted) |mc| {
+            const sets = try a.alloc(model.ArgSet, args.len);
+            for (args, sets) |x, *s| s.* = .{ .call = mc, .index = x[0] + 1, .value = x[1] };
+            try model.setArgs(ap, self.lev, sets, null);
+            return self.rescan();
+        }
+        const edits = try a.alloc(placement.Edit, args.len);
+        for (args, edits) |x, *e| e.* = .{ .span = call.args[x[0]], .text = try model.literalText(a, x[1]) };
+        try self.edit(edits);
+    }
+
+    /// Camera key `key` set in the level script's initCamera(): the model's value, else
+    /// the text's (an assignment the model leaves as code).
+    pub fn camValue(self: *const Doc, key: []const u8) ?f32 {
+        // OpenGorky: the level's block's `camera` record.
+        if (level_og.blockFile(self)) |f| return level_og.camValue(self, f, key);
+        if (self.camSpan(key) != null) return model.ownNum(self.app(), self.lev, key);
+        return newlevel.cameraVar(self.text(), key);
+    }
+
+    /// Camera keys `kv` set (one undo step): in initCamera() of the level script
+    /// (`withCamera`), on an OpenGorky project in its block's `camera`.
+    pub fn setCamera(self: *const Doc, kv: []const struct { []const u8, f32 }) !void {
+        if (level_og.blockFile(self)) |f| return level_og.setCamera(self, f, kv);
+        const app_ = self.app();
+        const t = try self.withCamera(app_.gpa, kv);
+        app_.store.replace(self.lev, t) catch |err| {
+            app_.gpa.free(t);
+            return err;
+        };
+    }
+
+    /// The level script with camera keys `kv` set in initCamera(), as
+    /// `newlevel.setCameraVar` writes them: a value the model lifted there at its bytes,
+    /// another one by that function (a new line).
+    pub fn withCamera(self: *const Doc, gpa: Allocator, kv: []const struct { []const u8, f32 }) ![]u8 {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var edits: std.ArrayList(placement.Edit) = .empty;
+        var rest: std.ArrayList(struct { []const u8, f32 }) = .empty;
+        for (kv) |x| if (self.camSpan(x[0])) |sp| {
+            // 6 decimals, as the game's own (`actorScale=0.108346`).
+            try edits.append(a, .{ .span = sp, .text = try std.fmt.allocPrint(a, " {d:.6}", .{x[1]}) });
+        } else try rest.append(a, x);
+        var t = try placement.apply(gpa, self.text(), edits.items);
+        for (rest.items) |x| {
+            const n = newlevel.setCameraVar(gpa, t, x[0], x[1]) catch |err| {
+                gpa.free(t);
+                return err;
+            };
+            gpa.free(t);
+            t = n;
+        }
+        return t;
+    }
+
+    /// The bytes after `key =` up to its `;` where the model lifted the key's own value in
+    /// initCamera() (null: not there).
+    fn camSpan(self: *const Doc, key: []const u8) ?placement.Span {
+        const v = model.field(self.app(), self.lev, key);
+        const cam = model.funcSpan(self.app(), self.lev, "initCamera") orelse return null;
+        if (!v.own or v.span.start < cam.start or v.span.end > cam.end) return null;
+        const t = self.text();
+        const eq = std.mem.lastIndexOfScalar(u8, t[0..v.span.start], '=') orelse return null;
+        const semi = std.mem.indexOfScalarPos(u8, t, v.span.end, ';') orelse return null;
+        return .{ .start = eq + 1, .end = semi };
+    }
+
+    /// Re-reads the placement calls from the level script and links the objects to them.
+    fn rescan(self: *Doc) !void {
+        // Not parsing (mid-typing): the last good placement kept, objects stay put.
+        const script = placement.scan(self.app(), self.gpa, self.lev) catch |err| switch (err) {
+            error.ScriptBroken => {
+                self.broken = true;
+                return;
+            },
+            else => return err,
+        };
+        self.broken = false;
         self.script.deinit(self.gpa);
         self.script = script;
         self.bind();
@@ -613,10 +781,7 @@ pub const Doc = struct {
     /// After undo restored the level script: re-reads positions from it; added
     /// objects whose call is gone are dropped.
     pub fn afterUndo(self: *Doc) !void {
-        const script = try placement.scan(self.gpa, self.text());
-        self.script.deinit(self.gpa);
-        self.script = script;
-        self.bind();
+        try self.rescan();
         try self.resync();
         var k = self.objects.items.len;
         while (k > 0) {
@@ -629,7 +794,7 @@ pub const Doc = struct {
     /// Object positions from the current calls (after undo; removed objects stay
     /// removed until the level is reloaded).
     fn resync(self: *Doc) !void {
-        const cm = self.world.combat_map orelse return;
+        const cm = self.world.map.combat orelse return;
         for (self.objects.items) |*o| {
             const call = self.script.calls[o.call orelse continue];
             if (o.grid != null) {
@@ -712,17 +877,17 @@ pub const Doc = struct {
     pub fn walkableAt(self: *const Doc, bg: [2]f32) bool {
         const nav = og.world.nav;
         const cc = nav.cellOf(bg);
-        for ([_]?lf.WalkMap{ self.world.walk_map, self.world.walk_map2 }) |mo| {
+        for ([_]?core_map.WalkMap{ self.world.map.walk, self.world.map.walk2 }) |mo| {
             const cell = nav.cellAt(mo orelse continue, cc) orelse continue;
             if (cell.walkable()) return true;
         }
-        return self.world.walk_map == null;
+        return self.world.map.walk == null;
     }
 
     /// Background point `bg` is on the level's main walkable floor (the hero gets there
     /// on foot; the exe shows an exit only if its control point can be reached, 0x427780).
     pub fn reachable(self: *Doc, bg: [2]f32) bool {
-        const m = self.world.walk_map orelse return true;
+        const m = self.world.map.walk orelse return true;
         const main = self.mainArea() orelse return true;
         const cc = og.world.nav.cellOf(bg);
         if (cc[0] < 0 or cc[1] < 0 or cc[0] >= m.width or cc[1] >= m.height) return false;
@@ -736,12 +901,12 @@ pub const Doc = struct {
 
     /// Control point of area `name` (where a hero walks to use it), as edited.
     pub fn areaControl(self: *const Doc, name: []const u8) ?[2]f32 {
-        for (self.own_areas orelse self.world.areas) |ar| if (std.ascii.eqlIgnoreCase(ar.name, name)) return ar.control;
+        for (self.own_areas orelse self.world.map.areas) |ar| if (std.ascii.eqlIgnoreCase(ar.name, name)) return ar.control;
         return null;
     }
 
     fn mainArea(self: *Doc) ?[]const bool {
-        if (self.main_area == null) if (self.world.walk_map) |m| {
+        if (self.main_area == null) if (self.world.map.walk) |m| {
             const ps = og.world.route.levelPortals(self.world, self.gpa) catch return null;
             defer self.gpa.free(ps);
             self.main_area = og.world.nav.largestRegion(self.gpa, m, ps) catch null;
@@ -753,7 +918,7 @@ pub const Doc = struct {
     /// on the main floor (a cell cut off from it — the pontoon's — is no place to walk to).
     pub fn nearestWalkable(self: *Doc, bg: [2]f32) ?[2]f32 {
         const nav = og.world.nav;
-        const m = self.world.walk_map orelse return bg;
+        const m = self.world.map.walk orelse return bg;
         const main = self.mainArea();
         const c0 = nav.cellOf(bg);
         var r: i32 = 0;
@@ -822,6 +987,11 @@ pub const Doc = struct {
         return .{ rect.x + (p[0] - self.origin[0]) * self.zoom, rect.y + (p[1] - self.origin[1]) * self.zoom };
     }
 
+    /// `p` kept on the picture (a node or point clicked or dragged off it).
+    pub fn onPicture(self: *const Doc, p: [2]f32) [2]f32 {
+        return .{ std.math.clamp(p[0], 0, self.bg_size[0] - 1), std.math.clamp(p[1], 0, self.bg_size[1] - 1) };
+    }
+
     pub fn toBackground(self: *const Doc, rect: c.SDL_FRect, s: [2]f32) [2]f32 {
         return .{ (s[0] - rect.x) / self.zoom + self.origin[0], (s[1] - rect.y) / self.zoom + self.origin[1] };
     }
@@ -888,9 +1058,6 @@ pub const Doc = struct {
 
     // The level map drawn (level.Doc.draw): background, walkable cells, objects with their
     // icons and facing, areas, a battle's grid with its numbers.
-    const polyArea = @import("level_draw.zig").polyArea;
-    const fillPoly = @import("level_draw.zig").fillPoly;
-    const inTri = @import("level_draw.zig").inTri;
     pub const hiddenInView = @import("level_draw.zig").hiddenInView;
     pub const kindColor = @import("level_draw.zig").kindColor;
     pub const draw = @import("level_draw.zig").draw;
@@ -901,7 +1068,6 @@ pub const Doc = struct {
     pub const drawFacing = @import("level_draw.zig").drawFacing;
     pub const drawEntry = @import("level_draw.zig").drawEntry;
     pub const corner = @import("level_draw.zig").corner;
-    pub const quad = @import("level_draw.zig").quad;
     pub const fillTiles = @import("level_draw.zig").fillTiles;
     pub const drawGridOnly = @import("level_draw.zig").drawGridOnly;
     pub const drawGrid = @import("level_draw.zig").drawGrid;
@@ -920,7 +1086,9 @@ pub const Doc = struct {
 };
 
 /// `key=value` of a `.var` file.
-pub fn varValue(text: []const u8, key: []const u8) ?f32 {
+pub fn varValue(text: []const u8, name: []const u8) ?f32 {
+    // A `.var` is the exe's: its spelling (classic/names.zig).
+    const key = og.script.classic.names.anyOld(name) orelse name;
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |raw| {
         const l = std.mem.trim(u8, raw, " \r");
@@ -930,7 +1098,9 @@ pub fn varValue(text: []const u8, key: []const u8) ?f32 {
 }
 
 /// `.var` text with `key=value` replaced (or added at the end).
-pub fn setVarLine(gpa: Allocator, text: []const u8, key: []const u8, value: []const u8) ![]u8 {
+pub fn setVarLine(gpa: Allocator, text: []const u8, name: []const u8, value: []const u8) ![]u8 {
+    // A `.var` is the exe's: its spelling (classic/names.zig).
+    const key = og.script.classic.names.anyOld(name) orelse name;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     var found = false;
@@ -971,5 +1141,7 @@ pub const Obstacle = enum { wcrate, mcrate, barrel, box };
 
 pub const LevelEntry = @import("level_templates.zig").LevelEntry;
 pub const listLevels = @import("level_templates.zig").listLevels;
+pub const withOwnLevels = @import("level_templates.zig").withOwnLevels;
+pub const ownLevel = @import("level_templates.zig").ownLevel;
 pub const listTemplates = @import("level_templates.zig").listTemplates;
 pub const freeTemplates = @import("level_templates.zig").freeTemplates;

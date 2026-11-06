@@ -1,0 +1,181 @@
+AiProfile(
+    class_name = "garcia",
+    scoring = "garcia",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiProfile(
+    class_name = "smokerider",
+    scoring = "smokerider",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiProfile(
+    class_name = "grandma",
+    scoring = "grandma",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiProfile(
+    class_name = "grandma_child",
+    scoring = "grandma_child",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiProfile(
+    class_name = "stinger",
+    generic_ai = "focused",
+    scoring = "a",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiProfile(
+    class_name = "fatman",
+    scoring = "a",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiProfile(
+    class_name = "incubus",
+    scoring = "incubus",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiProfile(
+    class_name = "cripple",
+    scoring = "cripple",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiProfile(
+    class_name = "puppet",
+    scoring = "a",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiProfile(
+    class_name = "guard",
+    generic_ai = "sleep_hunter",
+    scoring = "guard",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 0,
+    threat = 0,
+);
+AiProfile(
+    class_name = "judge",
+    scoring = "a",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiProfile(
+    class_name = "judge_child",
+    scoring = "a",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiProfile(
+    class_name = "schizo",
+    scoring = "schizo",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiProfile(
+    class_name = "messiah",
+    scoring = "messiah",
+    damage_bonus = 0,
+    ally_penalty = 10,
+    lock = 100,
+    monitor = 1,
+    decoy_pull = 2000,
+    decoys = 0,
+    step_away = 1,
+    threat = 1,
+);
+AiScoring(eval = "generic", occupant = "generic");
+AiScoring(eval = "a", occupant = "a");
+AiScoring(eval = "garcia", keep = "by_health", occupant = "a");
+AiScoring(eval = "smokerider", occupant = "a", wakeful = 1);
+AiScoring(eval = "grandma", occupant = "avenge");
+AiScoring(eval = "grandma_child", occupant = "a", near = "grandma");
+AiScoring(eval = "incubus", occupant = "none", tile = "incubus");
+AiScoring(eval = "cripple", occupant = "no_lock");
+AiScoring(eval = "guard", occupant = "guard");
+AiScoring(eval = "schizo", keep = "first", occupant = "schizo");
+AiScoring(eval = "messiah", keep = "free_arms", occupant = "foes");

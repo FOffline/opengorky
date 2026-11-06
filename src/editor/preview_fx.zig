@@ -12,28 +12,34 @@ const Layer = og.render.layer.Layer;
 const Model = og.actor.model_cache.Model;
 const Cache = og.actor.model_cache.Cache;
 const Camera = og.actor.camera.Camera;
-const Image = og.formats.image.Image;
-const F = og.formats.adjust.getFloat;
+const Image = og.image.Image;
 
-/// What strikes: the weapon's effects id (battle/generic.zig fxId), the attacker's nameID,
+/// What strikes: the strike's effects (battle/generic.zig fxOf), the attacker's classic_id,
 /// the frames (from the animation's first) of the hit and of the flash before it.
-pub const Strike = struct { fx: i32, hero: i32, hit: u32, pre: ?u32 = null };
+pub const Strike = struct { fx: og.battle.generic.Fx, hero: i32, hit: u32, pre: ?u32 = null };
 
 /// The aim on the floor: two battle cells ahead (a cell is xSize = 350·aS: speedScale
 /// 0.02·xSize = 7·aS, 0x4b49f0).
-pub const ahead = 700;
+const ahead = 700;
 /// Frames simulated at most after the hit when finding the effects' end.
 const max_tail = 300;
 
-/// The weapon's effects id as the battle takes it (generic.fxId: `fx_as`, `projectile`,
-/// else its nameID).
-pub fn fxId(gpa: Allocator, name_id: i32, fx_as: i32, projectile: ?[]const u8) i32 {
-    var o: Object = .{ .name = "", .class = undefined };
+/// The strike's effects as the battle takes them (generic.fxOf: the weapon's `fx_as`,
+/// `projectile`, else its classic_id; the rules' stages over them): `who` strikes with
+/// `weapon` (classes: rules.classOf, `cw_riffle`).
+pub fn fxOf(gpa: Allocator, who: og.rules.Who, weapon: og.rules.Who, fx_as: i32, projectile: ?[]const u8) og.battle.generic.Fx {
+    const none: og.battle.generic.Fx = .same(weapon.id, who.id);
+    var wcls: og.script.object.Class = .{ .name = "", .parent = null, .ident = weapon.class };
+    var o: Object = .{ .name = "", .class = &wcls };
     defer o.vars.deinit(gpa);
-    o.declare(gpa, "nameid", .{ .type = .int, .value = .{ .int = name_id } }) catch return name_id;
-    o.declare(gpa, "fx_as", .{ .type = .int, .value = .{ .int = fx_as } }) catch return name_id;
-    if (projectile) |p| o.declare(gpa, "projectile", .{ .type = .string, .value = .{ .string = p } }) catch return name_id;
-    return og.battle.generic.fxId(&o);
+    var hcls: og.script.object.Class = .{ .name = "", .parent = null, .ident = who.class };
+    var h: Object = .{ .name = "", .class = &hcls };
+    defer h.vars.deinit(gpa);
+    h.declare(gpa, "nameid", .{ .type = .int, .value = .{ .int = who.id } }) catch return none;
+    o.declare(gpa, "nameid", .{ .type = .int, .value = .{ .int = weapon.id } }) catch return none;
+    o.declare(gpa, "effects_from", .{ .type = .int, .value = .{ .int = fx_as } }) catch return none;
+    if (projectile) |p| o.declare(gpa, "projectile", .{ .type = .string, .value = .{ .string = p } }) catch return none;
+    return og.battle.generic.fxOf(&h, &o);
 }
 
 pub const Sim = struct {
@@ -57,6 +63,8 @@ pub const Sim = struct {
     launched: bool = false,
     hit: bool = false,
     flight: u32 = 0,
+    /// Frame the strike landed (its hit's effects started) when last run.
+    landed: u32 = 0,
 
     /// `mesh` in file animation `anim` strikes.
     pub fn create(gpa: Allocator, io: std.Io, models: *Cache, s: Strike, mesh: []const u8, anim: []const u8) !*Sim {
@@ -69,7 +77,7 @@ pub const Sim = struct {
                 .arena_state = .init(gpa),
                 .rt = undefined,
                 .level_name = "",
-                .res = .{ .other = undefined, .sprites = undefined, .common = undefined, .lang = undefined, .dat = undefined, .models = models },
+                .res = .{ .models = models },
                 .immunity = undefined,
             },
             .who = .{ .name = "", .class = undefined },
@@ -77,6 +85,7 @@ pub const Sim = struct {
             .strike = s,
         };
         self.level.class = &self.level_class;
+        self.w.fx_alone = true;
         self.who.host = &self.native;
         errdefer for (self.names) |n| gpa.free(n);
         self.names = .{ try gpa.dupe(u8, mesh), try gpa.dupe(u8, anim) };
@@ -130,6 +139,16 @@ pub const Sim = struct {
             pub fn put(b: @This(), bb: og.effects.batch.Billboard) !void {
                 b.add(bb.pos, bb.half / 2);
             }
+            pub fn particle(b: @This(), bb: og.effects.batch.Billboard) !void {
+                b.add(bb.pos, 0);
+            }
+            pub fn ribbon(b: @This(), q: og.effects.batch.RibbonQuad) !void {
+                b.add(q.a, 0);
+                b.add(q.b, 0);
+            }
+            pub fn mesh(b: @This(), m: og.effects.batch.MeshAt) !void {
+                b.add(m.pos, 0);
+            }
             fn add(b: @This(), p: [3]f32, h: f32) void {
                 for (0..3) |k| {
                     b.s.box[0][k] = @min(b.s.box[0][k], p[k] - h);
@@ -144,11 +163,18 @@ pub const Sim = struct {
         og.effects.batch.trails(e.trails.items, as, b) catch {};
         og.effects.batch.projectilePlanes(e.projectiles.items, as, b) catch {};
         for (e.projectiles.items) |pr| b.add(pr.pos, 0);
-        for (e.beams.items) |bm| if (bm.kind == .lightning) {
-            b.add(bm.to, 0);
-            b.add(.{ bm.to[0], bm.to[1], bm.to[2] + 4 * 1400 * as }, 0);
-        };
+        // Not the ion's: 11000·aS long, it would shrink the rest.
+        for (e.beams.items) |bm| if (bm.kind != .ion) og.effects.batch.beams(&.{bm}, e.ticks, as, self.links(), b) catch {};
+        og.effects.batch.streams(e.streams.items, e.ticks, as, b) catch {};
+        og.effects.batch.spins(e.spins.items, as, b) catch {};
+        og.effects.batch.clouds(e.clouds.items, as, b) catch {};
         for (e.flames.items) |fl| for (fl.parts.items) |p| b.add(p.pos, 0);
+    }
+
+    /// The attacker's model points (at the origin, the shown frame; og.effects.batch links).
+    fn links(self: *Sim) Links {
+        const m = if (self.w.res.models) |c| c.get(self.names[0]) else null;
+        return .{ .model = m, .as = self.w.actorScale(), .frame = if (self.at) |f| f else 0 };
     }
 
     fn busy(self: *Sim) bool {
@@ -179,17 +205,18 @@ pub const Sim = struct {
     /// the projectile at the hit, the hit when it lands (or at once without one).
     fn events(self: *Sim, f: u32) void {
         const w = &self.w;
-        const id = self.strike.fx;
-        if (self.strike.pre) |p| if (f == p) og.fx.hits.preFlash(w, &self.who, id, self.target());
+        const fx = self.strike.fx;
+        if (self.strike.pre) |p| if (f == p) og.fx.hits.preFlash(w, &self.who, fx, self.target());
         if (f == self.strike.hit and !self.launched) {
             self.launched = true;
-            self.flight = og.fx.launch.launchId(w, &self.who, id, self.target(), false);
+            self.flight = og.fx.launch.launchId(w, &self.who, fx.launch, self.target(), false);
         }
         if (self.launched and !self.hit and (self.flight == 0 or !w.effects.projectileAlive(self.flight))) {
             self.hit = true;
+            self.landed = f;
             // An Incubus ball would lie for two rounds: the preview blows it up at once.
             w.effects.endProjectile(self.flight);
-            og.fx.hits.onHitAs(w, &self.who, id, self.target(), false);
+            og.fx.hits.onHitFx(w, &self.who, fx, self.target(), false);
         }
     }
 
@@ -214,28 +241,49 @@ pub const Sim = struct {
             if (at.delay > 0) continue;
             const mesh = cache.get(at.mesh) orelse continue;
             const link = model.mesh.holdMode(at.link) orelse continue;
-            const tex = frames.get(cache, at.effect);
+            const tex = frames.get(cache, layer.textures.?, at.effect);
             if (tex.len == 0) continue;
             layer.drawEffect(arena, cam, model, pl, .{ .model = mesh, .link = link, .offset = at.offset, .rot = at.rot, .scale = at.scale }, tex[@intCast((e.ticks -% at.start) % tex.len)]) catch {};
         }
         const d: Draw = .{ .arena = arena, .layer = layer, .cam = cam, .right = right, .cache = cache, .frames = frames };
         for (e.projectiles.items) |pr| d.projectile(pr, as);
-        for (e.beams.items) |bm| d.beam(bm, e.ticks, as, model, frame);
-        // Flamethrower particles (viewer/level/effects.zig): additive "flame2", half-size
-        // min(age·attack_flame_scale + attack_flame_add, attack_flame_range) screen pixels
-        // (a world unit is a pixel in the game's view).
-        for (e.flames.items) |fl| for (fl.parts.items, 0..) |p, i| {
-            const t = 1 - og.num.toF32(p.age) / og.num.toF32(fl.life);
-            const half = @min(og.num.toF32(p.age) * F("attack_flame_scale", 1.6) + 8, 160);
-            const old = og.formats.adjust.getRgb("attack_flame_col", .{ 255, 160, 0 });
-            const new = og.formats.adjust.getRgb("attack_flame_col2", .{ 60, 60, 255 });
-            var rgb: [3]f32 = undefined;
-            for (&rgb, old, new) |*c, o, n| c.* = (og.num.toF32(o) + (og.num.toF32(n) - og.num.toF32(o)) * t) / 255;
-            d.put(.{ .name = "flame2", .frame = @intCast((e.ticks + i) % 15), .pos = p.pos, .half = half, .rgb = rgb }) catch {};
-        };
+        // What the viewer draws (og.effects.batch), the attacker at the origin in `frame`.
+        const ln: Links = .{ .model = model, .as = as, .frame = frame };
+        og.effects.batch.beams(e.beams.items, e.ticks, as, ln, d) catch {};
+        og.effects.batch.streams(e.streams.items, e.ticks, as, d) catch {};
+        og.effects.batch.spins(e.spins.items, as, d) catch {};
+        og.effects.batch.clouds(e.clouds.items, as, d) catch {};
+        // Flame particles: half-size in screen pixels (a world unit is a pixel in the
+        // game's view).
+        og.effects.batch.flames(e.flames.items, e.ticks, as, d) catch {};
         og.effects.batch.bitmaps(e.bitmaps.items, as, d) catch {};
         og.effects.batch.trails(e.trails.items, as, d) catch {};
         og.effects.batch.projectilePlanes(e.projectiles.items, as, d) catch {};
+    }
+};
+
+/// Model points of the attacker at the origin facing +y (og.effects.batch links).
+const Links = struct {
+    model: ?*const Model,
+    as: f32,
+    frame: u32,
+
+    pub fn point(l: Links, _: *Object, name: []const u8) ?[3]f32 {
+        const m = l.model orelse return null;
+        const mc = og.actor.model_cache;
+        const p = mc.linkPoint(m, @min(l.frame, m.frames.frames -| 1), name) orelse return null;
+        return mc.toWorld(m, p, l.as * m.unitScale(), .{ 0, 0, 0 }, 1, 0);
+    }
+
+    /// The point and its x axis (0x429ca0) on the floor.
+    pub fn axis(l: Links, o: *Object, name: []const u8) ?[2][3]f32 {
+        const m = l.model orelse return null;
+        const mc = og.actor.model_cache;
+        const fr = @min(l.frame, m.frames.frames -| 1);
+        const p0 = l.point(o, name) orelse return null;
+        const l1 = mc.linkPointOff(m, fr, name, .{ 1, 0, 0 }) orelse return null;
+        const p1 = mc.toWorld(m, l1, l.as * m.unitScale(), .{ 0, 0, 0 }, 1, 0);
+        return .{ p0, og.vec.normalize(.{ p1[0] - p0[0], p1[1] - p0[1], 0 }) };
     }
 };
 
@@ -243,18 +291,17 @@ pub const Sim = struct {
 pub const Frames = struct {
     map: std.StringHashMapUnmanaged([]Image) = .empty,
 
-    pub fn get(self: *Frames, cache: *Cache, name: []const u8) []const Image {
+    pub fn get(self: *Frames, cache: *Cache, textures: *og.render.textures.Textures, name: []const u8) []const Image {
         const gpa = cache.gpa;
         var key_buf: [64]u8 = undefined;
         if (name.len == 0 or name.len > key_buf.len) return &.{};
         const key = std.ascii.lowerString(&key_buf, name);
         if (self.map.get(key)) |f| return f;
         var list: std.ArrayList(Image) = .empty;
-        if (cache.effect(name)) |d| for (d.frames.items) |f| {
+        if (cache.effect(name)) |d| for (d.frames) |f| {
             var buf: [160]u8 = undefined;
-            const path = std.fmt.bufPrint(&buf, "gfx_3d\\effects\\{s}\\{s}", .{ name, f }) catch continue;
-            const bytes = cache.readFile(path) catch continue;
-            const img = og.formats.tex3df.decode(gpa, bytes) catch continue;
+            const path = std.fmt.bufPrint(&buf, "effects/{s}/{s}", .{ name, f }) catch continue;
+            const img = textures.texture(gpa, path) orelse continue;
             list.append(gpa, img) catch break;
         };
         const owned = list.toOwnedSlice(gpa) catch return &.{};
@@ -285,10 +332,10 @@ const Draw = struct {
 
     /// A batch billboard facing the camera (og.effects.batch sink; blend by its `.dsc`).
     pub fn put(d: Draw, b: og.effects.batch.Billboard) !void {
-        const fr = d.frames.get(d.cache, b.name);
+        const fr = d.frames.get(d.cache, d.layer.textures.?, b.name);
         if (fr.len == 0) return;
         const dsc = d.cache.effect(b.name) orelse return;
-        const blend: Layer.BillboardBlend = switch (dsc.blend) {
+        const blend: Layer.BillboardBlend = if (b.blend) |m| m else if (b.add) .add else switch (dsc.blend) {
             .add => .add,
             .alpha, .opaque_ => .alpha,
             else => .screen,
@@ -302,7 +349,7 @@ const Draw = struct {
             .{ p[0] + ax[0], p[1] + ax[1], p[2] - h },
             .{ p[0] - ax[0], p[1] - ax[1], p[2] - h },
         };
-        d.layer.billboard(d.cam, corners, fr[b.frame % fr.len], b.alpha, b.rgb, blend);
+        d.layer.billboard(d.cam, corners, fr[b.frame % fr.len], b.alpha, b.rgb, blend, b.program, b.k);
     }
 
     fn screen(d: Draw, p: [3]f32) [3]f32 {
@@ -314,7 +361,7 @@ const Draw = struct {
     /// Pill bullet, a rocket's body and exhaust.
     fn projectile(d: Draw, pr: og.effects.projectile.Projectile, as: f32) void {
         if (pr.done) return;
-        if (pr.mesh.len > 0) d.mesh(pr.mesh, pr.pos, .{ -pr.dir[0], -pr.dir[1], -pr.dir[2] }, pr.roll, as * pr.mesh_scale * pr.k);
+        if (pr.mesh.len > 0) d.bodyMesh(pr.mesh, pr.pos, .{ -pr.dir[0], -pr.dir[1], -pr.dir[2] }, pr.roll, as * pr.mesh_scale * pr.k);
         if (pr.bullet) {
             const at = og.vec.sub(pr.pos, scaled(pr.dir, 240 * as));
             return d.effectMesh(pr.effect, 0, at, pr.dir, pr.mesh_scale * as, .alpha);
@@ -328,7 +375,7 @@ const Draw = struct {
 
     /// Projectile mesh with its texture (effects_view.zig drawMeshWith: tumble `roll`,
     /// pitch, then the heading turn).
-    fn mesh(d: Draw, name: []const u8, pos: [3]f32, dir: [3]f32, roll: f32, scale: f32) void {
+    fn bodyMesh(d: Draw, name: []const u8, pos: [3]f32, dir: [3]f32, roll: f32, scale: f32) void {
         const m = d.cache.get(name) orelse return;
         const pts = og.actor.skin.pose(d.arena, m.mesh, m.frames, 0, .row) catch return;
         const s = scale * m.unitScale();
@@ -346,14 +393,14 @@ const Draw = struct {
                 sp[k] = d.screen(og.actor.model_cache.toWorldLocal(lp, s, pos, @cos(yaw), @sin(yaw)));
                 uv[k] = part.vertices[t[k]].uv;
             }
-            d.layer.canvas.triangle(sp, uv, m.partTexture(pi), og.render.raster.gray(1));
+            d.layer.canvas.triangle(sp, uv, d.layer.textures.?.partTexture(m, pi), og.render.raster.gray(1));
         };
     }
 
     /// Effect mesh (`chaingun.msh`, crossed planes along +X) with an effect frame, +X
     /// along `dir` (effects_view.zig drawEffectMesh: rocket body and exhaust).
     fn effectMesh(d: Draw, effect: []const u8, frame: u32, pos: [3]f32, dir: [3]f32, scale: f32, blend: og.effects.dsc.Blend) void {
-        const fr = d.frames.get(d.cache, effect);
+        const fr = d.frames.get(d.cache, d.layer.textures.?, effect);
         if (fr.len == 0) return;
         const m = d.cache.get("chaingun") orelse return;
         const pts = og.actor.skin.pose(d.arena, m.mesh, m.frames, 0, .row) catch return;
@@ -386,57 +433,50 @@ const Draw = struct {
     /// Ribbon A→B offset ±`side` across (effects_view.zig ribbon), additive. The game
     /// looks down on a flat ribbon; the preview looks level, so it is turned to face the
     /// view, the same width.
-    fn ribbon(d: Draw, name: []const u8, frame: u32, a: [3]f32, b: [3]f32, flat: [3]f32) void {
-        const fr = d.frames.get(d.cache, name);
+    pub fn ribbon(d: Draw, q: og.effects.batch.RibbonQuad) !void {
+        const a = q.a;
+        const b = q.b;
+        const flat = if (q.facing != null) scaled(d.right, q.half) else q.side;
+        const fr = d.frames.get(d.cache, d.layer.textures.?, q.name);
         if (fr.len == 0) return;
+        const frame = q.frame;
         const across = og.vec.cross(og.vec.sub(b, a), .{ -d.right[1], d.right[0], 0 });
         const l = og.vec.len(across);
         const side = if (l > 1e-6) scaled(across, og.vec.len(flat) / l) else flat;
         const c = [4][3]f32{ og.vec.add(a, side), og.vec.add(b, side), og.vec.sub(b, side), og.vec.sub(a, side) };
-        const uv = [4][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 } };
+        const uv = [4][2]f32{ .{ q.uv[0], 0 }, .{ q.uv[1], 0 }, .{ q.uv[1], 1 }, .{ q.uv[0], 1 } };
         const s = [4][3]f32{ d.screen(c[0]), d.screen(c[1]), d.screen(c[2]), d.screen(c[3]) };
-        d.shaded(.{ s[0], s[1], s[2] }, .{ uv[0], uv[1], uv[2] }, fr[frame % fr.len], .add);
-        d.shaded(.{ s[0], s[2], s[3] }, .{ uv[0], uv[2], uv[3] }, fr[frame % fr.len], .add);
+        const sh: og.render.raster.Canvas.Shade = .{ .add = &d.layer.glow, .depth_write = false, .program = q.program, .k = q.k };
+        const cv = [3]f32{ q.rgb[0] * q.alpha, q.rgb[1] * q.alpha, q.rgb[2] * q.alpha };
+        d.layer.canvas.triangleShaded(.{ s[0], s[1], s[2] }, .{ uv[0], uv[1], uv[2] }, fr[frame % fr.len], .{ cv, cv, cv }, sh);
+        d.layer.canvas.triangleShaded(.{ s[0], s[2], s[3] }, .{ uv[0], uv[2], uv[3] }, fr[frame % fr.len], .{ cv, cv, cv }, sh);
     }
 
-    /// Beams a hero's weapon makes (viewer/level/effects.zig drawBeam): the ion rifle's,
-    /// from the attacker's link point both ways, and the satellite's lightning.
-    fn beam(d: Draw, bm: og.effects.beam.Beam, ticks: u64, as: f32, model: *const Model, frame: u32) void {
-        const fr: u32 = @intCast((ticks / bm.div) % 4096);
-        const half = as * bm.size;
-        switch (bm.kind) {
-            .ion => {
-                var o = bm.from;
-                var dir = bm.dir;
-                // The link point and its x axis (0x429ca0) on the attacker at the origin.
-                const mc = og.actor.model_cache;
-                const s = as * model.unitScale();
-                if (mc.linkPoint(model, frame, bm.link)) |l0| if (mc.linkPointOff(model, frame, bm.link, .{ 1, 0, 0 })) |l1| {
-                    const p0 = mc.toWorld(model, l0, s, .{ 0, 0, 0 }, 1, 0);
-                    const p1 = mc.toWorld(model, l1, s, .{ 0, 0, 0 }, 1, 0);
-                    const ax = og.vec.normalize(.{ p1[0] - p0[0], p1[1] - p0[1], 0 });
-                    o = .{ p0[0], p0[1], bm.from[2] };
-                    dir = .{ ax[0] * @cos(bm.turn) - ax[1] * @sin(bm.turn), ax[0] * @sin(bm.turn) + ax[1] * @cos(bm.turn), 0 };
-                };
-                const side = [3]f32{ -dir[1] * half, dir[0] * half, 0 };
-                const vs = F("attack_ion_vs", -155);
-                const vk = F("attack_ion_vk", 5922);
-                for ([_]f32{ -vs, -vs + 25 * 220 - vk }, [_]f32{ 220, -220 }) |start, step| {
-                    var p = [3]f32{ o[0] + dir[0] * start * as, o[1] + dir[1] * start * as, o[2] };
-                    for (0..25) |_| {
-                        const q = [3]f32{ p[0] + dir[0] * step * as, p[1] + dir[1] * step * as, p[2] };
-                        d.ribbon(bm.effect, fr, p, q, side);
-                        p = q;
-                    }
-                }
-            },
-            .lightning => for (0..4) |k| {
-                const z0 = og.num.toF32(k) * 1400 * as;
-                d.ribbon(bm.effect, fr, .{ bm.to[0], bm.to[1], bm.to[2] + z0 }, .{ bm.to[0], bm.to[1], bm.to[2] + z0 + 1400 * as }, scaled(d.right, half));
-            },
-            // Monsters' beams (lasers, Medusa's current) and plain chains: not a weapon's.
-            else => {},
-        }
+    /// A flame particle (og.effects.batch): a billboard, a world unit a screen pixel.
+    pub fn particle(d: Draw, b: og.effects.batch.Billboard) !void {
+        return d.put(b);
+    }
+
+    /// Mesh with its own texture, additive at brightness `k` (effects_view.zig
+    /// drawMeshAdd: turned to `dir`, stretched vertically).
+    pub fn mesh(d: Draw, ma: og.effects.batch.MeshAt) !void {
+        const m = d.cache.get(ma.name) orelse return;
+        const pts = og.actor.skin.pose(d.arena, m.mesh, m.frames, 0, .row) catch return;
+        const s = ma.scale * m.unitScale();
+        const yaw = og.fields.modelAngle(og.fields.facing(ma.dir[0], ma.dir[1]));
+        const pitch = std.math.atan2(ma.dir[2], og.vec.len2(ma.dir));
+        for (m.mesh.parts, pts, 0..) |part, ppts, pi| for (part.triangles) |t| {
+            var sp: [3][3]f32 = undefined;
+            var uv: [3][2]f32 = undefined;
+            for (0..3) |k| {
+                const p = ppts[t[k]];
+                const l = og.actor.model_cache.localPoint(m, .{ p[0], p[1] * ma.stretch, p[2] });
+                const lp = [3]f32{ l[0], l[2] * @sin(pitch) + l[1] * @cos(pitch), l[2] * @cos(pitch) - l[1] * @sin(pitch) };
+                sp[k] = d.screen(og.actor.model_cache.toWorldLocal(lp, s, ma.pos, @cos(yaw), @sin(yaw)));
+                uv[k] = part.vertices[t[k]].uv;
+            }
+            d.layer.canvas.triangleShaded(sp, uv, d.layer.textures.?.partTexture(m, pi), og.render.raster.gray(ma.k), .{ .add = &d.layer.glow, .depth_write = false, .program = ma.program, .k = ma.pk });
+        };
     }
 };
 

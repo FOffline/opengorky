@@ -1,0 +1,3 @@
+dialog "01__port_citadel" {
+    Line(who = speakers::HQ, text = "Over.", voice = ~s"voice/01__port_citadel_bt_00.wav");
+}

@@ -9,9 +9,10 @@ const world_mod = @import("../state.zig").world;
 const World = world_mod.World;
 const battle = @import("../battle.zig").battle;
 const Battle = battle.Battle;
+const modules = @import("../core.zig").modules;
+const hooks = @import("../state.zig").hooks;
 const turns = @import("turns.zig");
 const attack = @import("attack.zig");
-const roster = @import("roster.zig");
 const ai_turn = @import("ai_turn.zig");
 const states = @import("states.zig");
 const strike = @import("strike.zig");
@@ -72,7 +73,11 @@ fn tickBlasts(self: *Battle, w: *World) !void {
 
 fn tickPhase(self: *Battle, w: *World) !void {
     turns.tickPopups(self);
-    try states.tickLilith(self, w);
+    try states.tickTransform(self, w);
+    // OpenGorky: the battle's OnTick() (the transformation above is the engine's).
+    if (w.level) |l| if (l.implementsC("OnTick")) {
+        _ = try hooks.on(w, l, "Battle.OnTick", &.{});
+    };
     if (self.seq != null and self.phase != .won and self.phase != .lost) return turns.stepSeq(self, w);
     switch (self.phase) {
         .appear => {
@@ -88,7 +93,7 @@ fn tickPhase(self: *Battle, w: *World) !void {
                 // 0x48f240: turn to the target at once (command 0x10), walk straight (0x11),
                 // then a one-shot "appearEnd" if the class has it (0x13).
                 anim.walkStraight(w, f, to);
-                if (w.combat_map) |cm| {
+                if (w.map.combat) |cm| {
                     const p0 = cm.tileCenter(f.tile, f.size);
                     const p1 = cm.tileCenter(to, f.size);
                     fields.setAngle(f.obj, fields.facing(p1[0] - p0[0], p1[1] - p0[1]));
@@ -115,17 +120,17 @@ fn tickPhase(self: *Battle, w: *World) !void {
             }
             if (!self.started) {
                 self.started = true;
-                if (w.level) |l| _ = try w.rt.callIfExists(l, "CombatEnemiesAppear", &.{});
+                if (w.level) |l| {
+                    _ = try w.rt.callIfExists(l, "CombatEnemiesAppear", &.{});
+                    _ = try hooks.on(w, l, "Battle.OnEnemiesAppear", &.{});
+                }
             }
             try turns.beginPlayerTurn(self, w);
         },
         .player, .enemy, .counter => {
             try attack.stepPending(self, w);
             if (self.pending != .none) return;
-            if (turns.checkEnd(self)) {
-                if (self.phase == .won) roster.unlockAll(w);
-                return;
-            }
+            if (try turns.ended(self, w)) return;
             switch (self.phase) {
                 .enemy => {
                     if (turns.startCounter(self, w)) return;
@@ -138,7 +143,7 @@ fn tickPhase(self: *Battle, w: *World) !void {
         .won, .lost => {
             self.over_ticks += 1;
             // Victory (0x454880) and defeat (0x454350): the jingle 90 ticks after the end.
-            if (self.over_ticks == 90) w.out.music_events.append(w.gpa, .{ .name = if (self.phase == .won) "victory" else "gameover", .once = true }) catch {};
+            if (self.over_ticks == 90) w.out.music_events.append(w.gpa, .{ .name = if (self.phase == .won) modules.ui().music.victory else modules.ui().music.game_over, .once = true }) catch {};
         },
     }
 }

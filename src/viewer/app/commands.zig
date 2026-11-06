@@ -27,7 +27,7 @@ pub fn consoleRun(self: *Viewer, line: []const u8) void {
     });
     var out: Io.Writer.Allocating = .init(self.gpa);
     defer out.deinit();
-    const eff = og.console.run(l.world, line, &out.writer) catch |err| blk: {
+    const eff = og.console.run(l.world, &l.mode, line, &out.writer) catch |err| blk: {
         out.writer.print("error: {t}\n", .{err}) catch {};
         break :blk og.console.Effect.none;
     };
@@ -76,7 +76,7 @@ fn viewerCommand(self: *Viewer, line: []const u8) bool {
     // tilepos X Y: screen point of battle cell X,Y centre, for --input clicks.
     if (eq(cmd, "tilepos")) {
         const l = &(self.level orelse return true);
-        const cm = l.world.combat_map orelse {
+        const cm = l.world.map.combat orelse {
             consoleOut(self, "no combat map");
             return true;
         };
@@ -164,7 +164,7 @@ fn setLayer(self: *Viewer, layer: Layer, on: bool) void {
                 l.walk_layer = k;
             } else if (l.walk_layer == k) l.walk_layer = 0;
         },
-        .cells => self.level.?.show_grid = on and self.level.?.world.combat_map != null,
+        .cells => self.level.?.show_grid = on and self.level.?.world.map.combat != null,
         .areas => self.level.?.show_areas = on,
         .objects => self.level.?.show_objects = on,
     }

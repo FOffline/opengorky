@@ -29,7 +29,7 @@ pub fn decrypt(gpa: Allocator, bytes: []const u8) Error![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-const Value = union(enum) {
+pub const Value = union(enum) {
     int: i32,
     float: f32,
     rgba: [3]u8,
@@ -37,29 +37,13 @@ const Value = union(enum) {
 
 const Adjust = struct {
     text: []u8,
-    /// Name → value; names point into `text`.
-    values: std.StringHashMapUnmanaged(Value) = .empty,
+    /// Name → value in the file's order; names point into `text`.
+    values: std.StringArrayHashMapUnmanaged(Value) = .empty,
 
     pub fn deinit(self: *Adjust, gpa: Allocator) void {
         self.values.deinit(gpa);
         gpa.free(self.text);
         self.* = undefined;
-    }
-
-    pub fn float(self: Adjust, name: []const u8, default: f32) f32 {
-        return switch (self.values.get(name) orelse return default) {
-            .float => |v| v,
-            .int => |v| @floatFromInt(v),
-            .rgba => default,
-        };
-    }
-
-    pub fn int(self: Adjust, name: []const u8, default: i32) i32 {
-        return switch (self.values.get(name) orelse return default) {
-            .int => |v| v,
-            .float => |v| @import("../script.zig").value.floatToInt(v),
-            .rgba => default,
-        };
     }
 };
 
@@ -88,37 +72,6 @@ pub fn parse(gpa: Allocator, bytes: []const u8) Error!Adjust {
     return adj;
 }
 
-/// The game's adjust.kdt, read once at startup (`load`); the exe reads it too (0x418120),
-/// so a mod's edits there reach both. Without it every value is the caller's default —
-/// the one in the shipped file.
-var game: ?Adjust = null;
-
-/// Reads `<root>/adjust.kdt` (missing or broken: the defaults stay). Kept for the
-/// process's life.
-pub fn load(io: std.Io, root: std.Io.Dir) void {
-    const gpa = std.heap.page_allocator;
-    const bytes = root.readFileAlloc(io, "adjust.kdt", gpa, .limited(1 << 20)) catch return;
-    defer gpa.free(bytes);
-    if (game) |*g| g.deinit(gpa);
-    game = parse(gpa, bytes) catch null;
-}
-
-pub fn getFloat(name: []const u8, default: f32) f32 {
-    return if (game) |g| g.float(name, default) else default;
-}
-
-pub fn getInt(name: []const u8, default: i32) i32 {
-    return if (game) |g| g.int(name, default) else default;
-}
-
-pub fn getRgb(name: []const u8, default: [3]u8) [3]u8 {
-    const g = game orelse return default;
-    return switch (g.values.get(name) orelse return default) {
-        .rgba => |v| v,
-        else => default,
-    };
-}
-
 test "decrypt and parse" {
     const gpa = std.testing.allocator;
     const plain = "float sound_volume_falloff = 0.004000;\nint fps = 0;\nrgba c = 200,60,20\n";
@@ -128,13 +81,10 @@ test "decrypt and parse" {
 
     var adj = try parse(gpa, &enc);
     defer adj.deinit(gpa);
-    try std.testing.expectEqual(0.004, adj.float("sound_volume_falloff", 0));
-    try std.testing.expectEqual(0, adj.int("fps", 30));
+    try std.testing.expectEqual(Value{ .float = 0.004 }, adj.values.get("sound_volume_falloff").?);
+    try std.testing.expectEqual(Value{ .int = 0 }, adj.values.get("fps").?);
     try std.testing.expectEqual(Value{ .rgba = .{ 200, 60, 20 } }, adj.values.get("c").?);
-    try std.testing.expectEqual(7, adj.int("missing", 7));
-    // A float read as int goes through _ftol and does not panic on NaN.
-    try adj.values.put(gpa, "bad", .{ .float = std.math.nan(f32) });
-    try std.testing.expectEqual(0, adj.int("bad", 7));
+    try std.testing.expect(adj.values.get("missing") == null);
 }
 
 /// The exe's limits on the file (loader 0x418120): its line pointers are a 1024-entry

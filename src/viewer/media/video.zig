@@ -1,4 +1,6 @@
-//! Videos `avi\*.asf` (ASF: MS-MPEG4 v1/v3, WMA v1 or MP3). Decoded by built-in
+//! Videos `avi\*.asf` (ASF: MS-MPEG4 v1/v3, WMA v1 or MP3), and any file FFmpeg plays
+//! (mp4, mkv, webm, mov…) up to 4K, a video
+//! larger than the screen fitted into it (`draw`). Decoded by built-in
 //! FFmpeg (libavformat/libavcodec, `-Dffmpeg`, on by default when available) or,
 //! without it, by an external `ffmpeg` program (RGBA frames at 15 fps through a
 //! pipe, audio as WAV). The exe player is 0x45d620 (name, x, y, line doubling):
@@ -94,7 +96,7 @@ const Lib = if (build_options.ffmpeg) struct {
     }
 
     /// The file's whole audio: 16-bit, 44.1 kHz, stereo.
-    fn audio(gpa: Allocator, path: [:0]const u8) ?og.audio.decode.Sound {
+    fn audio(gpa: Allocator, path: [:0]const u8) ?og.audio.sound.Sound {
         var fmt: ?*av.AVFormatContext = null;
         if (av.avformat_open_input(&fmt, path.ptr, null, null) < 0) return null;
         defer av.avformat_close_input(&fmt);
@@ -166,25 +168,16 @@ pub const Video = struct {
     start_ms: u64,
     shown: u64 = 0,
     done: bool = false,
-    sound: ?og.audio.decode.Sound = null,
+    sound: ?og.audio.sound.Sound = null,
     voice: ?og.audio.mixer.VoiceId = null,
     /// introkon: the intro.spr frame 0 caption on top (0x436cdf).
     caption: bool = false,
 
-    /// Finds `avi\<name>.asf` case-insensitively ("gradma.avi" → "gradma.asf").
+    /// Asset `video/<name>` as a file (loaders.assets.findVideo).
     pub fn find(buf: []u8, io: Io, game_dir: []const u8, name: []const u8) ?[]const u8 {
-        const base = if (std.mem.lastIndexOfScalar(u8, name, '.')) |d| name[0..d] else name;
-        var path_buf: [512]u8 = undefined;
-        const avi = std.fmt.bufPrint(&path_buf, "{s}/avi", .{game_dir}) catch return null;
-        var dir = Io.Dir.cwd().openDir(io, avi, .{ .iterate = true }) catch return null;
-        defer dir.close(io);
-        var it = dir.iterate();
-        while (it.next(io) catch null) |e| {
-            const stem = if (std.mem.lastIndexOfScalar(u8, e.name, '.')) |d| e.name[0..d] else e.name;
-            if (!std.ascii.eqlIgnoreCase(stem, base)) continue;
-            return std.fmt.bufPrint(buf, "{s}/{s}", .{ avi, e.name }) catch null;
-        }
-        return null;
+        // An OpenGorky project (a folder or a package): the installed game's videos.
+        var gb: [1024]u8 = undefined;
+        return og.loaders.assets.findVideo(buf, io, og.loaders.ogs.gameFolder(&gb, game_dir) orelse game_dir, name);
     }
 
     fn probeSize(gpa: Allocator, io: Io, path: []const u8) ?[2]u32 {
@@ -197,6 +190,29 @@ pub const Video = struct {
         return .{ w, h };
     }
 
+    /// Largest video an OpenGorky project keeps as it is (4K DCI); larger ones are converted.
+    const max_size = [2]u32{ 4096, 2160 };
+
+    /// Whether the port plays the file at `path` (a decoder for it, at most `max_size`);
+    /// only its header and stream info are read.
+    pub fn playable(gpa: Allocator, io: Io, path: []const u8) bool {
+        var zbuf: [600]u8 = undefined;
+        const pz = std.fmt.bufPrintSentinel(&zbuf, "{s}", .{path}, 0) catch return false;
+        const dims: [2]u32 = if (build_options.ffmpeg) blk: {
+            var lib = Lib.open(pz) catch return false;
+            defer lib.close();
+            break :blk .{ @intCast(lib.dec.*.width), @intCast(lib.dec.*.height) };
+        } else probeSize(gpa, io, path) orelse return false;
+        return dims[0] <= max_size[0] and dims[1] <= max_size[1];
+    }
+
+    /// A video whose path names an ExeVideo row with `caption` (its name without the
+    /// extension: the exe's indexOf "introkon").
+    fn captioned(path: []const u8) bool {
+        for (og.core.modules.ui().videos) |e| if (e.caption and std.mem.indexOf(u8, path, std.fs.path.stem(e.name)) != null) return true;
+        return false;
+    }
+
     /// Starts a video; null without the file or a decoder.
     pub fn open(gpa: Allocator, io: Io, r: *c.SDL_Renderer, path: []const u8, x: i32, y: i32, double: bool) ?*Video {
         return openErr(gpa, io, r, path, x, y, double) catch null;
@@ -207,7 +223,7 @@ pub const Video = struct {
         const pz = try std.fmt.bufPrintSentinel(&zbuf, "{s}", .{path}, 0);
         var backend: Backend = undefined;
         var dims: [2]u32 = undefined;
-        var sound: ?og.audio.decode.Sound = null;
+        var sound: ?og.audio.sound.Sound = null;
         if (build_options.ffmpeg) {
             const lib = try Lib.open(pz);
             dims = .{ @intCast(lib.dec.*.width), @intCast(lib.dec.*.height) };
@@ -228,7 +244,7 @@ pub const Video = struct {
             if (std.process.run(gpa, io, .{ .argv = &.{ ffmpeg, "-v", "error", "-i", path, "-vn", "-f", "wav", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", "-" } })) |res| {
                 defer gpa.free(res.stdout);
                 defer gpa.free(res.stderr);
-                sound = og.audio.decode.decode(gpa, res.stdout) catch null;
+                sound = og.compose.sounds.decode(gpa, res.stdout) catch null;
             } else |_| {}
         }
         errdefer closeBackend(&backend, gpa, io);
@@ -252,7 +268,7 @@ pub const Video = struct {
             .tex = tex,
             .start_ms = c.SDL_GetTicks(),
             .sound = sound,
-            .caption = std.mem.indexOf(u8, path, "introkon") != null,
+            .caption = captioned(path),
         };
         switch (v.backend) {
             .proc => |*p| p.reader = p.child.stdout.?.reader(io, p.reader_buf),
@@ -313,9 +329,17 @@ pub const Video = struct {
         try gfx.check(c.SDL_SetRenderDrawColor(r, 0, 0, 0, 255));
         try gfx.check(c.SDL_RenderClear(r));
         if (self.shown == 0) return;
-        const hh: f32 = @floatFromInt(self.h * @as(u32, if (self.double) 2 else 1));
-        const dst: c.SDL_FRect = .{ .x = self.x, .y = self.y, .w = @floatFromInt(self.w), .h = hh };
-        try gfx.check(c.SDL_RenderTexture(r, self.tex, null, &dst));
+        try gfx.check(c.SDL_RenderTexture(r, self.tex, null, &self.rect()));
+    }
+
+    /// Where the frame goes on the 640×480 screen: at (x, y), lines doubled when asked;
+    /// a video larger than the screen (an OpenGorky upscale) fitted into it, centred.
+    pub fn rect(self: *const Video) c.SDL_FRect {
+        const w: f32 = @floatFromInt(self.w);
+        const h: f32 = @floatFromInt(self.h);
+        if (self.w <= 640 and self.h <= 480) return .{ .x = self.x, .y = self.y, .w = w, .h = if (self.double) h * 2 else h };
+        const k = @min(640 / w, 480 / h);
+        return .{ .x = (640 - w * k) / 2, .y = (480 - h * k) / 2, .w = w * k, .h = h * k };
     }
 
     pub fn close(self: *Video, mixer: ?*og.audio.mixer.Mixer) void {

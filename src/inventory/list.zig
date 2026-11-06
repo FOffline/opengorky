@@ -19,17 +19,17 @@ fn tabOf(o: *Object) Tab {
     };
 }
 
-/// List row: first item with this nameID and its count (ammo: sum of `counter`).
+/// List row: first item with this classic_id and its count (ammo: sum of `counter`).
 pub const Entry = struct { item: *Object, count: i32 };
 
 /// Row limit. The exe lists are unbounded (0xc-byte heap nodes, 0x4b15b6 → 0x402950);
 /// a smaller limit used to drop late items (the lab blaster) from the quick list.
 pub const max_entries = 512;
 
-/// Add an item, merging equal nameIDs (0x42f340, 0x4b14e0).
+/// Add an item, merging equal classic_ids (0x42f340, 0x4b14e0).
 fn add(out: []Entry, n: *usize, o: *Object) void {
     const k: i32 = if (item_mod.typeOf(o) == .ammo) fields.counter(o) else 1;
-    for (out[0..n.*]) |*e| if (fields.nameId(e.item) == fields.nameId(o)) {
+    for (out[0..n.*]) |*e| if (fields.classicId(e.item) == fields.classicId(o)) {
         e.count += k;
         return;
     };
@@ -38,7 +38,7 @@ fn add(out: []Entry, n: *usize, o: *Object) void {
     n.* += 1;
 }
 
-/// Exe order: each weapon followed by its ammo (`ammoUsed`), then other ammo, then the
+/// Exe order: each weapon followed by its ammo (`ammo`), then other ammo, then the
 /// rest in original order.
 fn weaponOrder(items: []Entry) void {
     var buf: [max_entries]Entry = undefined;
@@ -50,9 +50,9 @@ fn weaponOrder(items: []Entry) void {
         buf[n] = e;
         n += 1;
         used[i] = true;
-        const ammo = e.item.getInt("ammoUsed");
+        const ammo = e.item.getInt("ammo");
         if (ammo <= 0) continue;
-        for (items, 0..) |a, j| if (!used[j] and item_mod.typeOf(a.item) == .ammo and fields.nameId(a.item) == ammo) {
+        for (items, 0..) |a, j| if (!used[j] and item_mod.typeOf(a.item) == .ammo and fields.classicId(a.item) == ammo) {
             buf[n] = a;
             n += 1;
             used[j] = true;
@@ -78,7 +78,7 @@ pub fn list(w: *World, hero: *Object, tab: Tab, out: []Entry) []Entry {
     for (w.rt.objects.items) |o| {
         if (!world.isItem(o) or item_mod.placeOf(o) != .backpack or tabOf(o) != tab) continue;
         if (tab != .other and !fields.ownerIs(o, hero.name)) continue;
-        if (item_mod.typeOf(o) == .ammo and fields.counter(o) <= 0) continue;
+        if (item_mod.emptyPack(o)) continue;
         add(out, &n, o);
     }
     if (tab == .weapons) weaponOrder(out[0..n]);
@@ -110,12 +110,12 @@ pub fn setShortScroll(hero: *Object, v: usize) void {
     World.nativeOf(hero).short_scroll = v;
 }
 
-/// More than one unit at the hero (0x47d810): ammo, or another item with the same nameID
+/// More than one unit at the hero (0x47d810): ammo, or another item with the same classic_id
 /// and owner — then giving asks for a count.
 pub fn severalUnits(w: *World, item: *Object) bool {
     if (item_mod.typeOf(item) == .ammo) return true;
     for (w.rt.objects.items) |o| {
-        if (o == item or !world.isItem(o) or fields.nameId(o) != fields.nameId(item)) continue;
+        if (o == item or !world.isItem(o) or fields.classicId(o) != fields.classicId(item)) continue;
         if (fields.ownerIs(o, fields.owner(item)) and o.getInt("place") > 0) return true;
     }
     return false;

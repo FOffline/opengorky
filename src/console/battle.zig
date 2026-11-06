@@ -10,6 +10,7 @@ const states = @import("../combat.zig").states;
 const turns_mod = @import("../combat.zig").turns;
 const world_mod = @import("../state.zig").world;
 const World = world_mod.World;
+const Mouse = @import("../input.zig").mouse.Mouse;
 const rules = @import("../battle.zig").rules;
 const inventory = @import("../inventory.zig");
 const fx = @import("../fx.zig");
@@ -18,7 +19,7 @@ const common = @import("common.zig");
 const Cmd = common.Cmd;
 const Effect = common.Effect;
 
-pub fn run(c: Cmd, w: *World, cmd: []const u8, it: *common.Args, out: *std.Io.Writer) !Effect {
+pub fn run(c: Cmd, w: *World, mouse: *Mouse, cmd: []const u8, it: *common.Args, out: *std.Io.Writer) !Effect {
     const eq = std.ascii.eqlIgnoreCase;
     switch (c) {
         .fighters => {
@@ -26,7 +27,7 @@ pub fn run(c: Cmd, w: *World, cmd: []const u8, it: *common.Args, out: *std.Io.Wr
             try out.print("phase {t} pending {t} over {d} tick {d}\n", .{ b.phase, b.pending, b.over_ticks, w.ticks });
             for (b.fighters.items) |f| {
                 const p = w.screenPos(f.obj);
-                try out.print("{s} {t} tile {d},{d} bg {d:.0},{d:.0} id {d} hp {d} rage {d} sleep {d} burn {d} gas {d} frozen {d} weapon {s} recharge {d} acted {} stance {d} detached {}\n", .{ f.obj.name, f.side, f.tile[0], f.tile[1], p[0], p[1], fields.nameId(f.obj), f.hp(), f.berserk, f.asleep, f.burning, f.gassed, f.frozen, if (f.weapon) |wp| wp.name else "-", if (f.weapon) |wp| World.nativeOf(wp).fight.recharge else 0, f.acted, world_mod.actorOf(f.obj).state, world_mod.actorOf(f.obj).weapon_detached });
+                try out.print("{s} {t} tile {d},{d} bg {d:.0},{d:.0} id {d} hp {d} rage {d} sleep {d} burn {d} gas {d} frozen {d} weapon {s} recharge {d} acted {} stance {d} detached {}\n", .{ f.obj.name, f.side, f.tile[0], f.tile[1], p[0], p[1], fields.classicId(f.obj), f.hp(), f.berserk, f.asleep, f.burning, f.gassed, f.frozen, if (f.weapon) |wp| wp.name else "-", if (f.weapon) |wp| World.nativeOf(wp).fight.recharge else 0, f.acted, world_mod.actorOf(f.obj).state, world_mod.actorOf(f.obj).weapon_detached });
             }
         },
         .put => {
@@ -43,7 +44,7 @@ pub fn run(c: Cmd, w: *World, cmd: []const u8, it: *common.Args, out: *std.Io.Wr
             const file = it.next() orelse return common.usage(out, "spawn <file.ftr> x y");
             const x = std.fmt.parseInt(i32, it.next() orelse "", 10) catch return common.usage(out, "spawn <file.ftr> x y");
             const y = std.fmt.parseInt(i32, it.next() orelse "", 10) catch return common.usage(out, "spawn <file.ftr> x y");
-            if (try debug.spawnFile(w, file, .{ x, y })) |o| {
+            if (try debug.spawnFile(w, file, .{ x, y }, .enemy, false)) |o| {
                 try out.print("{s} -> {d},{d}\n", .{ o.name, x, y });
             } else try out.print("cannot spawn {s} at {d},{d}\n", .{ file, x, y });
         },
@@ -69,7 +70,7 @@ pub fn run(c: Cmd, w: *World, cmd: []const u8, it: *common.Args, out: *std.Io.Wr
                 const f = b.fighters.items[b.fighterOf(to).?];
                 try out.print("{s} -> {s}: hp {d} -> {d}, rage {d}, sleep {d}, gas {d}, acted {}\n", .{ item.name, to.name, hp, fields.hp(to), f.berserk, f.asleep, f.gassed, f.acted });
             } else {
-                try inventory.medicine.healWith(w, from, to, item);
+                if (try inventory.medicine.healWith(w, from, to, item)) mouse.use = null;
                 try out.print("{s} -> {s}: hp {d} -> {d}\n", .{ item.name, to.name, hp, fields.hp(to) });
             }
         },
@@ -98,7 +99,7 @@ pub fn run(c: Cmd, w: *World, cmd: []const u8, it: *common.Args, out: *std.Io.Wr
             try out.print("heroes killed\n", .{});
         },
         .launch => {
-            const cm = w.combat_map orelse return common.say(out, "no battle\n", .{});
+            const cm = w.map.combat orelse return common.say(out, "no battle\n", .{});
             const id = std.fmt.parseInt(i32, it.next() orelse "", 10) catch return common.usage(out, "launch <weaponID> x y");
             const x = std.fmt.parseInt(i32, it.next() orelse "", 10) catch return common.usage(out, "launch <weaponID> x y");
             const y = std.fmt.parseInt(i32, it.next() orelse "", 10) catch return common.usage(out, "launch <weaponID> x y");
@@ -107,7 +108,7 @@ pub fn run(c: Cmd, w: *World, cmd: []const u8, it: *common.Args, out: *std.Io.Wr
             try out.print("projectile {d}\n", .{n});
         },
         .hitfx => {
-            const cm = w.combat_map orelse return common.say(out, "no battle\n", .{});
+            const cm = w.map.combat orelse return common.say(out, "no battle\n", .{});
             const id = std.fmt.parseInt(i32, it.next() orelse "", 10) catch return common.usage(out, "hitfx <weaponID> x y [attacker]");
             const x = std.fmt.parseInt(i32, it.next() orelse "", 10) catch return common.usage(out, "hitfx <weaponID> x y [attacker]");
             const y = std.fmt.parseInt(i32, it.next() orelse "", 10) catch return common.usage(out, "hitfx <weaponID> x y [attacker]");
@@ -115,12 +116,12 @@ pub fn run(c: Cmd, w: *World, cmd: []const u8, it: *common.Args, out: *std.Io.Wr
             // Optional 4th argument: the attacking object (monster effects).
             if (it.next()) |by| {
                 const o = w.rt.findObject(by) orelse return common.say(out, "no object\n", .{});
-                fx.hits.preFlash(w, o, id, at);
+                fx.hits.preFlash(w, o, .same(id, fields.classicId(o)), at);
                 fx.hits.onHitAs(w, o, id, at, false);
             } else {
                 const hero = w.selectedHero() orelse return common.say(out, "no hero\n", .{});
                 // The ion rifle beam and blaster stream set the callback before the hit.
-                fx.hits.preFlash(w, hero, id, at);
+                fx.hits.preFlash(w, hero, .same(id, fields.classicId(hero)), at);
                 fx.hits.onHitId(w, hero, id, at);
             }
             try out.print("hit fx {d}\n", .{id});
@@ -149,14 +150,14 @@ pub fn run(c: Cmd, w: *World, cmd: []const u8, it: *common.Args, out: *std.Io.Wr
             const b = &(w.battle orelse return common.say(out, "no battle\n", .{}));
             const x = std.fmt.parseInt(i32, it.next() orelse "", 10) catch return common.usage(out, "tile x y");
             const y = std.fmt.parseInt(i32, it.next() orelse "", 10) catch return common.usage(out, "tile x y");
-            try control.clickTileMode(b, w, .{ x, y }, w.mouse.aim);
+            try control.tileAction(b, w, .{ x, y }, mouse.aim);
             try out.print("click tile {d},{d}\n", .{ x, y });
         },
         .aim => {
             // Aim mode (right button in battle): the host turns it on by the flag.
             if (w.battle == null) return common.say(out, "no battle\n", .{});
-            w.mouse.aim = !w.mouse.aim;
-            try out.print("aim {s}\n", .{if (w.mouse.aim) "on" else "off"});
+            mouse.aim = !mouse.aim;
+            try out.print("aim {s}\n", .{if (mouse.aim) "on" else "off"});
         },
         .attack => {
             const b = &(w.battle orelse return common.say(out, "no battle\n", .{}));

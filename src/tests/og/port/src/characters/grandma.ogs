@@ -1,0 +1,26 @@
+module characters {
+    use abilities;
+    fighter grandma {
+        classic_id = 113;
+        look = looks::grandma;
+        battle_class = grandma;
+        footprint_tiles = 4;
+        level = 1;
+        hp = 200;
+        max_hp = 200;
+        walk_range = 3;
+        accuracy = 90;
+        calmness = 12;
+        luck = 15;
+        ai_threat_weight = 2;
+        ai_attack_weight = 10;
+        ai_guard_distance_weight = 100;
+        ai_opponent_distance_weight = 100;
+        armor = 1;
+        blast_weapon = weapons::grandma_mad;
+        attach Calm(by = -1);
+        weapon gun: weapons::grandma_mad {
+            place = hand;
+        }
+    }
+}

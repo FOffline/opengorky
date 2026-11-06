@@ -18,7 +18,7 @@ pub fn frameSame(self: *Viewer) bool {
         return false;
     }
     const l = &self.level.?;
-    const sig: FrameSig = .{ .level = @intFromPtr(l.world), .ticks = l.world.ticks, .scroll = self.scroll, .mouse = self.mouse, .zoom = self.zoom, .ss = self.detail.k, .wide = gfx.wide + gfx.fill };
+    const sig: FrameSig = .{ .level = @intFromPtr(l.world), .ticks = l.world.ticks, .scroll = self.scroll, .mouse = self.mouse, .zoom = self.zoom, .ss = self.detail.k, .wide = gfx.wide + gfx.fill + 1000 * gfx.tall };
     defer self.last_sig = sig;
     const prev = self.last_sig orelse return false;
     return std.meta.eql(prev, sig);
@@ -32,7 +32,7 @@ fn ownTimeOnScreen(self: *Viewer) bool {
 }
 pub fn applyScaling(self: *Viewer) void {
     const r = self.renderer;
-    _ = c.SDL_SetRenderLogicalPresentation(r, @intFromFloat(screen_w + 2 * gfx.wide), screen_h, switch (self.cfg.scaling) {
+    _ = c.SDL_SetRenderLogicalPresentation(r, @intFromFloat(gfx.frameW()), @intFromFloat(gfx.frameH()), switch (self.cfg.scaling) {
         .integer => c.SDL_LOGICAL_PRESENTATION_INTEGER_SCALE,
         .stretch => c.SDL_LOGICAL_PRESENTATION_STRETCH,
         else => c.SDL_LOGICAL_PRESENTATION_LETTERBOX,
@@ -56,8 +56,8 @@ fn wantDetail(self: *Viewer) u32 {
     var h: c_int = 0;
     if (!c.SDL_GetRenderOutputSize(self.renderer, &w, &h)) return 1;
     // Stretched: the wider side's detail (the frame is not scaled down along it).
-    const kw = og.num.toF32(w) / (screen_w + 2 * gfx.wide);
-    const kh = og.num.toF32(h) / screen_h;
+    const kw = og.num.toF32(w) / gfx.frameW();
+    const kh = og.num.toF32(h) / gfx.frameH();
     const k = if (self.cfg.scaling == .stretch) @max(kw, kh) else @min(kw, kh);
     const want = if (self.cfg.scaling == .integer) @floor(k + 0.001) else @ceil(k - 0.05);
     const max: f32 = @floatFromInt(@min(self.detail.cap, if (builtin.mode == .debug) 3 else 4));
@@ -68,15 +68,35 @@ fn wantDetail(self: *Viewer) u32 {
 /// the world isn't on screen (menu, inventory, video, safe, defeat): those stay
 /// 640×480 over the blurred copy.
 fn wantWide(self: *Viewer) f32 {
-    if (self.cfg.scaling != .adaptive) return 0;
-    if (self.level == null or self.video != null or self.safeOpen()) return 0;
-    if (self.menu) |m| if (m.open) return 0;
-    if (self.inventory) |inv| if (inv.open) return 0;
-    if (self.gui) |g| if (g.go_frame != null) return 0;
+    if (!worldShown(self)) return 0;
+    const cv = canvas();
+    const base = (cv[0] - screen_w) / 2;
+    if (self.cfg.scaling != .adaptive) return base;
     var w: c_int = 0;
     var h: c_int = 0;
-    if (!c.SDL_GetRenderOutputSize(self.renderer, &w, &h) or h == 0) return 0;
-    return @max(0, @floor((screen_h * og.num.toF32(w) / og.num.toF32(h) - screen_w) / 2));
+    if (!c.SDL_GetRenderOutputSize(self.renderer, &w, &h) or h == 0) return base;
+    return @max(base, @floor((cv[1] * og.num.toF32(w) / og.num.toF32(h) - screen_w) / 2));
+}
+
+/// The canvas's rows above and below the 640×480 middle while the world is on screen.
+fn wantTall(self: *Viewer) f32 {
+    if (!worldShown(self)) return 0;
+    return (canvas()[1] - screen_h) / 2;
+}
+
+/// The project's canvas (ui.ogs `Canvas`), at least 640×480, even sizes.
+fn canvas() [2]f32 {
+    const cv = og.core.modules.ui().canvas;
+    return .{ og.num.toF32(@max(screen_w, cv.width) & ~@as(i32, 1)), og.num.toF32(@max(screen_h, cv.height) & ~@as(i32, 1)) };
+}
+
+/// The world is on screen: no menu, inventory, video, safe, defeat (those stay 640×480).
+fn worldShown(self: *Viewer) bool {
+    if (self.level == null or self.video != null or self.safeOpen()) return false;
+    if (self.menu) |m| if (m.open) return false;
+    if (self.inventory) |inv| if (inv.open) return false;
+    if (self.gui) |g| if (g.go_frame != null) return false;
+    return true;
 }
 
 /// Frame too slow (work over 30 ms on average over half a second, twice in a row):
@@ -99,12 +119,16 @@ pub fn beginFrame(self: *Viewer) void {
     const r = self.renderer;
     // The frame's width first: the detail is picked for it.
     const wide = wantWide(self);
-    const wide_changed = wide != gfx.wide;
+    const tall = wantTall(self);
+    const wide_changed = wide != gfx.wide or tall != gfx.tall;
     gfx.wide = wide;
+    gfx.tall = tall;
     gfx.fill = 1;
-    if (wide > 0) if (self.level) |l| {
+    if (wide > 0 or tall > 0) if (self.level) |l| {
         const bw = og.num.toF32(l.size()[0]);
-        if (bw > 0) gfx.fill = @max(1, (screen_w + 2 * wide) / bw);
+        const bh = og.num.toF32(l.size()[1]);
+        if (bw > 0) gfx.fill = @max(1, gfx.frameW() / bw);
+        if (bh > 0) gfx.fill = @max(gfx.fill, gfx.frameH() / bh);
     };
     const ss = wantDetail(self);
     if (self.frame_tex != null and (ss != self.detail.k or wide_changed)) {
@@ -120,7 +144,7 @@ pub fn beginFrame(self: *Viewer) void {
         };
     }
     if (self.frame_tex == null) {
-        self.frame_tex = c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_TARGET, @intFromFloat((screen_w + 2 * wide) * og.num.toF32(ss)), @intCast(screen_h * ss));
+        self.frame_tex = c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_TARGET, @intFromFloat(gfx.frameW() * og.num.toF32(ss)), @intFromFloat(gfx.frameH() * og.num.toF32(ss)));
         if (self.frame_tex) |t| _ = c.SDL_SetTextureBlendMode(t, c.SDL_BLENDMODE_NONE);
         self.detail.k = if (self.frame_tex != null) ss else 1;
         applyScaling(self);
@@ -164,8 +188,9 @@ fn drawBlurred(self: *Viewer, t: *c.SDL_Texture) !void {
     var ow: c_int = 0;
     var oh: c_int = 0;
     if (!c.SDL_GetRenderOutputSize(r, &ow, &oh) or ow == 0 or oh == 0) return;
-    const fw = screen_w + 2 * gfx.wide;
-    const sizes = [2][2]f32{ .{ @round(fw / 4), screen_h / 4 }, .{ @round(fw / 16), screen_h / 16 } };
+    const fw = gfx.frameW();
+    const fh = gfx.frameH();
+    const sizes = [2][2]f32{ .{ @round(fw / 4), @round(fh / 4) }, .{ @round(fw / 16), @round(fh / 16) } };
     var src: *c.SDL_Texture = t;
     for (&self.blur_tex, sizes) |*b, sz| {
         if (b.* == null) {
@@ -192,8 +217,8 @@ fn drawBlurred(self: *Viewer, t: *c.SDL_Texture) !void {
     _ = c.SDL_SetTextureColorModFloat(src, 0.7, 0.7, 0.7);
     try viewer.check(c.SDL_RenderTexture(r, src, &crop, null));
     _ = c.SDL_SetTextureColorModFloat(src, 1, 1, 1);
-    const k = @min(w / fw, h / screen_h);
-    try viewer.check(c.SDL_RenderTexture(r, t, null, &.{ .x = @floor((w - fw * k) / 2), .y = @floor((h - screen_h * k) / 2), .w = fw * k, .h = screen_h * k }));
+    const k = @min(w / fw, h / fh);
+    try viewer.check(c.SDL_RenderTexture(r, t, null, &.{ .x = @floor((w - fw * k) / 2), .y = @floor((h - fh * k) / 2), .w = fw * k, .h = fh * k }));
 }
 
 /// Gamma (0x4065e0): `ramp[i] = (i/255)^(1/g)`, g = value/100, at least 0.1;
@@ -206,27 +231,51 @@ pub fn applyGamma(self: *Viewer) void {
         for (&self.gamma_lut, 0..) |*e, i| e.* = @intFromFloat(@round(255 * std.math.pow(f32, og.num.toF32(i) / 255, 1 / g)));
         self.gamma_lut_for = self.gamma;
     }
+    const Lut = struct {
+        lut: *const [256]u8,
+        fn run(l: @This(), px: []u8, w: usize, h: usize, pitch: usize) void {
+            for (0..h) |y| for (0..w) |x| {
+                const p = px[y * pitch + x * 4 ..];
+                for (0..3) |k| p[k] = l.lut[p[k]];
+            };
+        }
+    };
+    rewriteTarget(r, &self.gamma_tex, Lut{ .lut = &self.gamma_lut });
+}
+
+/// A project's post-processing `steps` (render/post.zig) over the render target
+/// (the world just drawn).
+pub fn applyPost(self: *Viewer, steps: []const og.core.effect.Post) void {
+    const Chain = struct {
+        steps: []const og.core.effect.Post,
+        fn run(ch: @This(), px: []u8, w: usize, h: usize, pitch: usize) void {
+            og.render.post.apply(ch.steps, px, w, h, pitch);
+        }
+    };
+    rewriteTarget(self.renderer, &self.post_tex, Chain{ .steps = steps });
+}
+
+/// The render target read back, changed by `edit.run(pixels, w, h, pitch)` (RGBA) and drawn
+/// back over it through `tex` (kept at the target's size).
+fn rewriteTarget(r: *c.SDL_Renderer, tex: *?*c.SDL_Texture, edit: anytype) void {
     const surf = gfx.readFrame(r) orelse return;
     defer c.SDL_DestroySurface(surf);
     const w: usize = @intCast(surf.*.w);
     const h: usize = @intCast(surf.*.h);
     const px: [*]u8 = @ptrCast(surf.*.pixels.?);
     const pitch: usize = @intCast(surf.*.pitch);
-    for (0..h) |y| for (0..w) |x| {
-        const p = px + y * pitch + x * 4;
-        for (0..3) |k| p[k] = self.gamma_lut[p[k]];
-    };
-    if (self.gamma_tex) |gt| {
+    edit.run(px[0 .. h * pitch], w, h, pitch);
+    if (tex.*) |gt| {
         var tw: f32 = 0;
         var th: f32 = 0;
         _ = c.SDL_GetTextureSize(gt, &tw, &th);
         if (tw != og.num.toF32(w) or th != og.num.toF32(h)) {
             c.SDL_DestroyTexture(gt);
-            self.gamma_tex = null;
+            tex.* = null;
         }
     }
-    if (self.gamma_tex == null) self.gamma_tex = c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_STREAMING, @intCast(w), @intCast(h));
-    const t = self.gamma_tex orelse return;
+    if (tex.* == null) tex.* = c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_ABGR8888, c.SDL_TEXTUREACCESS_STREAMING, @intCast(w), @intCast(h));
+    const t = tex.* orelse return;
     _ = c.SDL_UpdateTexture(t, null, surf.*.pixels, surf.*.pitch);
     _ = c.SDL_SetTextureBlendMode(t, c.SDL_BLENDMODE_NONE);
     _ = c.SDL_RenderTexture(r, t, null, null);

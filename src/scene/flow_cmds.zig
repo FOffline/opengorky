@@ -1,9 +1,8 @@
 //! Scene commands: waits, level changes, add-on scenes, GUI modes, the party.
 
 const std = @import("std");
-const num = @import("../num.zig");
 const walk = @import("../world.zig").walk;
-const scriptlet = @import("../formats.zig").scriptlet;
+const scriptlet = @import("../core.zig").scene;
 const world_mod = @import("../state.zig").world;
 const World = world_mod.World;
 const Runner = @import("../state.zig").scene.Runner;
@@ -45,7 +44,8 @@ pub fn execFlow(self: *Runner, w: *World, c: scriptlet.Command, n: []const u8) !
         const o = w.actorObject(c.arg(0).str()) orelse return true;
         World.nativeOf(o).hero = c.arg(1).num() != 0;
         World.nativeOf(o).hro = true;
-        o.setInt("avoidEnumerate", @intFromBool(c.arg(1).num() == 0));
+        o.setInt("outside_party", @intFromBool(c.arg(1).num() == 0));
+        try @import("../world.zig").party.syncRoles(w);
         return true;
     }
     if (eq(n, "PLACEHEROES")) {
@@ -57,7 +57,7 @@ pub fn execFlow(self: *Runner, w: *World, c: scriptlet.Command, n: []const u8) !
         for (w.rt.objects.items) |o| if (World.nativeOf(o).hero) {
             const a = world_mod.actorOf(o);
             a.clearPath();
-            a.play("fightlook", false, true);
+            a.play(@import("../core.zig").modules.ui().anims.fight_look, false, true);
         };
         return true;
     }

@@ -54,11 +54,11 @@ pub const Trace = struct {
 /// `wait:N`, `click:X,Y`, `goto:AREA`, `op:AREA:N`, `hero:NAME` (`scene` and other
 /// play commands do nothing: every command already waits) — each after the
 /// previous one settles (no scene, the hero standing).
-pub fn run(io: Io, gpa: Allocator, dat: Io.Dir, models: *model_cache.Cache, level: []const u8, commands: []const u8, max_ticks: u32) !Trace {
+pub fn run(io: Io, gpa: Allocator, worlds: @import("../core.zig").source.Factory, models: *model_cache.Cache, level: []const u8, commands: []const u8, max_ticks: u32) !Trace {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     const a = arena.allocator();
-    const w = try life.create(io, gpa, dat, level, models, .{});
+    const w = try life.create(io, gpa, worlds, level, models, .{});
     defer w.destroy();
 
     var vars: std.ArrayList(Var) = .empty;
@@ -195,16 +195,16 @@ fn input(w: *World, cmd: []const u8) !u32 {
         const comma = std.mem.indexOfScalar(u8, xy, ',') orelse return 0;
         const x = std.fmt.parseFloat(f32, xy[0..comma]) catch return 0;
         const y = std.fmt.parseFloat(f32, xy[comma + 1 ..]) catch return 0;
-        _ = try actions.click(w, .{ x, y });
+        _ = try actions.actAt(w, .{ x, y }, 0, null);
     }
     if (std.mem.startsWith(u8, cmd, "goto:")) if (areas.findArea(w, cmd[5..])) |ar| {
-        _ = try actions.click(w, center(ar.points));
+        _ = try actions.actAt(w, center(ar.points), 0, null);
     };
     if (std.mem.startsWith(u8, cmd, "op:")) {
         const spec = cmd[3..];
         const sep = std.mem.lastIndexOfScalar(u8, spec, ':') orelse return 0;
         const ar = areas.findArea(w, spec[0..sep]) orelse return 0;
-        _ = try actions.clickAction(w, center(ar.points), std.fmt.parseInt(u8, spec[sep + 1 ..], 10) catch return 0);
+        _ = try actions.actAt(w, center(ar.points), std.fmt.parseInt(u8, spec[sep + 1 ..], 10) catch return 0, null);
     }
     // The click starts the walk on the next tick.
     return 2;
@@ -222,6 +222,7 @@ fn show(a: Allocator, v: Value) ![]const u8 {
         .int => |i| std.fmt.allocPrint(a, "{d}", .{i}),
         .float => |f| std.fmt.allocPrint(a, "{d}", .{f}),
         .string => |s| std.fmt.allocPrint(a, "\"{s}\"", .{s}),
+        else => std.fmt.allocPrint(a, "{f}", .{v}),
     };
 }
 

@@ -10,7 +10,7 @@ const og = @import("opengorky");
 const c = @import("sdl");
 const gfx = @import("../media/gfx.zig");
 const gui_mod = @import("../gui.zig");
-const Image = og.formats.image.Image;
+const Image = og.image.Image;
 const Font = og.formats.font.Font;
 const World = @import("opengorky").state.world.World;
 const Object = @import("opengorky").script.object.Object;
@@ -32,7 +32,7 @@ pub fn shadowText(self: *InventoryView, img: Image, x: i32, y: i32, t: []const u
 }
 
 fn drawIconCentered(self: *InventoryView, r: *c.SDL_Renderer, o: *Object, frame: usize, rc: Rect) !void {
-    const f = self.icon(o.getString("spriteFile")) orelse return;
+    const f = self.icon(o.getString("icon")) orelse return;
     if (f.len() <= frame) return;
     const sz = f.sizes.items[frame];
     try f.drawShadowed(r, frame, gfx.Frames.center(rc.l, rc.r - rc.l, sz[0]), gfx.Frames.center(rc.t, rc.b - rc.t, sz[1]));
@@ -42,7 +42,7 @@ pub fn draw(self: *InventoryView, r: *c.SDL_Renderer, w: *World, gui: ?*gui_mod.
     self.sync(w);
     if (self.bg.len() > 0) try self.bg.draw(r, 0, 0, 0);
     const hero = self.heroObj(w) orelse return;
-    if (gui) |g| try gui_stats.drawInventoryStats(g, r, w, hero.name, &self.strings);
+    if (gui) |g| try gui_stats.drawInventoryStats(g, r, w, hero.name, self.strings);
     var lbuf: [inv.list.max_entries]inv.list.Entry = undefined;
     const items = self.bagList(w, hero, &lbuf);
     if (self.scroll + cells > items.len) self.scroll = items.len -| cells;
@@ -81,7 +81,7 @@ pub fn draw(self: *InventoryView, r: *c.SDL_Renderer, w: *World, gui: ?*gui_mod.
     if (self.pressed == .skills and over == .skills and self.bg.len() > 8) try self.bg.draw(r, 8, skill_rect.l, skill_rect.t);
     try drawText(self, r, items, cur);
     // Cursor item with its shadow (0x42f2d3): frame 1 centred on the mouse (w>>1, h>>1).
-    if (self.carried) |o| if (self.icon(o.getString("spriteFile"))) |f| if (f.len() > 1) {
+    if (self.carried) |o| if (self.icon(o.getString("icon"))) |f| if (f.len() > 1) {
         const sz = f.sizes.items[1];
         try f.drawShadowed(r, 1, @trunc(mouse[0]) - og.num.toF32(sz[0] >> 1), @trunc(mouse[1]) - og.num.toF32(sz[1] >> 1));
     };
@@ -101,13 +101,13 @@ fn drawText(self: *InventoryView, r: *c.SDL_Renderer, items: []inv.list.Entry, c
         gui_mod.textShadow(self.sys, self.text, 320 - @divTrunc(@as(i32, @intCast(self.sys.measure(name))), 2), 350, name, white);
         var y: i32 = 365;
         if (inv.item.typeOf(o) == .ammo) {
-            gui_mod.textShadow(self.sys, self.text, 210, y, self.strings.get(569) orelse "Counter", label);
+            gui_mod.textShadow(self.sys, self.text, 210, y, self.strings.get(og.core.ui_text.id(.counter)) orelse "Counter", label);
             gui_mod.textShadow(self.sys, self.text, 290, y, std.fmt.bufPrint(&buf, "{d}", .{og.fields.counter(o)}) catch "", white);
         } else if (World.nativeOf(o).kind == .weapon) {
             // Damage and penetration of three armour classes (100 − protection).
-            const fields = [3][]const u8{ "lightArmor", "mediumArmor", "heavyArmor" };
+            const fields = [3][]const u8{ "light_armor_pct", "medium_armor_pct", "heavy_armor_pct" };
             for (0..4) |i| {
-                gui_mod.textShadow(self.sys, self.text, 210, y, self.strings.get(570 + @as(i32, @intCast(i))) orelse "", label);
+                gui_mod.textShadow(self.sys, self.text, 210, y, self.strings.get(og.core.ui_text.of(.damage, i)) orelse "", label);
                 const v = if (i == 0)
                     std.fmt.bufPrint(&buf, "{d}", .{o.getInt("max_damage")}) catch ""
                 else
@@ -118,17 +118,17 @@ fn drawText(self: *InventoryView, r: *c.SDL_Renderer, items: []inv.list.Entry, c
         } else if (inv.item.typeOf(o) == .medicine or inv.item.typeOf(o) == .armor) {
             // Health, armour, then the names of present protections.
             for ([2][]const u8{ "hp", "armor" }, 0..) |f, i| {
-                gui_mod.textShadow(self.sys, self.text, 210, y, self.strings.get(560 + @as(i32, @intCast(i))) orelse "", label);
+                gui_mod.textShadow(self.sys, self.text, 210, y, self.strings.get(og.core.ui_text.of(.hp, i)) orelse "", label);
                 gui_mod.textShadow(self.sys, self.text, 290, y, std.fmt.bufPrint(&buf, "{d}", .{o.getIntDyn(f)}) catch "", white);
                 y += 15;
             }
             const pr = og.battle.immunity.pr_fields;
             for (0..7) |k| if (o.getIntDyn(pr[k]) == 1) { // 0x42ead0: only == 1
-                gui_mod.textShadow(self.sys, self.text, 210, y, self.strings.get(562 + @as(i32, @intCast(k))) orelse "", label);
+                gui_mod.textShadow(self.sys, self.text, 210, y, self.strings.get(og.core.ui_text.of(.protects_fire, k)) orelse "", label);
                 y += 15;
             };
         }
-        if (self.examine.get(og.fields.nameId(o))) |desc| _ = textWrappedShadow(self, self.sys, 458, 370, desc, light, 160, 470);
+        if (og.core.entity.texts.examine.get(og.fields.classicId(o))) |desc| _ = textWrappedShadow(self, self.sys, 458, 370, desc, light, 160, 470);
     }
     // Cell counts: ammo or more than one unit (0x42ed90).
     for (0..cells) |k| {
@@ -139,8 +139,8 @@ fn drawText(self: *InventoryView, r: *c.SDL_Renderer, items: []inv.list.Entry, c
         const rc = inventory_mod.cellRect(k);
         gui_mod.textShadow(self.sys, self.text, @as(i32, @intFromFloat(rc.r)) - 10 - @as(i32, @intCast(self.sys.measure(std.fmt.bufPrint(&buf, "{d}", .{e.count}) catch ""))), @as(i32, @intFromFloat(rc.t)) + 7, std.fmt.bufPrint(&buf, "{d}", .{e.count}) catch "", light);
     }
-    const ex = self.strings.get(556) orelse "Exit";
-    const ws = self.strings.get(557) orelse "Weapons Skill";
+    const ex = self.strings.get(og.core.ui_text.id(.exit)) orelse "Exit";
+    const ws = self.strings.get(og.core.ui_text.id(.weapons_skill)) orelse "Weapons Skill";
     // Font 3 with shadow, centred on x, row top y = 460 (0x42f1eb, 0x47b640).
     gui_mod.textShadow(self.sys, self.text, 250 - @divTrunc(@as(i32, @intCast(self.sys.measure(ex))), 2), 460, ex, light);
     gui_mod.textShadow(self.sys, self.text, 565 - @divTrunc(@as(i32, @intCast(self.sys.measure(ws))), 2), 460, ws, light);
@@ -157,32 +157,32 @@ fn drawHint(self: *InventoryView, r: *c.SDL_Renderer, g: *gui_mod.Gui, w: *World
     const item: ?*Object = switch (InventoryView.hitAt(w, mouse[0], mouse[1])) {
         .cell => |k| self.cellItem(w, hero, k),
         .torso => inv.equipment.equipped(w, hero, .armor) orelse blk: {
-            main_text = self.strings.get(550) orelse "Torso";
+            main_text = self.strings.get(og.core.ui_text.id(.torso)) orelse "Torso";
             break :blk null;
         },
         .hand => inv.equipment.equipped(w, hero, .hand) orelse blk: {
-            main_text = self.strings.get(551) orelse "Hand";
+            main_text = self.strings.get(og.core.ui_text.id(.hand)) orelse "Hand";
             break :blk null;
         },
         .picture => blk: {
-            main_text = self.strings.get(552) orelse "";
+            main_text = self.strings.get(og.core.ui_text.id(.picture)) orelse "";
             break :blk null;
         },
         .tab => |i| blk: {
-            main_text = self.strings.get(553 + @as(i32, @intCast(i))) orelse "";
+            main_text = self.strings.get(og.core.ui_text.of(.tab_weapons, i)) orelse "";
             break :blk null;
         },
         .portrait => |i| blk: {
             const heroes = w.party();
             const party = heroes.slice();
-            if (i < party.len) main_text = self.strings.get(og.fields.nameId(party[i])) orelse party[i].name;
+            if (i < party.len) main_text = self.strings.get(og.fields.classicId(party[i])) orelse party[i].name;
             break :blk null;
         },
         else => null,
     };
     if (item) |o| {
         // Item tooltip, shared with the panel and the quick list (0x45c6b0).
-        main_text = gui_short.itemTooltip(g, hero, o, &self.strings) orelse self.itemName(o);
+        main_text = gui_short.itemTooltip(g, hero, o, self.strings) orelse self.itemName(o);
         extra = g.tip_extra;
         extra_col = g.tip_extra_col;
     }

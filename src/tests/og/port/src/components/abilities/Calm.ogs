@@ -1,0 +1,10 @@
+module abilities {
+    component Calm for fighter {
+        param int by = 0 "How much calmer";
+        fn OnTurnStart(side, turn) {
+            if (side == host.side and by != 0) {
+                host.calmness += by;
+            }
+        }
+    }
+}

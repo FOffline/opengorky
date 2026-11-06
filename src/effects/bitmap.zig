@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const Rand = @import("../crt_rand.zig").Rand;
-const adjust = @import("../formats.zig").adjust;
+const adjust = @import("../rules.zig").adjust;
 const Object = @import("../script.zig").object.Object;
 
 pub const Bitmap = struct {
@@ -21,6 +21,8 @@ pub const Bitmap = struct {
     flash_down: bool = false,
     /// Frames of the effect animation; resolved at spawn (`fx.bitmap`).
     frames: u32 = 20,
+    /// A mod's material (core/effect.zig Material; "": none).
+    material: []const u8 = "",
 
     /// `_ftol(acc)` (0x4cb815): truncated, not rounded.
     pub fn frame(self: Bitmap) u32 {
@@ -110,11 +112,11 @@ pub const Morph = struct {
         var m: Morph = .{ .pos = pos, .angle = angle, .mesh = mesh, .anim = anim, .as = as, .parts = undefined };
         // morf_gr, morf_dr (0x425b0b), morf_life (0x425ace); morf_delay and morf_sint come
         // through the actor's morph (0x42b672, 0x42b6ae).
-        m.p = adjust.getFloat("morf_gr", 0.6);
-        m.dr = adjust.getFloat("morf_dr", 0.03);
-        m.life = adjust.getInt("morf_life", 30);
-        m.delay = @intCast(@max(0, adjust.getInt("morf_delay", 30)));
-        m.alpha = @intCast(std.math.clamp(adjust.getInt("morf_sint", 50), 0, 255));
+        m.p = adjust.float("morf_gr");
+        m.dr = adjust.float("morf_dr");
+        m.life = adjust.int("morf_life");
+        m.delay = @intCast(@max(0, adjust.int("morf_delay")));
+        m.alpha = @intCast(std.math.clamp(adjust.int("morf_sint"), 0, 255));
         for (&m.parts) |*pt| {
             const a: f32 = @floatFromInt(rand.below(32));
             const b: f32 = @floatFromInt(rand.below(32));
@@ -136,8 +138,8 @@ pub const Morph = struct {
         if (self.p > 1) {
             self.p = 1;
             self.dr = -self.dr;
-        } else if (self.p < adjust.getFloat("morf_gr", 0.6)) {
-            self.p = adjust.getFloat("morf_gr", 0.6);
+        } else if (self.p < adjust.float("morf_gr")) {
+            self.p = adjust.float("morf_gr");
             self.dr = -self.dr;
         }
         if (self.counter % 4 == 0) for (&self.parts) |*pt| if (!pt.active) {
@@ -156,7 +158,7 @@ pub const Morph = struct {
         }
         self.life -= 1;
         if (self.life < 0) self.done = true;
-        self.alpha = @min(255, self.alpha + @as(u32, @intCast(std.math.clamp(adjust.getInt("morf_add", 14), 0, 255))));
+        self.alpha = @min(255, self.alpha + @as(u32, @intCast(std.math.clamp(adjust.int("morf_add"), 0, 255))));
         self.anim_ticks += 1;
         return !self.done;
     }

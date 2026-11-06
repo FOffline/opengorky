@@ -1,18 +1,21 @@
 //! Game objects edited outside levels: enemy classes (`classes\ft_*.ss`), item
 //! classes (`cw_*` weapons, `ca_*` ammo, `ci_*` items) and enemy attacks (`wp_*.ss`, `.s`) of
-//! common/other.dat, and the heroes (`.hro` of any archive). Game names come by
-//! `nameID` from string.tab.
+//! common/other.dat, and the heroes (`.hro` of any archive) — the core's records as
+//! composition lists them (loaders/classic/entities.zig), their names the records' (string.tab by
+//! `classic_id`), with what only the editor knows (archive entry, copies, allies, weapons, riders).
 
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const og = @import("opengorky");
 const archive = og.formats.archive;
-const vars = @import("vars.zig");
-const common_archive = @import("store.zig").common_archive;
+const model = @import("model.zig");
+const store_mod = @import("store.zig");
+const common_archive = store_mod.common_archive;
+const entities = og.loaders.classic.entities;
 
 /// `attack`: an enemy's weapon class (`wp_*.ss`, what a battle's `.wpn` includes).
-pub const Kind = enum { enemy, weapon, ammo, item, attack, hero };
+pub const Kind = entities.Kind;
 
 pub const Entry = struct {
     kind: Kind,
@@ -22,7 +25,7 @@ pub const Entry = struct {
     /// Class without prefix and extension (`garcia`, `stilleto`), or the hero file name;
     /// an attack keeps its `wp_` (`wp_incubus`: enemy classes have the same names).
     id: []const u8,
-    /// Name in the game, UTF-8 ("" — unknown), and its string.tab number.
+    /// Its record's name, UTF-8 ("" — unknown), and its string.tab number.
     title: []const u8,
     name_id: ?i32 = null,
     /// Inventory icon (`spriteFile`) as in the archive.
@@ -36,6 +39,9 @@ pub const Entry = struct {
     weapons: std.ArrayList([]const u8) = .empty,
     /// Enemy class: fighters riding its fighters in the battles.
     riders: std.ArrayList(Rider) = .empty,
+    /// An OpenGorky project's block (archive store.og_src): its path, the class its objects
+    /// are of and its rows name (`characters::grandma`, rules.who).
+    class: []const u8 = "",
 };
 
 /// LinkActor("point", actor) in a level fighter's script (01cy_smokerider.ftr's
@@ -45,13 +51,17 @@ pub const Rider = struct { point: []const u8, act: []const u8 };
 pub const Scene = struct { name: []const u8, uses: u32 = 0 };
 const ScriptFile = struct { archive: []const u8, entry: []const u8, level: []const u8 };
 
-/// Script extensions of level archives (objects with code).
-const script_exts = [_][]const u8{ ".lev", ".are", ".itm", ".ftr", ".hro", ".obs", ".obs_i", ".wpn" };
+/// Script extensions of level archives (objects with code): the one list (the code
+/// checks, the level's scripts).
+pub const script_exts = [_][]const u8{ ".lev", ".are", ".itm", ".ftr", ".hro", ".obs", ".obs_i", ".wpn" };
 
 /// First line of a class made in the editor; names the class it copies.
 pub const copy_mark = "// opengorky-editor: copy of ";
 
 const exit_ids = @import("trigger.zig").exit_labels;
+
+/// The last Catalog.gen given.
+var gens: u64 = 0;
 
 pub const Catalog = struct {
     arena: std.heap.ArenaAllocator,
@@ -75,36 +85,35 @@ pub const Catalog = struct {
     /// Objects the game's scripts make party heroes (`SETHERO("x",1)`,
     /// `HERO_EnableEnumerate("x",1)`): McFadden, Slavsky, BT, Medusa, Hutchens.
     joins: std.ArrayList([]const u8) = .empty,
+    /// Entries read from the game (the ones after it are made in the editor, addCopy).
+    built: usize = 0,
+    /// Another value for every catalog built and every entry added (unique across the
+    /// run, unlike the entries' address): caches over the catalog key on it.
+    gen: u64 = 0,
 
     pub fn deinit(self: *Catalog) void {
         self.arena.deinit();
     }
 
     pub fn build(io: Io, gpa: Allocator, dat: Io.Dir, level_names: []const []const u8) !Catalog {
-        var self: Catalog = .{ .arena = .init(gpa) };
+        gens += 1;
+        var self: Catalog = .{ .arena = .init(gpa), .gen = gens };
         errdefer self.deinit();
         const a = self.arena.allocator();
 
-        var strings_bytes: []u8 = &.{};
-        var strings: og.formats.strtab.Table = .{};
-        defer strings.deinit(gpa);
-        if (archive.Archive.open(io, gpa, dat, "common/lang.dat")) |ar_| {
-            var ar = ar_;
-            defer ar.close(io, gpa);
-            if (ar.find("string.tab")) |e| {
-                strings_bytes = try ar.readAlloc(io, a, e);
-                strings = try og.formats.strtab.parseStrings(gpa, strings_bytes);
-            }
-        } else |_| {}
-        const cyrillic = og.formats.strtab.language(strings) == 5;
+        // The core's texts and records (composition), the entities named from them.
+        og.loaders.loadTexts(io, dat);
+        const cyrillic = og.core.entity.texts.language == 5;
         self.cyrillic = cyrillic;
-        for (exit_ids, &self.exit_labels) |id, *t| t.* = try title(a, strings, @floatFromInt(id), cyrillic);
+        for (exit_ids, &self.exit_labels) |id, *t| t.* = try title(a, og.core.entity.texts.get(id), cyrillic);
+        const list = try entities.scan(io, a, dat, level_names);
+        try entities.fill(list);
 
         {
             var ar = try archive.Archive.open(io, gpa, dat, common_archive);
             defer ar.close(io, gpa);
             for (ar.entries) |*e| {
-                if (!std.ascii.startsWithIgnoreCase(e.name, "scriptlets\\") or !std.ascii.endsWithIgnoreCase(e.name, ".scr")) continue;
+                if (!isSceneEntry(e.name)) continue;
                 try self.scenes.append(a, .{ .name = try a.dupe(u8, e.name["scriptlets\\".len .. e.name.len - 4]) });
                 const text = try ar.readAlloc(io, a, e);
                 try self.noteCalls(a, text);
@@ -112,63 +121,56 @@ pub const Catalog = struct {
             }
             for (ar.entries) |*e| {
                 const base = classBase(e.name) orelse continue;
-                const kind, const id = classify(base) orelse {
-                    if (prefixed(base, "act_", ".ss")) try self.acts.append(a, try a.dupe(u8, base));
-                    continue;
-                };
-                const text = try ar.readAlloc(io, a, e);
-                try self.noteCalls(a, text);
-                // An enemy class names itself only after a look change (pages.setAct).
-                const name_id = if (kind == .enemy or kind == .attack) vars.inherited(Classes{ .io = io, .a = a, .ar = ar }, text, "nameID", 4) else vars.get(text, "nameID");
-                if (kind != .enemy) if (vars.getStr(text, "meshFile")) |m| if (m.len > 0) try addUnique(a, &self.meshes, m);
-                try self.entries.append(a, .{
-                    .kind = kind,
-                    .archive = common_archive,
-                    .entry = try a.dupe(u8, e.name),
-                    .id = try a.dupe(u8, id),
-                    .title = try title(a, strings, name_id, cyrillic),
-                    .name_id = if (name_id) |v| @intFromFloat(v) else null,
-                    .icon = if (kind == .enemy) "" else try a.dupe(u8, vars.getStr(text, "spriteFile") orelse ""),
-                    .base = copyBase(text),
-                });
+                if (entities.classify(base) == null and entities.prefixed(base, "act_", ".ss")) try self.acts.append(a, try a.dupe(u8, base));
             }
+        }
+        for (list) |x| {
+            if (x.kind == .hero) continue;
+            try self.noteCalls(a, x.text);
+            if (x.kind != .enemy) if (model.getStr(x.text, "mesh")) |m| if (m.len > 0) try addUnique(a, &self.meshes, m);
+            try self.entries.append(a, .{
+                .kind = x.kind,
+                .archive = x.archive,
+                .entry = x.entry,
+                .id = x.id,
+                .title = if (x.name_id != null) try title(a, recordName(x), cyrillic) else "",
+                .name_id = x.name_id,
+                .icon = if (x.kind == .enemy) "" else try a.dupe(u8, model.getStr(x.text, "icon") orelse ""),
+                .base = copyBase(x.text),
+            });
         }
         if (archive.Archive.open(io, gpa, dat, "common/sprite.dat")) |ar_| {
             var ar = ar_;
             defer ar.close(io, gpa);
             for (ar.entries) |e| {
-                if (!std.ascii.startsWithIgnoreCase(e.name, "icons\\") or !std.ascii.endsWithIgnoreCase(e.name, ".spr")) continue;
+                if (!isIcon(e.name)) continue;
                 try self.icons.append(a, try a.dupe(u8, e.name["icons\\".len .. e.name.len - 4]));
             }
         } else |_| {}
 
-        // Heroes: the starting three (common gamestart\) and those joining in levels.
+        // Heroes (the starting three of common gamestart\ and those joining in levels, from
+        // the list) and the levels' scenes and fighters' weapons.
         var common = try archive.Archive.open(io, gpa, dat, common_archive);
         defer common.close(io, gpa);
-        const classes: Classes = .{ .io = io, .a = a, .ar = common };
-        var paths: std.ArrayList([]const u8) = .empty;
-        try paths.append(a, common_archive);
-        for (level_names) |n| try paths.append(a, try std.fmt.allocPrint(a, "{s}/other.dat", .{n}));
-        for (paths.items) |p| {
+        const classes: entities.Classes = .{ .io = io, .a = a, .ar = common };
+        for (list) |x| if (x.kind == .hero) try self.entries.append(a, .{
+            .kind = .hero,
+            .archive = x.archive,
+            .entry = x.entry,
+            .id = x.id,
+            .title = if (x.name_id != null) try title(a, recordName(x), cyrillic) else "",
+            .name_id = x.name_id,
+            .ally = model.inherited(classes, x.text, "outside_party", 4) == 1,
+            .base = copyBase(x.text),
+        });
+        for (common.entries) |*e| if (std.ascii.endsWithIgnoreCase(e.name, ".ftr")) try self.noteWeapons(io, a, common, e);
+        for (level_names) |n| {
+            const p = try std.fmt.allocPrint(a, "{s}/other.dat", .{n});
             var ar = archive.Archive.open(io, gpa, dat, p) catch continue;
             defer ar.close(io, gpa);
             for (ar.entries) |*e| {
-                if (p.ptr != common_archive.ptr) try self.noteScenes(io, a, ar, e, p);
+                try self.noteScenes(io, a, ar, e, p);
                 if (std.ascii.endsWithIgnoreCase(e.name, ".ftr")) try self.noteWeapons(io, a, ar, e);
-                if (!std.ascii.endsWithIgnoreCase(e.name, ".hro")) continue;
-                const text = try ar.readAlloc(io, a, e);
-                const file = e.name[if (std.mem.lastIndexOfScalar(u8, e.name, '\\')) |k| k + 1 else 0..];
-                // Battle extras name themselves in their class (medusa.hro → ft_medusa.ss → act_medusa.ss).
-                const name_id = vars.inherited(classes, text, "nameID", 4);
-                try self.entries.append(a, .{
-                    .kind = .hero,
-                    .archive = p,
-                    .entry = try a.dupe(u8, e.name),
-                    .id = try a.dupe(u8, file[0 .. file.len - 4]),
-                    .title = try title(a, strings, name_id, cyrillic),
-                    .name_id = if (name_id) |v| @intFromFloat(v) else null,
-                    .ally = vars.inherited(classes, text, "avoidEnumerate", 4) == 1,
-                });
             }
         }
         for (self.entries.items) |*e| if (e.ally) for (self.joins.items) |j| {
@@ -199,6 +201,7 @@ pub const Catalog = struct {
                 return std.ascii.lessThanIgnoreCase(x.name, y.name);
             }
         }.f);
+        self.built = self.entries.items.len;
         return self;
     }
 
@@ -234,7 +237,7 @@ pub const Catalog = struct {
 
     /// Records the objects script `text` makes party heroes (`joins`).
     fn noteJoins(self: *Catalog, a: Allocator, text: []const u8) !void {
-        for (try vars.joins(a, text)) |n| try addUnique(a, &self.joins, n);
+        for (try model.joins(a, text)) |n| try addUnique(a, &self.joins, n);
     }
 
     /// Records level script `e` if it starts scenes, counting the calls per scene.
@@ -308,13 +311,25 @@ pub const Catalog = struct {
         }
     }
 
-    /// Adds a class made in the editor (`classes\<prefix><id><ext>` copying `base`).
-    pub fn addCopy(self: *Catalog, of: Entry, id: []const u8) !Entry {
+    /// Adds an entry made in the editor copying `of`: a class (`classes\<prefix><id><ext>`)
+    /// or a hero (`<id>.hro` of level archive `into`, or common's `gamestart\`).
+    pub fn addCopy(self: *Catalog, of: Entry, id: []const u8, into: []const u8, name_id: ?i32) !Entry {
         const a = self.arena.allocator();
-        const entry = try std.fmt.allocPrint(a, "classes\\{s}{s}{s}", .{ prefix(of.kind), id, ext(of.kind) });
-        const e: Entry = .{ .kind = of.kind, .archive = of.archive, .entry = entry, .id = try a.dupe(u8, id), .title = of.title, .name_id = of.name_id, .icon = of.icon, .base = of.base orelse of.id, .weapons = of.weapons, .riders = of.riders };
+        const entry = if (of.kind != .hero)
+            try std.fmt.allocPrint(a, "classes\\{s}{s}{s}", .{ prefix(of.kind), id, ext(of.kind) })
+        else
+            try std.fmt.allocPrint(a, "{s}{s}.hro", .{ if (std.mem.eql(u8, into, common_archive)) "gamestart\\" else "", id });
+        const e: Entry = .{ .kind = of.kind, .archive = into, .entry = entry, .id = try a.dupe(u8, id), .title = of.title, .name_id = name_id, .icon = of.icon, .base = of.base orelse of.id, .weapons = of.weapons, .riders = of.riders };
         try self.entries.append(a, e);
+        gens += 1;
+        self.gen = gens;
         return e;
+    }
+
+    /// The entry of file `entry` of archive `path` (the entry name any case; the first).
+    pub fn byKey(self: *const Catalog, path: []const u8, entry: []const u8) ?usize {
+        for (self.entries.items, 0..) |e, i| if (std.mem.eql(u8, e.archive, path) and std.ascii.eqlIgnoreCase(e.entry, entry)) return i;
+        return null;
     }
 
     pub fn has(self: *const Catalog, kind: Kind, id: []const u8) bool {
@@ -323,13 +338,24 @@ pub const Catalog = struct {
     }
 };
 
+/// An icon sprite of sprite.dat (`icons\<name>.spr`).
+pub fn isIcon(entry: []const u8) bool {
+    return std.ascii.startsWithIgnoreCase(entry, "icons\\") and std.ascii.endsWithIgnoreCase(entry, ".spr");
+}
+
+/// A scene file of common.dat (`scriptlets\<name>.scr`); not codecheck.isScene (a
+/// code view's title).
+pub fn isSceneEntry(entry: []const u8) bool {
+    return std.ascii.startsWithIgnoreCase(entry, "scriptlets\\") and std.ascii.endsWithIgnoreCase(entry, ".scr");
+}
+
 pub fn prefix(k: Kind) []const u8 {
     return switch (k) {
         .enemy => "ft_",
         .weapon => "cw_",
         .ammo => "ca_",
         .item => "ci_",
-        // Attacks are not copied (pages.copyEntry); their id has it.
+        // Attacks are not copied (entries.copyEntry); their id has it.
         .attack, .hero => "",
     };
 }
@@ -338,36 +364,10 @@ pub fn ext(k: Kind) []const u8 {
     return if (k == .enemy) ".ss" else if (k == .hero) ".hro" else ".s";
 }
 
-/// Kind and id of class file `base` (`ft_garcia.ss` → enemy `garcia`); null — not an entry.
-fn classify(base: []const u8) ?struct { Kind, []const u8 } {
-    const kind: Kind = if (prefixed(base, "ft_", ".ss")) .enemy else if (prefixed(base, "cw_", ".s")) .weapon else if (prefixed(base, "ca_", ".s")) .ammo else if (prefixed(base, "ci_", ".s")) .item else if (prefixed(base, "wp_", ".ss") or prefixed(base, "wp_", ".s")) .attack else return null;
-    const dot = std.mem.lastIndexOfScalar(u8, base, '.').?;
-    return .{ kind, if (kind == .attack) base[0..dot] else base[std.mem.indexOfScalar(u8, base, '_').? + 1 .. dot] };
-}
-
-test classify {
-    const t = std.testing;
-    try t.expectEqual(Kind.attack, classify("wp_incubus.ss").?[0]);
-    try t.expectEqualStrings("wp_incubus", classify("wp_incubus.ss").?[1]);
-    try t.expectEqualStrings("incubus", classify("ft_incubus.ss").?[1]);
-    try t.expectEqualStrings("pistol", classify("cw_pistol.s").?[1]);
-    try t.expectEqualStrings("wp_timebomb_explode", classify("wp_timebomb_explode.s").?[1]);
-    try t.expect(classify("act_incubus.ss") == null);
-    try t.expect(classify("wp_.ss") == null);
-    // wp_incubus.ss as the game has it: its name and class, no function around them.
-    const text = "  nameID=1070;\r\n  funcID=3; // Take\r\n\r\n    two_handed=2;\r\n\r\n    classType = 1008;\r\n    max_damage = 50;\r\n    type = 6;\r\n";
-    try t.expectEqual(1070, vars.get(text, "nameID").?);
-    try t.expectEqual(1008, vars.get(text, "classType").?);
-}
-
 /// `classes\x` → `x`.
 fn classBase(name: []const u8) ?[]const u8 {
     if (!std.ascii.startsWithIgnoreCase(name, "classes\\")) return null;
     return name["classes\\".len..];
-}
-
-fn prefixed(s: []const u8, pre: []const u8, suffix: []const u8) bool {
-    return std.ascii.startsWithIgnoreCase(s, pre) and std.ascii.endsWithIgnoreCase(s, suffix) and s.len > pre.len + suffix.len;
 }
 
 fn copyBase(text: []const u8) ?[]const u8 {
@@ -375,30 +375,83 @@ fn copyBase(text: []const u8) ?[]const u8 {
     const rest = text[copy_mark.len..];
     const end = std.mem.indexOfAny(u8, rest, "\r\n") orelse rest.len;
     const name = rest[0..end];
+    // A hero's mark names its file (`bt.hro`), a class's has its prefix (`ft_garcia.ss`).
+    if (std.ascii.endsWithIgnoreCase(name, ".hro")) return name[0 .. name.len - 4];
     const u = std.mem.indexOfScalar(u8, name, '_') orelse return null;
     const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return null;
     return if (dot > u) name[u + 1 .. dot] else null;
 }
 
-/// common/other.dat's `classes\\` as `vars.inherited` reads them.
-const Classes = struct {
-    io: Io,
-    a: Allocator,
-    ar: archive.Archive,
-    pub fn read(self: Classes, name: []const u8) ?[]const u8 {
-        var buf: [128]u8 = undefined;
-        const e = self.ar.find(std.fmt.bufPrint(&buf, "classes\\{s}", .{name}) catch return null) orelse return null;
-        return self.ar.readAlloc(self.io, self.a, e) catch null;
-    }
-};
+test copyBase {
+    try std.testing.expectEqualStrings("garcia", copyBase(copy_mark ++ "ft_garcia.ss\r\n#include act_garcia.ss").?);
+    try std.testing.expectEqualStrings("bt", copyBase(copy_mark ++ "bt.hro\r\n#include Fighter.s").?);
+    try std.testing.expect(copyBase("#include Fighter.s") == null);
+}
 
 fn addUnique(a: Allocator, list: *std.ArrayList([]const u8), s: []const u8) !void {
     for (list.items) |x| if (std.ascii.eqlIgnoreCase(x, s)) return;
     try list.append(a, try a.dupe(u8, s));
 }
 
-fn title(a: Allocator, strings: og.formats.strtab.Table, id: ?f32, cyrillic: bool) ![]const u8 {
-    const raw = strings.get(@intFromFloat(id orelse return "")) orelse return "";
+/// The core record's name of `x`.
+fn recordName(x: entities.Entity) ?[]const u8 {
+    const e = og.core.entity;
+    const n = switch (entities.coreKind(x.kind)) {
+        .hero => e.heroOf(x.who).name,
+        .enemy => e.enemyOf(x.who).name,
+        .weapon => e.weaponOf(x.who).name,
+        .item => e.itemOf(x.who).name,
+        .other => "",
+    };
+    return if (n.len > 0) n else null;
+}
+
+/// An OpenGorky project's blocks as the catalog's entries:
+/// the archetypes of `src/characters/`, `weapons/`, `items/` (a file's main block; a
+/// `fighter` a hero when the game's `party` names it), in path order, instead of the
+/// installed game's classes; named by their classic_id's text.
+pub fn useOg(self: *Catalog, st: *store_mod.Store) void {
+    const a = self.arena.allocator();
+    self.entries.clearRetainingCapacity();
+    gens += 1;
+    self.gen = gens;
+    defer self.built = self.entries.items.len;
+    const og_src = store_mod.og_src;
+    const party = if (st.file(og_src, "game.ogs")) |g| st.text(g) else |_| "";
+    for (st.listing(a, og_src, null, false)) |path| {
+        const dir = path[0 .. std.mem.indexOfScalar(u8, path, '/') orelse continue];
+        if (!std.mem.eql(u8, dir, "characters") and !std.mem.eql(u8, dir, "weapons") and !std.mem.eql(u8, dir, "items")) continue;
+        const f = st.file(og_src, path) catch continue;
+        var diag: og.script.ogs.parser.Diagnostic = .{};
+        const u = og.script.ogs.parser.parse(a, a.dupe(u8, st.text(f)) catch continue, path, &diag) catch continue;
+        const m, const e = for (u.modules) |*m| {
+            if (m.entities.len > 0) break .{ m, &m.entities[0] };
+        } else continue;
+        const class = if (m.path.len > 0) std.fmt.allocPrint(a, "{s}::{s}", .{ m.path, e.name }) catch continue else e.name;
+        const in_party = std.mem.indexOf(u8, party, class) != null;
+        // A hero block (`hero sullivan`) is the party's; a location's (`hero bt`) none here.
+        const kind: Kind = if (std.mem.eql(u8, e.kind, "fighter") or (std.mem.eql(u8, e.kind, "hero") and in_party))
+            (if (in_party) .hero else .enemy)
+        else if (std.mem.eql(u8, e.kind, "weapon")) .weapon else if (std.mem.eql(u8, e.kind, "item")) (if (isAmmo(e)) .ammo else .item) else continue;
+        var id: ?i32 = null;
+        for (e.fields) |x| if (std.mem.eql(u8, x.name, "classic_id") and x.value.kind == .lit and x.value.kind.lit == .int) {
+            id = x.value.kind.lit.int;
+        };
+        // No classic_id (a converted project's): the number the OG reader made it (its path).
+        if (id == null) id = og.core.entity.idOf(class);
+        const t = if (id) |n| title(a, og.core.entity.texts.get(n), self.cyrillic) catch "" else "";
+        self.entries.append(a, .{ .kind = kind, .archive = og_src, .entry = path, .id = e.name, .title = t, .name_id = id, .class = class }) catch {};
+    }
+}
+
+/// An item block of ammo (`type = ammo`, its own; what a weapon's `ammo` names).
+fn isAmmo(e: *const og.script.ir.Entity) bool {
+    for (e.fields) |x| if (std.mem.eql(u8, x.name, "kind") and x.value.kind == .word) return std.mem.eql(u8, x.value.kind.word, "ammo");
+    return false;
+}
+
+fn title(a: Allocator, name: ?[]const u8, cyrillic: bool) ![]const u8 {
+    const raw = name orelse return "";
     return if (cyrillic) cp1251(a, raw) else a.dupe(u8, std.mem.trim(u8, raw, " \t\r"));
 }
 

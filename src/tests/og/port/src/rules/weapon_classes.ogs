@@ -1,0 +1,65 @@
+WeaponClass(name = "pistol", classic_id = 1, rolls_to_hit = 1, ignites_soaked = 1);
+WeaponClass(name = "rifle", classic_id = 2, rolls_to_hit = 1, ignites_soaked = 1);
+WeaponClass(name = "dartgun", classic_id = 3, rolls_to_hit = 1, effect = "sleep");
+WeaponClass(
+    name = "flame_thrower",
+    classic_id = 4,
+    effect = "burn",
+    recharge = 3,
+    ignites_soaked = 1,
+);
+WeaponClass(name = "rocket_launcher", classic_id = 5, ignites_soaked = 1);
+WeaponClass(name = "ion_rifle", classic_id = 6, recharge = 4, kind = "energy");
+WeaponClass(name = "blaster", classic_id = 7, recharge = 3, kind = "energy");
+WeaponClass(name = "satellite", classic_id = 8, kind = "satellite");
+WeaponClass(name = "time_bomb", classic_id = 9, ignites_soaked = 1, kind = "time_bomb");
+WeaponClass(name = "grenade", classic_id = 11, ignites_soaked = 1);
+WeaponClass(name = "throwing_knife", classic_id = 12, rolls_to_hit = 1);
+WeaponClass(name = "chaingun", classic_id = 13, ignites_soaked = 1);
+WeaponClass(name = "shotgun", classic_id = 14, rolls_to_hit = 1, ignites_soaked = 1);
+WeaponClass(name = "molotov", classic_id = 15, effect = "burn", ignites_soaked = 1);
+WeaponClass(
+    name = "napalm_launcher",
+    classic_id = 16,
+    effect = "burn",
+    ignites_soaked = 1,
+    kind = "napalm",
+);
+WeaponClass(name = "barrel_blast", classic_id = 17, ignites_soaked = 1, kind = "barrel");
+WeaponClass(name = "decoy", classic_id = 18, kind = "decoy");
+WeaponClass(
+    name = "nitrogen_thrower",
+    classic_id = 19,
+    effect = "freeze",
+    recharge = 3,
+    kind = "nitrogen",
+);
+WeaponClass(name = "bottle", classic_id = 20, effect = "soak");
+WeaponClass(name = "matches", classic_id = 21, ignites_soaked = 1);
+WeaponClass(name = "stun_bomb", classic_id = 22, effect = "sleep");
+WeaponClass(name = "gas_grenade", classic_id = 23, effect = "gas");
+WeaponClass(name = "shocker", classic_id = 24, effect = "sleep", recharge = 4);
+WeaponClass(name = "garcia_long", classic_id = 102, ignites_soaked = 1);
+WeaponClass(name = "invisible", classic_id = 104, effect = "gas");
+WeaponClass(name = "needle", classic_id = 107, effect = "sleep");
+WeaponClass(name = "headnail", classic_id = 115, ignites_soaked = 1);
+WeaponClass(name = "hornet", classic_id = 116, effect = "soak");
+WeaponClass(name = "reverend_insect", classic_id = 121, effect = "freeze");
+WeaponClass(name = "medusa_short", classic_id = 123, effect = "sleep", recharge = 4);
+WeaponClass(name = "invisible_bite", classic_id = 125, effect = "bite");
+WeaponClass(name = "ally_pistol", classic_id = 126, rolls_to_hit = 1, ignites_soaked = 1);
+WeaponClass(name = "ally_rifle", classic_id = 127, rolls_to_hit = 1, ignites_soaked = 1);
+WeaponClass(name = "stinger_long", classic_id = 1005, effect = "sleep", kind = "sleep_ball");
+WeaponClass(name = "guard_long", classic_id = 1013, effect = "sleep");
+WeaponClass(name = "schizo_first", classic_id = 1016, effect = "sleep");
+WeaponClass(name = "messiah_left", classic_id = 1019, kind = "messiah_left");
+WeaponClass(name = "messiah_right", classic_id = 1020, kind = "messiah_right");
+WeaponFlags(weapon = 1031, no_counter = 1);
+WeaponFlags(weapon = 33, no_counter = 1);
+WeaponFlags(weapon = 45, no_counter = 1, silent_frames = 1);
+WeaponFlags(weapon = 1025, no_counter = 1);
+WeaponFlags(weapon = 52, no_counter = 1, shock = 1);
+WeaponFlags(weapon = 34, no_counter = 1);
+WeaponFlags(weapon = 55, no_counter = 1, shock = 1);
+WeaponFlags(weapon = 92, shock = 1);
+WeaponFlags(weapon = 46, sparks = 1);

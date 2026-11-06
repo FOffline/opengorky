@@ -6,3 +6,6 @@ zig-out/
 *.asf
 *.avi
 .DS_Store
+
+# Local tool state.
+.claude/

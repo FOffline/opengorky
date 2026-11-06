@@ -10,7 +10,7 @@ const Viewer = viewer_mod.Viewer;
 const Io = std.Io;
 const og = @import("opengorky");
 const c = @import("sdl");
-const Image = og.formats.image.Image;
+const Image = og.image.Image;
 
 /// Settings (`options.cfg` next to the saves): "music 75" etc.
 pub fn loadOptions(self: *Viewer, gains: *[3]f32) void {
@@ -47,8 +47,8 @@ pub fn saveOptions(self: *Viewer, gains: *const [3]f32) void {
         @as(u32, @intFromFloat(@round(gains[0] * 100))), @as(u32, @intFromFloat(@round(gains[1] * 100))), @as(u32, @intFromFloat(@round(gains[2] * 100))),
         @intFromBool(self.shadows),                      @as(u32, @intFromFloat(@round(self.gamma))),
     }) catch return;
-    Io.Dir.cwd().createDirPath(self.io, dir) catch return;
-    Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = data }) catch |err| std.log.warn("options: {t}", .{err});
+    Io.Dir.cwd().createDirPath(self.io, dir) catch |err| return std.log.warn("options: {t}", .{err});
+    config.writeAtomic(self.io, path, data) catch |err| std.log.warn("options: {t}", .{err});
 }
 pub fn slotPath(self: *Viewer, buf: []u8, slot: usize) ?[]const u8 {
     const dir = self.saves_dir orelse return null;
@@ -145,13 +145,13 @@ pub fn saveGame(self: *Viewer, slot: usize, name: []const u8) !void {
         if (self.show_debug) l.world.out.message = "Cannot save during a battle";
         return;
     }
-    var sv: og.save.Save = .init(self.gpa);
+    var sv: og.world.saved.Save = .init(self.gpa);
     defer sv.deinit();
     try self.game.snapshot(&sv);
     sv.name = name;
     var text: Io.Writer.Allocating = .init(self.gpa);
     defer text.deinit();
-    try sv.write(&text.writer);
+    try og.compose.save.write(&sv, &text.writer);
     var buf: [512]u8 = undefined;
     const path = slotPath(self, &buf, slot) orelse return;
     if (self.saves_dir) |d| try Io.Dir.cwd().createDirPath(self.io, d);

@@ -6,13 +6,14 @@ const game = @import("../game.zig");
 const control = @import("../combat.zig").control;
 const world_mod = @import("../state.zig").world;
 const World = world_mod.World;
+const Mouse = @import("../input.zig").mouse.Mouse;
 const rules = @import("../battle.zig").rules;
 const inventory = @import("../inventory.zig");
 const common = @import("common.zig");
 const Cmd = common.Cmd;
 const Effect = common.Effect;
 
-pub fn run(c: Cmd, w: *World, _: []const u8, it: *common.Args, out: *std.Io.Writer) !Effect {
+pub fn run(c: Cmd, w: *World, mouse: *Mouse, _: []const u8, it: *common.Args, out: *std.Io.Writer) !Effect {
     const eq = std.ascii.eqlIgnoreCase;
     switch (c) {
         .give => {
@@ -103,7 +104,7 @@ pub fn run(c: Cmd, w: *World, _: []const u8, it: *common.Args, out: *std.Io.Writ
             const o = w.rt.findObject(it.next() orelse "") orelse return common.say(out, "no such item\n", .{});
             const hero = w.actorObject(fields.owner(o)) orelse return common.say(out, "item has no hero owner\n", .{});
             inventory.equipment.toHand(w, hero, o);
-            w.mouse.use = o;
+            mouse.use = o;
             if (w.battle) |*b| control.refreshSelection(b, w);
             try out.print("{s} picks {s}\n", .{ hero.name, o.name });
         },

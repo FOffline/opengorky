@@ -1,0 +1,36 @@
+battle "01__port_citadel" {
+    var int turns = 0;
+    camera = Camera(
+        perspective = true,
+        near_plane = 0.8,
+        far_plane = -6.7061,
+        eye_x = -3.135,
+        eye_y = 1.651,
+        eye_z = 12.766,
+        target_x = -10.367,
+        target_y = -5.308,
+        target_z = 8.261,
+        fov = 48,
+        floor_z = -1.89,
+    );
+    placement = [Place(who = @Sullivan, tile = [1, 1])];
+    mode = 2;
+    boss = true;
+    attach Reinforcements(waves = [Wave(turn = 3, spawn = [Spawn(who = ~c"characters::grandma_child", tile = [5, 2])]), Wave(turn = 5, side = enemy, spawn = [Spawn(who = ~c"characters::grandma_child", tile = [4, 2]), Spawn(who = ~c"characters::grandma_child", tile = [3, 2])])]);
+    fighter grandma: characters::grandma {
+        tile = [2, 9];
+    }
+    fighter grandma_child1: characters::grandma_child {
+        hp = 40;
+        tile = [2, 8];
+    }
+    fighter grandma_child2: characters::grandma_child {
+        tile = [4, 8];
+        weapon gun: weapons::grandma_mad {
+            place = hand;
+        }
+    }
+    fn OnTurnStart(side, turn) {
+        turns += 1;
+    }
+}

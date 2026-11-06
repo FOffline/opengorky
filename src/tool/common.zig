@@ -4,12 +4,14 @@ const std = @import("std");
 const Io = std.Io;
 const og = @import("opengorky");
 
-/// `<game>/dat`; the game dir is closed right away.
-pub fn openDat(io: Io, game_dir: []const u8, opts: Io.Dir.OpenOptions) !Io.Dir {
-    var game = try Io.Dir.cwd().openDir(io, game_dir, .{});
-    defer game.close(io);
-    og.formats.adjust.load(io, game);
-    return game.openDir(io, "dat", opts);
+/// `<game>/dat`, read as its manifest says (loaders.openGame: the OpenGorky layer and
+/// rules) with the core's texts and records (loaders.loadCore); the game dir is closed
+/// right away.
+pub fn openDat(io: Io, game_dir: []const u8) !Io.Dir {
+    var game = try og.loaders.openGame(io, game_dir);
+    game.root.close(io);
+    og.loaders.loadCore(io, game.dat);
+    return game.dat;
 }
 
 /// "X,Y" — a background point.

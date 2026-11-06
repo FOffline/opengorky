@@ -12,9 +12,6 @@ const Model = model_cache.Model;
 const route = @import("route.zig");
 const areas = @import("areas.zig");
 const floor_mod = @import("floor.zig");
-const crt_rand = @import("../crt_rand.zig");
-const runtime = @import("../script.zig").runtime;
-const Runtime = runtime.Runtime;
 
 /// Animation frame sounds (0x44fb74…0x44fbe8): reaching a marked frame plays the sound at
 /// the actor; several marks on one frame pick one at random.
@@ -71,7 +68,8 @@ pub fn animCues(self: *World, o: *Object, a: *actor_mod.Actor, m: *const Model) 
             for (an.sounds) |cue| if (cue.frame == at) {
                 if (pick == 0) {
                     const name = std.fs.path.stem(cue.name);
-                    if (!std.ascii.eqlIgnoreCase(name, "silents")) self.out.sound(self.gpa, name, self.screenPos(o));
+                    const silence = @import("../core.zig").modules.ui().sounds.silence;
+                    if (silence.len == 0 or !std.ascii.eqlIgnoreCase(name, silence)) self.out.sound(self.gpa, name, self.screenPos(o));
                     break;
                 }
                 pick -= 1;
@@ -186,11 +184,30 @@ pub fn placeAtPoint(self: *World, o: *Object, area_name: []const u8, index: i32,
     a.placed = true;
 }
 
+/// Actor onto battle grid tile `x`,`y` (PlaceActor's tile form, 0x48e890): tile corner at
+/// (centerX, centerY), tiles of xSize×ySize along world X and Y, floor at centerZ; facing
+/// `dir` eighths of a turn. The queue is not reset. No combat grid: nothing.
+pub fn placeOnTile(self: *World, o: *Object, x: f32, y: f32, dir: f32) void {
+    const cm = self.map.combat orelse return;
+    // Shift to the block centre by charSize (0x499ce0): 1 → 0.5, 4 → 1, 9 → 1.5.
+    const off: f32 = switch (fields.charSize(o)) {
+        1 => 0.5,
+        4 => 1.0,
+        9 => 1.5,
+        else => 0,
+    };
+    const wp = cm.toWorld(x + off, y + off);
+    fields.setPos(o, .{ wp[0], wp[1], cm.center[2] });
+    // dir·π/4 (0x48e90a).
+    fields.setAngle(o, dir * std.math.pi / 4.0);
+    world.actorOf(o).placed = true;
+}
+
 /// Actor_QueueJustifyPosition (command 0x24, 0x4240b7…0x42420f): the position moves by
 /// the drawn pose's root bone (+0x2458c, blended during a transition, 0x44fdc0) minus the
 /// current animation's last frame, in model axes (angle + AdjustAngle +0x3200, scale).
 /// The exe reads that frame as matrix [last] without × bones (0x4240e0): kept.
-fn justifyPosition(o: *Object, a: *const actor_mod.Actor, m: *const Model, scale_px: f32) void {
+pub fn justifyPosition(o: *Object, a: *const actor_mod.Actor, m: *const Model, scale_px: f32) void {
     const fr = m.frames;
     if (fr.bones == 0 or fr.frames == 0) return;
     const an = m.anims.find(a.anim) orelse m.anims.find(a.shown.anim) orelse return;
@@ -204,63 +221,4 @@ fn justifyPosition(o: *Object, a: *const actor_mod.Actor, m: *const Model, scale
     const ang = fields.modelAngle(fields.angle(o) + a.angle_offset);
     const p = fields.pos(o);
     fields.setPos(o, .{ p[0] + d[0] * @cos(ang) - d[2] * @sin(ang), p[1] + d[0] * @sin(ang) + d[2] * @cos(ang), p[2] + d[1] });
-}
-
-test "justify position: drawn root bone minus the last frame's (0x4240b7)" {
-    const anim = @import("../formats.zig").anim;
-    const gpa = std.testing.allocator;
-    var o: Object = .{ .name = "t", .class = undefined };
-    defer o.vars.deinit(gpa);
-    inline for (.{ "x", "y", "z", "angle" }) |n|
-        try o.declare(gpa, n, .{ .type = .float, .value = .{ .float = 0 } });
-    // Angle π/2: model axes are world axes (modelAngle 0).
-    fields.setAngle(&o, std.math.pi / 2.0);
-    var mats = [_][12]f32{ @splat(0), @splat(0) };
-    mats[0][9] = 3; // drawn frame 0: root x 3, height 1
-    mats[0][10] = 1;
-    mats[1][11] = 2; // last frame 1: root z 2
-    var anims = [_]anim.Animation{.{ .name = "idle", .first = 0, .last = 1, .speed = 0, .sounds = &.{} }};
-    var m: Model = undefined;
-    m.anims = .{ .arena = undefined, .items = &anims };
-    m.frames = .{ .frames = 2, .bones = 1, .matrices = &mats, .extra = &.{} };
-    // Idle just started with a transition: drawn pose = blend start (frame 0).
-    const a: actor_mod.Actor = .{ .anim = "idle", .anim_hold = actor_mod.Actor.blend_ticks, .blend_from = 0 };
-    justifyPosition(&o, &a, &m, 2);
-    const p = fields.pos(&o);
-    try std.testing.expectApproxEqAbs(@as(f32, 6), p[0], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, -4), p[1], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 2), p[2], 1e-4);
-}
-
-test "reversed animation sounds follow the shown frame (0x44fb92)" {
-    const anim = @import("../formats.zig").anim;
-    var rt: Runtime = .init(std.testing.allocator, .{ .ctx = undefined, .fetch = undefined });
-    defer rt.deinit();
-    var cls: @import("../script.zig").object.Class = .{ .name = "a.aba", .parent = null };
-    try cls.vars.appendSlice(rt.arena(), &.{
-        .{ .type = .float, .name = "x", .line = 0 },
-        .{ .type = .float, .name = "y", .line = 0 },
-        .{ .type = .float, .name = "z", .line = 0 },
-    });
-    const o = try rt.createObject("a", &cls);
-    var cues = [_]anim.SoundCue{.{ .name = "step.wav", .frame = 13, .volume = 0 }};
-    var anims = [_]anim.Animation{.{ .name = "go", .first = 10, .last = 13, .speed = 0, .sounds = &cues }};
-    var m: model_cache.Model = undefined;
-    m.anims = .{ .arena = undefined, .items = &anims };
-    var w: World = undefined;
-    w.gpa = std.testing.allocator;
-    crt_rand.global = .{};
-    w.out.sound_events = .empty;
-    w.cam = .ortho;
-    defer w.out.sound_events.deinit(w.gpa);
-    // Reversed, the first shown frame is last (13), which has the sound.
-    var a: actor_mod.Actor = .{ .anim = "go", .reverse = true, .loop = false };
-    try animCues(&w, o, &a, &m);
-    try std.testing.expectEqual(1, w.out.sound_events.items.len);
-    // Then 12, 11, 10 — silent.
-    for (1..4) |t| {
-        a.anim_ticks = @floatFromInt(t);
-        try animCues(&w, o, &a, &m);
-    }
-    try std.testing.expectEqual(1, w.out.sound_events.items.len);
 }
