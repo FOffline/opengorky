@@ -494,11 +494,16 @@ fn fillEntities() !void {
     // The levels' own objects of no archetype by `<level>/<name>` (world/start.zig's identity).
     for (p.units) |u| for (u.modules) |*m| for (m.entities) |*lv| if (isLevelKind(lv.kind)) for (lv.children) |*c| {
         if (c.base.len > 0 or !idKind(c.kind)) continue;
-        const id = idIn(.{ .m = m, .e = c }, lv.name, 0) orelse continue;
         var kb: [256]u8 = undefined;
         const key = levelKey(&kb, lv.name, c.name) orelse continue;
+        // `import "03_museum/card";` (another level's object) or `import weapons::shotgun;` (an
+        // archetype: the scene's shotgun is the weapon's own, its rows, HeroAttack and fx, too).
+        if (fieldValue(c, "same_as")) |v| {
+            const main: ?[]const u8 = if (v.kind == .lit and v.kind.lit == .string) v.kind.lit.string else if (v.kind == .word) script.ir.Import.of(v.kind.word).path else null;
+            if (main) |x| try rules.mains.put(ma, try ma.dupe(u8, key), try ma.dupe(u8, x));
+        }
+        const id = idIn(.{ .m = m, .e = c }, lv.name, 0) orelse continue;
         try list.append(a, .{ .kind = .other, .who = .{ .id = id, .class = try a.dupe(u8, key) } });
-        if (fieldValue(c, "same_as")) |v| if (v.kind == .lit and v.kind.lit == .string) try rules.mains.put(ma, try ma.dupe(u8, key), try ma.dupe(u8, v.kind.lit.string));
     };
     try entity.fill(list.items);
     // The heroes' order in the party (game.zig keepSelectable): the game block's list.

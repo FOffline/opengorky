@@ -225,6 +225,9 @@ pub const Battle = struct {
     /// EndTurnGlobal from after_select_gui (battle still in the appear phase): the
     /// heroes' first turn is skipped (04__city_mfd).
     skip_turn: bool = false,
+    /// EndTurnGlobal during a hero's action (the exe's end-turn GUI mode 0x64fd24, its
+    /// tick 0x454d60 waits for the heroes): the turn ends once the action is over.
+    end_turn_due: bool = false,
     /// CombatEnemiesAppear hook at the end of the appearance, only at battle start.
     started: bool = false,
     /// GUI_SelectMode("GUI_Staging") from after_select_gui: the battle starts as an

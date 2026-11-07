@@ -17,6 +17,7 @@ const probe_cmd = @import("probe.zig");
 const scenes_cmd = @import("scenes.zig");
 const scripts_cmd = @import("scripts.zig");
 const roundtrip_cmd = @import("roundtrip.zig");
+const eager_cmd = @import("eager.zig");
 const liftcheck_cmd = @import("liftcheck.zig");
 const convert_cmd = @import("convert.zig");
 const convertcheck_cmd = @import("convertcheck.zig");
@@ -37,6 +38,7 @@ const commands = [_]Command{
     .{ .name = "rules-dump", .min = 1, .help = "<game-dir> [out-dir]   the rules in force (built-ins; an OpenGorky project's own) as rules\\*.ss: printed, or one file each into out-dir", .run = rulesDump },
     .{ .name = "scripts", .min = 1, .help = "<game-dir> [--api]   parse all scripts, check #include/#inherit; --api: engine builtins", .run = scripts },
     .{ .name = "roundtrip", .min = 1, .help = "<game-dir>   every script printed back by the Classic printer parses to the same tree; every class function imported to IR, exported unchanged, printed from IR and imported back, and exported after each test mutation; counts of constructs and exe quirks", .run = roundtrip },
+    .{ .name = "eager", .min = 1, .help = "<game-dir>   every class of every archive loaded and each function compiled to IR at once: the time, the incomplete functions, what the IR leaves to run time", .run = eager },
     .{ .name = "og-roundtrip", .min = 1, .help = "<project-dir>   an OpenGorky project's src/*.ogs (not src/assets) read as one model and written back by the OG writer: the same bytes, each file read back the same IR", .run = ogRoundtrip },
     .{ .name = "convert", .min = 2, .help = "<game-dir> <out-dir> [--game <installed-game>]   the game converted into a new OpenGorky project: data blocks, looks, components, scenes, dialogs, rules (--game: <game-dir> is a modded copy of the installed game, its new and changed assets go to src/assets/); written by the OG writer, the manifest last; converted twice (the same bytes) and built (no errors)\n  gorky-tool convert <game-dir> --code [--stats]   every class function converted to OG Script: texts parsed and linked as one program, each function run as Classic IR and as its translation on the same inputs (results, variables, builtin calls the same); the texts (--stats: only the counts) and the classic:: forms left", .run = convert },
     .{ .name = "convert-check", .min = 2, .help = "<game-dir> <project>   every location of the game and of its converted project (folder or dist/<id>.ogp) started + 10 ticks: each Classic object there, enabled alike, its variables and animation data the same; the differences listed and counted", .run = convertCheck },
@@ -433,6 +435,10 @@ fn ogPlay(c: Ctx) !void {
     for (c.args[5..]) |x| try argv.append(a, x);
     var child = try std.process.spawn(c.io, .{ .argv = argv.items });
     if (!(try child.wait(c.io)).success()) return error.ViewerFailed;
+}
+
+fn eager(c: Ctx) !void {
+    return eager_cmd.run(c.io, c.gpa, c.out, c.args[2]);
 }
 
 fn roundtrip(c: Ctx) !void {

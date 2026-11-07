@@ -131,6 +131,10 @@ fn tickPhase(self: *Battle, w: *World) !void {
             try attack.stepPending(self, w);
             if (self.pending != .none) return;
             if (try turns.ended(self, w)) return;
+            if (self.end_turn_due) {
+                self.end_turn_due = false;
+                if (self.phase == .player) return turns.endTurn(self, w);
+            }
             switch (self.phase) {
                 .enemy => {
                     if (turns.startCounter(self, w)) return;

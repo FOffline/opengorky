@@ -173,6 +173,9 @@ pub fn enterSafeCode(self: *World, code: i32) !void {
 
 /// The hero arrived at an area or item: run its function.
 pub fn runInteraction(self: *World) !void {
+    if (self.act.acting) |h| if (!stillActing(self, h)) {
+        self.act.acting = null;
+    };
     const it = self.act.interaction orelse return;
     if (world.actorOf(it.hero).busy()) return;
     self.act.interaction = null;
@@ -180,6 +183,9 @@ pub fn runInteraction(self: *World) !void {
     // 0x68b154 not empty or the dialogue window 0x64ef40 on top).
     if (self.scene.runner != null) return;
     self.scene.last_action_hero = it.hero.name;
+    // An action (not leaving the level, not the examine menu: a click beside it closes it)
+    // holds the player's clicks until it is over.
+    if (it.mode != .level_switch and it.mode != .examine) self.act.acting = it.hero;
     if (it.use) |item| {
         if (try hooks.itemUse(self, it.hero, item, it.area)) return;
         const args = [_]Value{ .{ .string = item.name }, .{ .string = it.hero.name } };
@@ -196,6 +202,23 @@ pub fn runInteraction(self: *World) !void {
     }
 }
 
+/// The action `hero` started is still going: its animations or walk (a script's), a
+/// window it opened (box contents, safe keypad, a box about to open) or a scene or
+/// dialogue it began.
+fn stillActing(self: *World, hero: *Object) bool {
+    return world.actorOf(hero).busy() or self.act.exploring != null or self.act.safe_box != null or
+        self.act.pending_explore != null or self.scene.runner != null or self.scene.queue.items.len > 0;
+}
+
+/// The player's clicks wait: an action the player started is not over (`Act.acting`; checked
+/// now, not at the next tick's runInteraction, so the click right as it ends goes through).
+pub fn locked(self: *World) bool {
+    const h = self.act.acting orelse return false;
+    if (stillActing(self, h)) return true;
+    self.act.acting = null;
+    return false;
+}
+
 /// The player's action at background point `bg` (0x451430, 0x4514c0 to examine). Act: another
 /// hero — select; item — walk there; area with WalkPath — follow it; exit — walk there and
 /// LevelSwitch; other area — walk there; elsewhere — walk. Examine: item or area — walk there
@@ -203,8 +226,8 @@ pub fn runInteraction(self: *World) !void {
 /// "Use … on …" (`actAt`). False while a scene has control.
 pub fn playAt(self: *World, bg: [2]f32, examine: bool, use: ?*?*Object) !bool {
     const hero = actingHero(self) orelse return false;
-    // On a ladder: finish climbing first.
-    if (world.actorOf(hero).onPortal()) return true;
+    // On a ladder: finish climbing first; an action under way: finish it first.
+    if (world.actorOf(hero).onPortal() or locked(self)) return true;
     // "Use … on …": walk there and UseItem.
     if (use) |u| if (u.* != null) return actAt(self, bg, 0, use);
     if (!examine) if (walk.heroAt(self, bg)) |other| if (other != hero and self.playerCanSelect(other)) {
@@ -264,8 +287,8 @@ pub fn actAt(self: *World, bg: [2]f32, action: u8, use_slot: ?*?*Object) !bool {
     }
     const hero = actingHero(self) orelse return false;
     // On a ladder: finish climbing first (as playAt); a new path would drop the
-    // transition and leave the hero on blocked cells.
-    if (world.actorOf(hero).onPortal()) return true;
+    // transition and leave the hero on blocked cells. An action under way: as playAt.
+    if (world.actorOf(hero).onPortal() or locked(self)) return true;
     const use = if (use_slot) |u| u.* else null;
     // "Use X on …" (0x450b76…0x450cc4): the target is a ground item or the area under the
     // point; `use_item_N` isn't checked (that's the examine menu, 0x45752c); a target without

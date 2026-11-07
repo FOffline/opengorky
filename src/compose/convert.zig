@@ -499,6 +499,7 @@ const Conv = struct {
         try self.sameAsDiff();
         try self.levelCode();
         try self.ownCode();
+        try self.avengerCode();
         try self.dropEmptyPacks();
         // The exe's special AI scorings as the project's code (AiScoring `script`).
         var sd: parser.Diagnostic = .{};
@@ -1672,6 +1673,60 @@ const Conv = struct {
                 e.own = c;
             };
         }
+    }
+
+    /// A fighter's `abilities = Abilities(avenger = "x")` (the exe's Grandma child, 0x4e08d0)
+    /// as its own code: its OnDeath makes the killer x's target and ends the turn, so x
+    /// strikes at once (0x4e35b0 → 0x45b490). A block with an OnDeath of its own keeps the
+    /// ability (logged).
+    fn avengerCode(self: *Conv) !void {
+        const a = self.a;
+        for (self.modules.items) |*m| for (@constCast(m.entities)) |*e| {
+            if (!std.mem.eql(u8, e.kind, "fighter")) continue;
+            const fi = for (e.fields, 0..) |f, i| {
+                if (std.mem.eql(u8, f.name, "abilities") and f.value.kind == .call) break i;
+            } else continue;
+            const c = e.fields[fi].value.kind.call;
+            const ai = for (c.named, 0..) |n, i| {
+                if (std.mem.eql(u8, n.name, "avenger")) break i;
+            } else continue;
+            const who = schema.text(c.named[ai].value) orelse continue;
+            if (e.own) |o| if (for (o.methods) |f| {
+                if (std.ascii.eqlIgnoreCase(f.name, "OnDeath")) break true;
+            } else false) {
+                try self.line("{s}: has an OnDeath of its own, Abilities avenger kept", .{e.name});
+                continue;
+            };
+            const src = try std.fmt.allocPrint(a, "component C for fighter {{ fn OnDeath(killer) {{ fighter::SetTarget(\"{s}\", killer); battle::EndTurn(); }} }}", .{who});
+            var d: parser.Diagnostic = .{};
+            const f0 = (try parser.parse(a, src, "avenger.ogs", &d)).modules[0].components[0].methods[0];
+            // The ability without `avenger` (none left: no field).
+            const rest = try std.mem.concat(a, ir.Named, &.{ c.named[0..ai], c.named[ai + 1 ..] });
+            if (rest.len == 0) {
+                e.fields = try std.mem.concat(a, ir.Named, &.{ e.fields[0..fi], e.fields[fi + 1 ..] });
+            } else {
+                const x = try a.create(ir.Expr);
+                x.* = e.fields[fi].value.*;
+                x.kind.call.named = rest;
+                const fs = try a.dupe(ir.Named, e.fields);
+                fs[fi].value = x;
+                e.fields = fs;
+            }
+            const nc = try a.create(ir.Component);
+            if (e.own) |o| nc.* = o.* else nc.* = .{ .name = e.name, .module = m.path, .hosts = try a.dupe([]const u8, &.{"fighter"}), .traits = &.{}, .fields = &.{}, .methods = &.{}, .line = e.line, .own = true };
+            const f = try a.create(ir.Fn);
+            f.* = f0.*;
+            f.component = nc;
+            nc.methods = try std.mem.concat(a, *const ir.Fn, &.{ nc.methods, &.{f} });
+            if (e.own) |o| {
+                const cs = try a.dupe(*const ir.Component, m.components);
+                for (cs) |*x| if (x.* == o) {
+                    x.* = nc;
+                };
+                m.components = cs;
+            } else m.components = try std.mem.concat(a, *const ir.Component, &.{ m.components, &.{nc} });
+            e.own = nc;
+        };
     }
 
     /// Each location's and battle's code (its namespace's `Logic`, the class's code) as its
@@ -4481,7 +4536,8 @@ fn scoringFields(a: Allocator, c: ir.Call, out: *std.ArrayList(ir.Named)) !void 
     }
     if (namedArg(c, "script")) |v| if (schema.text(v)) |sname| if (sname.len > 0)
         try out.append(a, .{ .name = "score", .value = try mk(a, .{ .word = sname }) });
-    if (namedArg(c, "wakeful")) |v| if ((schema.int(v) orelse 0) != 0) try out.append(a, .{ .name = "wakeful", .value = try mk(a, .{ .lit = .{ .bool = true } }) });
+    // `wakeful = true` (the rules' bool; 1 in older text).
+    if (namedArg(c, "wakeful")) |v| if ((v.kind == .lit and v.kind.lit == .bool and v.kind.lit.bool) or (schema.int(v) orelse 0) != 0) try out.append(a, .{ .name = "wakeful", .value = try mk(a, .{ .lit = .{ .bool = true } }) });
     if (namedArg(c, "near")) |v| if (schema.text(v)) |n| if (n.len > 0) try out.append(a, .{ .name = "near", .value = try mk(a, .{ .ref = n }) });
 }
 

@@ -144,13 +144,22 @@ pub fn call(rt: *Runtime, inst: *Object, tag: u8, method: []const u8, args: []Va
         // OnDeath(killer): the fighter named `avenger` targets whoever hit it last
         // (+0x24af8; Grandma's child 0x4e08d0). Burning and gas (0x4903d0) strike without
         // an attacker (0x490e9a), so after a death by fire it's the one who set it alight;
-        // walked into fire on its own, nobody.
+        // walked into fire on its own, nobody. Classic: then the turn ends (0x4e35b0 →
+        // 0x45b490, EndTurnGlobal), the avenger strikes at once; an OpenGorky project says
+        // so in its own OnDeath (the converter writes it).
         .avenger => {
             const b = if (w.battle) |*b| b else return null;
             const last = b.fighters.items[b.fighterOf(host) orelse return null].last_attacker;
+            const classic = !@import("../rules.zig").og;
+            var found = false;
             for (b.fighters.items) |*g| if (std.ascii.eqlIgnoreCase(g.obj.name, inst.getString("avenger"))) {
                 g.grandma_target = last;
+                found = true;
+                // As the converted project's fighter::SetTarget notes it (the logs alike).
+                if (classic) battle.note(b, "  {s}: target {s}", .{ g.obj.name, if (last) |t| b.fighters.items[t].obj.name else "-" });
             };
+            // The battle tick ends it once the strike is over (turns.requestEndTurn's way).
+            if (found and classic and b.phase == .player) b.end_turn_due = true;
         },
         // Marks: the battle checks their bit.
         .immobile, .monitor, .no_kill_credit, .pairs, .invisible, .leaves, .no_hands => {},

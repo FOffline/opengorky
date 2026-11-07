@@ -184,7 +184,7 @@ pub fn biBattleNearest(ctx: *anyopaque, _: *Runtime, _: *Object, args: []const V
 /// EndTurnGlobal() (0x4bea10 → 0x45b490): ends the side's turn.
 pub fn biEndTurnGlobal(ctx: *anyopaque, _: *Runtime, _: *Object, _: []const Value) anyerror!Value {
     const w = args_mod.worldOf(ctx);
-    if (w.battle) |*b| try turns.endTurn(b, w);
+    if (w.battle) |*b| try turns.requestEndTurn(b, w);
     return .zero;
 }
 

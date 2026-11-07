@@ -290,6 +290,16 @@ pub fn autoCounter(self: *Battle, w: *World) !void {
     if (best) |aim| try strike.startAttack(self, w, me, f.weapon.?, aim) else self.phase = .enemy;
 }
 
+/// EndTurnGlobal (0x45b490: the end-turn GUI mode on top, 0x454d50): during a hero's
+/// action the turn ends after it (0x454d60 waits for the heroes), else at once.
+pub fn requestEndTurn(self: *Battle, w: *World) !void {
+    if (self.phase == .player and self.pending != .none) {
+        self.end_turn_due = true;
+        return;
+    }
+    try endTurn(self, w);
+}
+
 /// Player turn end (EndTurnGlobal / button): the enemies act. During a counter-
 /// attack, decline it.
 pub fn endTurn(self: *Battle, w: *World) !void {

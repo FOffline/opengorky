@@ -73,6 +73,10 @@ pub const Act = struct {
     /// Open the box window after `ticks` (0x45b04f: after an action that set action 7 with
     /// cnt_itm > 0; from the examine menu after 60 + 30 ticks).
     pending_explore: ?struct { box: *Object, hero: *Object, ticks: u32 } = null,
+    /// The hero carrying out an action the player started (Open, Take, Use…): the player's
+    /// clicks wait until its animations end and the windows it opened close
+    /// (world/actions.zig `locked`).
+    acting: ?*Object = null,
 };
 
 /// Console/debug state.

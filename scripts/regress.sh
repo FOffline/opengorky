@@ -1062,9 +1062,10 @@ events() {
     { fail events "tool failed"; return; }
   grep -q '^component Grandma for fighter' "$TMP/ev/src/components/events.ogs" && grep -q "Grandma()" "$TMP/ev/src/rules/events.ogs" || { fail events "no example in docs/og-script.md §14.1"; return; }
   # Two deaths heard by Grandma alone (n=1 each: a target set, rage at the second), the
-  # third by nobody (she unsubscribed: n=0).
+  # third by nobody (she unsubscribed: n=0). Each death first sets her target in the
+  # child's own OnDeath (the converted avenger: target, then the turn ends).
   seq=$(awk '/^  grandma: target [A-Za-z]/ { printf "t" } /^  grandma: rage 99$/ { printf "R" } /^  emit child_died n=1$/ { printf "e" } /^  emit child_died n=0$/ { printf "0" } /^  emit / && !/n=[01]$/ { printf "?" }' "$TMP/events.log")
-  [ "$seq" = "tetRe0" ] || { fail events "events \"$seq\", expected tetRe0"; return; }
+  [ "$seq" = "ttettRet0" ] || { fail events "events \"$seq\", expected ttettRet0"; return; }
   cmp -s "$TMP/events.log" "$TMP/events.again" || { fail events "the same seed played otherwise"; return; }
   ok events
 }

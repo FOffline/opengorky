@@ -317,6 +317,34 @@ test "selectHero: outside_party heroes are skipped; plays the sound" {
     try std.testing.expectEqualStrings("selecthero", w.out.sound_events.items[w.out.sound_events.items.len - 1].name);
 }
 
+test "an action the player started holds the clicks until it is over; leaving the level does not" {
+    var t: TestGame = undefined;
+    try t.init();
+    defer t.deinit();
+    const w = t.game.world.?;
+    const actions = @import("../world.zig").actions;
+    const actor = @import("../state.zig").world.actorOf(t.hero());
+    w.selected_hero = "Sullivan";
+    actor.placed = true;
+    // The hero arrived and carries the action out (its animation: a delay here): a click
+    // waits, nothing changes.
+    w.act.interaction = .{ .hero = t.hero(), .area = t.level() };
+    try actions.runInteraction(w);
+    actor.delay = 5;
+    try std.testing.expect(actions.locked(w));
+    try std.testing.expect(try actions.playAt(w, .{ 100, 100 }, false, null));
+    try std.testing.expectEqual(0, actor.path.items.len);
+    try std.testing.expect(actions.locked(w));
+    // Over (no animation, no window): the clicks are the player's again.
+    actor.delay = 0;
+    try actions.runInteraction(w);
+    try std.testing.expect(!actions.locked(w));
+    // Leaving the level holds nothing.
+    w.act.interaction = .{ .hero = t.hero(), .area = t.level(), .mode = .level_switch };
+    try actions.runInteraction(w);
+    try std.testing.expect(!actions.locked(w));
+}
+
 test "switchTo: a selected hero not in the new location's party list gives way to its first (0x481ce0)" {
     var t: TestGame = undefined;
     try t.init();
@@ -1464,7 +1492,7 @@ test "OpenGorky project: an archetype's nested blocks (an own one of the same na
         .{ "src/looks/kid.ogs", "module looks { look kid { mesh = \"wnuczek\"; turn_speed = 0.5; walk = [Speed(anim = \"walk\", speed = 3.5)]; idles = [Idle(anim = \"idle1\", weight = 100), Idle(state = 9, anim = \"no\", weight = 1)]; slots = [Slot(name = \"hit\", anim = \"au\")]; } }" },
         .{ "src/characters/kid.ogs", "module characters { fighter kid { look = looks::kid; hp = 5; weapon gun: weapons::stick { place = hand; } } fighter big: kid { hp = 9; } }" },
         .{ "src/weapons/w.ogs", "module weapons { weapon stick { max_damage = 1; } weapon axe { max_damage = 7; } }" },
-        .{ "src/battles/b/battle.ogs", "battle b { camera = Camera(perspective = true, eye_x = 2.5, floor_z = -1); fighter f: characters::big { weapon gun: weapons::axe { place = hand; } } fighter g: characters::kid { mesh = \"own\"; } }" },
+        .{ "src/battles/b/battle.ogs", "battle b { camera = Camera(perspective = true, eye_x = 2.5, floor_z = -1); fighter f: characters::big { weapon gun: weapons::axe { place = hand; } } fighter g: characters::kid { mesh = \"own\"; } weapon spear { import weapons::stick; } }" },
     }) |f| {
         if (std.fs.path.dirname(f[0])) |d| try tmp.dir.createDirPath(io, d);
         try tmp.dir.writeFile(io, .{ .sub_path = f[0], .data = f[1] });
@@ -1474,6 +1502,10 @@ test "OpenGorky project: an archetype's nested blocks (an own one of the same na
     var g: Game = .{ .io = io, .gpa = std.testing.allocator, .worlds = og.factory(), .models = null };
     defer g.deinit();
     const w = try g.open("b", .{}, null);
+    // A level's object importing an archetype (the port's scene shotgun) is that one for the
+    // rules rows (its HeroAttack, fx).
+    og.loadCore();
+    try std.testing.expectEqualStrings("weapons::stick", rules.mains.get("b/spear").?);
     // f's own gun over its archetypes' (the object named as the inherited one), g's the archetype's.
     const fg = w.rt.findObject("f_gun").?;
     try std.testing.expectEqual(7, fg.getInt("max_damage"));
