@@ -18,8 +18,9 @@ pub const Font = Fonts(&.{
     .{ .ttf = @embedFile("font_italic"), .sizes = &.{ 13, 15, 18 } },
 }, 900);
 
-/// A TrueType file and its baked sizes in points; other sizes use the nearest.
-const Face = struct { ttf: []const u8, sizes: []const u16 };
+/// A TrueType file and its baked sizes in points; other sizes use the nearest. `latin`:
+/// ASCII only (a large display size: other letters show as "?"), so it fits the atlas.
+const Face = struct { ttf: []const u8, sizes: []const u16, latin: bool = false };
 
 /// Code point ranges (start, count): ASCII, Latin-1 (×, «»), Cyrillic, punctuation (—, …),
 /// arrows (→ ↔), minus, ≠ ≤ ≥ (the UI's strings use them).
@@ -36,6 +37,11 @@ pub fn Fonts(comptime faces: []const Face, comptime atlas: comptime_int) type {
         var m = 0;
         for (faces) |f| m = @max(m, f.sizes.len);
         break :blk m;
+    };
+    const face_latin = comptime blk: {
+        var l: [faces.len]bool = undefined;
+        for (faces, 0..) |f, i| l[i] = f.latin;
+        break :blk l;
     };
     const face_sizes = comptime blk: {
         var s: [faces.len][]const u16 = undefined;
@@ -91,7 +97,7 @@ pub fn Fonts(comptime faces: []const Face, comptime atlas: comptime_int) type {
                 for (face.sizes, 0..) |pt, si| {
                     const px = @as(f32, @floatFromInt(pt)) * self.density;
                     var at: usize = 0;
-                    for (ranges) |rg| {
+                    for (ranges[0..if (face.latin) 1 else ranges.len]) |rg| {
                         const n: c_int = @intCast(rg[1]);
                         if (ui.stbtt_PackFontRange(&pc, ttf.ptr, 0, px, @intCast(rg[0]), n, &self.chars[fi][si][at]) == 0) return error.FontAtlasFull;
                         at += rg[1];
@@ -138,16 +144,28 @@ pub fn Fonts(comptime faces: []const Face, comptime atlas: comptime_int) type {
             return null;
         }
 
+        /// Glyph of `cp` in face `fi` ("?" for one it lacks).
+        fn glyphIn(fi: usize, cp: u21) usize {
+            const g = glyph(cp) orelse return glyph('?').?;
+            return if (face_latin[fi] and g >= ranges[0][1]) glyph('?').? else g;
+        }
+
         /// Width and line height of UTF-8 `text`, in points.
         pub fn measure(self: *const Self, text: []const u8, font_id: u16, pt: u16) [2]f32 {
+            return self.measureSpaced(text, font_id, pt, 0);
+        }
+
+        /// As `measure`, `spacing` points between letters.
+        pub fn measureSpaced(self: *const Self, text: []const u8, font_id: u16, pt: u16, spacing: f32) [2]f32 {
             const fi, const si = pick(font_id, pt);
             var w: f32 = 0;
+            var n: f32 = 0;
             var it = (std.unicode.Utf8View.init(text) catch return .{ 0, self.line[fi][si] }).iterator();
             while (it.nextCodepoint()) |cp| {
-                const g = glyph(cp) orelse glyph('?').?;
-                w += self.chars[fi][si][g].xadvance;
+                w += self.chars[fi][si][glyphIn(fi, cp)].xadvance;
+                n += 1;
             }
-            return .{ w / self.density, self.line[fi][si] };
+            return .{ w / self.density + spacing * @max(n - 1, 0), self.line[fi][si] };
         }
 
         /// Atlas pixels of baked glyph `pc`, taken from its integer box: the quad's s0…t1
@@ -160,6 +178,11 @@ pub fn Fonts(comptime faces: []const Face, comptime atlas: comptime_int) type {
 
         /// Draws `text` with its top-left at (x, y) points.
         pub fn draw(self: *const Self, r: *c.SDL_Renderer, text: []const u8, font_id: u16, pt: u16, x: f32, y: f32, rgba: [4]u8) void {
+            self.drawSpaced(r, text, font_id, pt, x, y, rgba, 0);
+        }
+
+        /// As `draw`, `spacing` points between letters.
+        pub fn drawSpaced(self: *const Self, r: *c.SDL_Renderer, text: []const u8, font_id: u16, pt: u16, x: f32, y: f32, rgba: [4]u8, spacing: f32) void {
             const fi, const si = pick(font_id, pt);
             _ = c.SDL_SetTextureColorMod(self.tex, rgba[0], rgba[1], rgba[2]);
             _ = c.SDL_SetTextureAlphaMod(self.tex, rgba[3]);
@@ -168,7 +191,7 @@ pub fn Fonts(comptime faces: []const Face, comptime atlas: comptime_int) type {
             const py: f32 = (y + self.ascent[fi][si]) * self.density;
             var it = (std.unicode.Utf8View.init(text) catch return).iterator();
             while (it.nextCodepoint()) |cp| {
-                const g = glyph(cp) orelse glyph('?').?;
+                const g = glyphIn(fi, cp);
                 var q: ui.stbtt_aligned_quad = undefined;
                 var gy = py;
                 // Whole device pixels: renderers that truncate a fractional destination
@@ -178,6 +201,7 @@ pub fn Fonts(comptime faces: []const Face, comptime atlas: comptime_int) type {
                 const src = cell(self.chars[fi][si][g]);
                 const dst: c.SDL_FRect = .{ .x = q.x0 / d, .y = q.y0 / d, .w = (q.x1 - q.x0) / d, .h = (q.y1 - q.y0) / d };
                 _ = c.SDL_RenderTexture(r, self.tex, &src, &dst);
+                px += @round(spacing * d);
             }
         }
     };

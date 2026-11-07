@@ -79,17 +79,18 @@ case-insensitive and fonts follow the edition language.
 ### Launcher
 
 Started without arguments (the macOS app, `OpenGorky.exe`, `./opengorky`), the game first
-shows a launcher window: the game folder (with a check of what was found), the version,
-and the settings below in four tabs — Play, Display, Game, Advanced. **Play** (or Enter)
-saves them to `opengorky.cfg` and starts the game; **Exit** (Esc) quits and leaves the file
-unchanged. With `launcher = 0` it is skipped; hold Shift while starting to see it anyway
-(macOS and Windows), or set the key back to `1`. It always appears while no usable game
-folder is set. Any command-line argument skips it.
+shows a launcher window. Its home view has **Play** (or Enter), the **Game** choice and the
+game folder's state (with **Choose folder** when it is not found); the gear opens the
+settings in three tabs — Display, Game, Advanced (the game folder is there too). Play saves
+the settings to `opengorky.cfg` and starts the game; Esc (back from the settings, then
+quit) or closing the window leaves the file unchanged. With `launcher = 0` it is skipped;
+hold Shift while starting to see it anyway (macOS and Windows), or set the key back to `1`.
+It always appears while no usable game folder is set. Any command-line argument skips it.
 
-The **Game** card on the Play tab chooses what Play starts: the original game, or an
-OpenGorky package (`.ogp`, a project's `dist/<id>.ogp`) found in a `mods` folder — the game
-folder's (`<game>/mods/`) or the settings folder's (below). A package plays over the chosen
-game folder's assets; one made for a newer OpenGorky is listed but cannot be started.
+The **Game** choice picks what Play starts: the original game, or an OpenGorky package
+(`.ogp`, a project's `dist/<id>.ogp`) found in a `mods` folder — the game folder's
+(`<game>/mods/`) or the settings folder's (below). A package plays over the chosen game
+folder's assets; one made for a newer OpenGorky is listed but cannot be started.
 
 ### Where files live
 
@@ -137,7 +138,7 @@ package =
 | `console` | `0` | Developer console (`` ` `` or F2) with debug commands: heal, win the battle, give items… |
 | `launcher` | `1` | Show the launcher window when started without arguments; `0` — straight into the game (Shift at startup shows it anyway) |
 | `game_path` | empty | The game folder, used when none is given at launch. Set automatically on the first launch with a path or after picking the folder |
-| `package` | empty | The OpenGorky package to play (its file name, e.g. `gorky.ogp`, in the game's or the settings folder's `mods/`), set by the launcher's Game card; empty — the original game. Not found: the original game starts |
+| `package` | empty | The OpenGorky package to play (its file name, e.g. `gorky.ogp`, in the game's or the settings folder's `mods/`), set by the launcher's Game choice; empty — the original game. Not found: the original game starts |
 
 On/off keys accept `1`/`0`, `on`/`off` or `true`/`false`.
 
@@ -193,7 +194,7 @@ plays it. Among its texts:
 - `src/texts/*.ogs` — the texts (`UiText`, `Examine`, `AreaExamine`), UTF-8.
 
 A package (`dist/<id>.ogp`) handed to players goes into `<game>/mods/` or the settings
-folder's `mods/` and is chosen on the launcher's Play tab (or passed as the first argument:
+folder's `mods/` and is chosen on the launcher's home view (or passed as the first argument:
 `opengorky-viewer gorky.ogp --play`). It finds the installed game in the game folder chosen
 in the launcher (or `$OPENGORKY_GAME`), not the author's `game` path; without one the
 viewer says so. Saves of a project restore its objects from their blocks and archetypes,
@@ -275,7 +276,7 @@ zig build viewer -- <game dir> [01_port/sprite.dat] [--image N] [--shot out.png]
 Without `--play`: `[` `]` archive, `↑` `↓` resource, `←` `→` frame, Space animate, `L` level
 mode. `--shot` renders one frame and exits (`--level`, `--scroll X,Y`, `--time MS`,
 `--hide-objects`). `--launcher-shot out.png [--launcher-tab play|display|game|advanced]`
-renders the launcher window instead (an optional game dir argument fills its folder).
+renders the launcher window instead (`play`: the home view, the others a settings tab; an optional game dir argument fills its folder).
 
 ### gorky-tool
 

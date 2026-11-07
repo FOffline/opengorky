@@ -100,13 +100,13 @@ pub fn ask(app: *App) void {
     app.proj_convert = w;
 }
 
-/// `<game>/../<title> (OpenGorky)`, else the first of `… (OpenGorky)-2`,
-/// `-3`… that is new or empty.
+/// `<game>/../<title>` (the converted game's: `Gorky 17 (OpenGorky)`), else the first of
+/// `<title>-2`, `-3`… that is new or empty.
 fn defaultFolder(io: Io, a: Allocator, game: []const u8, title: []const u8) ![]const u8 {
     const parent = std.fs.path.dirname(game) orelse ".";
     var k: usize = 1;
     while (true) : (k += 1) {
-        const p = if (k == 1) try std.fmt.allocPrint(a, "{s}/{s} (OpenGorky)", .{ parent, title }) else try std.fmt.allocPrint(a, "{s}/{s} (OpenGorky)-{d}", .{ parent, title, k });
+        const p = if (k == 1) try std.fmt.allocPrint(a, "{s}/{s}", .{ parent, title }) else try std.fmt.allocPrint(a, "{s}/{s}-{d}", .{ parent, title, k });
         if (empty(io, p) or k == 99) return p;
     }
 }
@@ -401,10 +401,10 @@ test defaultFolder {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = buf[0..try tmp.dir.realPath(io, &buf)];
     const game = try std.fmt.allocPrint(a, "{s}/Gorky", .{root});
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Gorky 17 (OpenGorky)", .{root}), try defaultFolder(io, a, game, "Gorky 17"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Gorky 17 (OpenGorky)", .{root}), try defaultFolder(io, a, game, convert.game_title));
     // An empty folder is taken, one with anything in it is not.
     try tmp.dir.createDirPath(io, "Gorky 17 (OpenGorky)");
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Gorky 17 (OpenGorky)", .{root}), try defaultFolder(io, a, game, "Gorky 17"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Gorky 17 (OpenGorky)", .{root}), try defaultFolder(io, a, game, convert.game_title));
     try tmp.dir.writeFile(io, .{ .sub_path = "Gorky 17 (OpenGorky)/x", .data = "x" });
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Gorky 17 (OpenGorky)-2", .{root}), try defaultFolder(io, a, game, "Gorky 17"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Gorky 17 (OpenGorky)-2", .{root}), try defaultFolder(io, a, game, convert.game_title));
 }

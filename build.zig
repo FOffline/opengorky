@@ -171,8 +171,8 @@ pub fn build(b: *std.Build) void {
     // `scaling = adaptive`: the riveted plate beside the 640-wide panel.
     viewer.root_module.addAnonymousImport("panel_plate_png", .{ .root_source_file = b.path("assets/panel-plate.png") });
     // The launcher window (src/viewer/app/launcher.zig): the editor's Clay and text kit,
-    // PT Sans and Oswald (OFL), icons (scripts/launcher-icons.swift), the metal texture
-    // (the concept's dark-metal.png at 640 px, JPEG).
+    // PT Sans and Oswald (OFL), icons (scripts/launcher-icons.swift), the background picture
+    // (its reference design's, the buttons painted into it removed).
     const ui = b.addTranslateC(.{
         .root_source_file = b.path("src/editor/ui.h"),
         .target = target,
@@ -192,10 +192,10 @@ pub fn build(b: *std.Build) void {
     viewer.root_module.addAnonymousImport("font_regular", .{ .root_source_file = b.path("assets/fonts/PTSans-Regular.ttf") });
     viewer.root_module.addAnonymousImport("font_bold", .{ .root_source_file = b.path("assets/fonts/PTSans-Bold.ttf") });
     viewer.root_module.addAnonymousImport("font_heading", .{ .root_source_file = b.path("assets/fonts/Oswald-Bold.ttf") });
-    for ([_][]const u8{ "home", "display", "game", "advanced", "check", "warning", "play", "close" }) |n| {
+    for ([_][]const u8{ "settings", "info", "back", "check", "warning", "play" }) |n| {
         viewer.root_module.addAnonymousImport(b.fmt("launcher_{s}", .{n}), .{ .root_source_file = b.path(b.fmt("assets/launcher/icons/{s}.png", .{n})) });
     }
-    viewer.root_module.addAnonymousImport("launcher_metal", .{ .root_source_file = b.path("assets/launcher/textures/dark-metal.jpg") });
+    viewer.root_module.addAnonymousImport("launcher_background", .{ .root_source_file = b.path("assets/launcher/textures/background.jpg") });
     // Version shown by the launcher: `-Dversion` (the dist scripts pass theirs), else
     // `git describe` as the packages' Info.plist.
     var git_exit: u8 = 0;

@@ -36,7 +36,7 @@ fn Measure(comptime F: type) type {
     return struct {
         fn f(s: ui.Clay_StringSlice, cfg: [*c]ui.Clay_TextElementConfig, user: ?*anyopaque) callconv(.c) ui.Clay_Dimensions {
             const font: *F = @ptrCast(@alignCast(user.?));
-            const d = font.measure(s.chars[0..@intCast(s.length)], cfg.*.fontId, cfg.*.fontSize);
+            const d = font.measureSpaced(s.chars[0..@intCast(s.length)], cfg.*.fontId, cfg.*.fontSize, @floatFromInt(cfg.*.letterSpacing));
             return .{ .width = d[0], .height = d[1] };
         }
     };

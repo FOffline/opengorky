@@ -181,7 +181,7 @@ pub fn draw(r: *c.SDL_Renderer, font: anytype, cmds: clay.Commands, custom: Cust
             },
             ui.CLAY_RENDER_COMMAND_TYPE_TEXT => {
                 const t = cmd.renderData.text;
-                font.draw(r, t.stringContents.chars[0..@intCast(t.stringContents.length)], t.fontId, t.fontSize, rect.x, rect.y, rgba(t.textColor));
+                font.drawSpaced(r, t.stringContents.chars[0..@intCast(t.stringContents.length)], t.fontId, t.fontSize, rect.x, rect.y, rgba(t.textColor), @floatFromInt(t.letterSpacing));
             },
             ui.CLAY_RENDER_COMMAND_TYPE_SCISSOR_START => {
                 // In render coordinates: SDL applies the render scale to the clip rectangle.

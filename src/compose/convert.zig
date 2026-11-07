@@ -70,9 +70,10 @@ pub const Progress = struct {
 };
 
 /// The project's id and title as gorky-tool and the editor convert the game (one, so the
-/// two give the same bytes).
+/// two give the same bytes); the title tells it from the original (the launcher's game
+/// choice, the main menu).
 pub const game_id = "gorky";
-pub const game_title = "Gorky 17";
+pub const game_title = "Gorky 17 (OpenGorky)";
 
 /// The report's counts as one line (gorky-tool prints it, the editor's summary shows it).
 pub fn statsLine(w: *Writer, r: *const Report) Writer.Error!void {
