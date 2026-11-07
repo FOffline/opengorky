@@ -100,12 +100,36 @@ pub const Layer = struct {
     /// coverage and, of those, the ones cut by the background depth test (only
     /// with `ss` > 1, where background depth is separate from the models).
     shadow_stat: struct { lit: u32 = 0, cut_bg: u32 = 0 } = .{},
+    /// Shadow texture sampling per canvas column and row (compositeShadow): fixed by the
+    /// layer's size, so computed once instead of per pixel.
+    shadow_x: []ShadowSample = &.{},
+    shadow_y: []ShadowSample = &.{},
 
     const BaseKey = struct { origin: [2]f32, src: DepthSource };
 
     const mask_size = 512;
     /// Side of the layer tile grid for the shadow plane (8×8, 0x54b200).
     const shadow_grid = 8;
+
+    /// Where canvas column (row) `i` samples the 256×256 shadow texture: its center in
+    /// screen pixels, the two texels and the weight of the second (bilinear, 0x406da6).
+    const ShadowSample = struct { pos: f32, frac: f32, lo: u32, hi: u32 };
+
+    /// The samples of an axis of `screen` screen pixels at `ss` canvas pixels each: the
+    /// texture coordinate is screen → mask (bx = 1 + x·510/screen), texel = bx/2.
+    fn shadowAxis(gpa: Allocator, screen: u32, ss: u32) ![]ShadowSample {
+        const out = try gpa.alloc(ShadowSample, @as(usize, screen) * ss);
+        const tn: f32 = mask_size / 2;
+        const fs: f32 = @floatFromInt(screen);
+        const ssf: f32 = @floatFromInt(ss);
+        for (out, 0..) |*o, i| {
+            const e = (num.toF32(i) + 0.5) / ssf;
+            const v = (1 + e * 2 * 255 / fs) / 2 - 0.5;
+            const iv = @floor(v);
+            o.* = .{ .pos = e, .frac = v - iv, .lo = @intFromFloat(std.math.clamp(iv, 0, tn - 1)), .hi = @intFromFloat(std.math.clamp(iv + 1, 0, tn - 1)) };
+        }
+        return out;
+    }
 
     /// Layer of `w×h` screen pixels with a canvas `ss` times finer.
     pub fn initScaled(gpa: Allocator, w: u32, h: u32, ss: u32) !Layer {
@@ -123,14 +147,20 @@ pub const Layer = struct {
         const base: []f32 = if (ss > 1) try gpa.alloc(f32, @as(usize, w) * h) else &.{};
         errdefer if (ss > 1) gpa.free(base);
         const cache = try gpa.alloc(f32, @as(usize, w) * h);
+        errdefer gpa.free(cache);
+        const shadow_x = try shadowAxis(gpa, w, ss);
+        errdefer gpa.free(shadow_x);
+        const shadow_y = try shadowAxis(gpa, h, ss);
         if (ss > 1) canvas.base = .{ .depth = base, .w = w, .ss = ss };
-        return .{ .canvas = canvas, .glow = glow, .screen = screen, .shadow = shadow, .ss = ss, .base_depth = base, .base_cache = cache };
+        return .{ .canvas = canvas, .glow = glow, .screen = screen, .shadow = shadow, .ss = ss, .base_depth = base, .base_cache = cache, .shadow_x = shadow_x, .shadow_y = shadow_y };
     }
 
     pub fn deinit(self: *Layer, gpa: Allocator) void {
         if (self.base_depth.len > 0) gpa.free(self.base_depth);
         gpa.free(self.base_cache);
         gpa.free(self.shadow);
+        gpa.free(self.shadow_x);
+        gpa.free(self.shadow_y);
         self.glow.deinit(gpa);
         self.screen.deinit(gpa);
         self.canvas.deinit(gpa);
@@ -307,9 +337,8 @@ pub const Layer = struct {
             const g = shadow_grid;
             const tw = @max(1, w / g);
             const th = @max(1, h / g);
-            const fw: f32 = @floatFromInt(w);
-            const fh: f32 = @floatFromInt(h);
-            const ssf: f32 = @floatFromInt(ss);
+            const xs = self.shadow_x;
+            const ys = self.shadow_y;
             const cov = job.cov;
             while (true) {
                 const ci = job.next.fetchAdd(1, .monotonic);
@@ -326,21 +355,18 @@ pub const Layer = struct {
                         const zg = self.shadow_tiles[tr * g + tc] orelse break;
                         var any = false;
                         for (y * ss..y * ss + ss) |hy| {
-                            // Canvas pixel center in screen pixels.
-                            const ey = (num.toF32(hy) + 0.5) / ssf;
-                            // Texture coordinate: screen → mask (bx = 1 + x·510/w), texel = bx/2.
-                            const vy = (1 + ey * 2 * 255 / fh) / 2 - 0.5;
-                            const iy = @floor(vy);
-                            const fy = vy - iy;
-                            const y0: usize = @intFromFloat(std.math.clamp(iy, 0, tn - 1));
-                            const y1: usize = @intFromFloat(std.math.clamp(iy + 1, 0, tn - 1));
+                            // Canvas pixel center in screen pixels and its texels (shadowAxis).
+                            const sy = ys[hy];
+                            const ey = sy.pos;
+                            const fy = sy.frac;
+                            const y0: usize = sy.lo;
+                            const y1: usize = sy.hi;
                             for (x * ss..x * ss + ss) |hx| {
-                                const ex = (num.toF32(hx) + 0.5) / ssf;
-                                const vx = (1 + ex * 2 * 255 / fw) / 2 - 0.5;
-                                const ix = @floor(vx);
-                                const fx = vx - ix;
-                                const x0: usize = @intFromFloat(std.math.clamp(ix, 0, tn - 1));
-                                const x1: usize = @intFromFloat(std.math.clamp(ix + 1, 0, tn - 1));
+                                const sx = xs[hx];
+                                const ex = sx.pos;
+                                const fx = sx.frac;
+                                const x0: usize = sx.lo;
+                                const x1: usize = sx.hi;
                                 const c00: f32 = @floatFromInt(cov[y0 * tn + x0]);
                                 const c10: f32 = @floatFromInt(cov[y0 * tn + x1]);
                                 const c01: f32 = @floatFromInt(cov[y1 * tn + x0]);
@@ -733,6 +759,28 @@ pub fn attachedPoints(arena: Allocator, model: *const Model, frame: u32, at: Lay
         v.* = .{ base[0] + f[0] * k, base[1] + f[1] * k, base[2] + f[2] * k };
     };
     return wpts;
+}
+
+test "shadow sampling tables are the per-pixel formula, bit for bit, at every scale" {
+    const gpa = std.testing.allocator;
+    const tn: f32 = Layer.mask_size / 2;
+    for ([_]u32{ 1, 2, 3, 4 }) |ss| for ([_]u32{ 640, 480, 853 }) |screen| {
+        const axis = try Layer.shadowAxis(gpa, screen, ss);
+        defer gpa.free(axis);
+        try std.testing.expectEqual(@as(usize, screen) * ss, axis.len);
+        const fs: f32 = @floatFromInt(screen);
+        const ssf: f32 = @floatFromInt(ss);
+        for (axis, 0..) |a, i| {
+            // The formula compositeShadow evaluated for each pixel before the tables.
+            const e = (num.toF32(i) + 0.5) / ssf;
+            const v = (1 + e * 2 * 255 / fs) / 2 - 0.5;
+            const iv = @floor(v);
+            try std.testing.expectEqual(@as(u32, @bitCast(e)), @as(u32, @bitCast(a.pos)));
+            try std.testing.expectEqual(@as(u32, @bitCast(v - iv)), @as(u32, @bitCast(a.frac)));
+            try std.testing.expectEqual(@as(u32, @intFromFloat(std.math.clamp(iv, 0, tn - 1))), a.lo);
+            try std.testing.expectEqual(@as(u32, @intFromFloat(std.math.clamp(iv + 1, 0, tn - 1))), a.hi);
+        }
+    };
 }
 
 test "shadow is solid with soft edges and skips what is above the floor plane" {
